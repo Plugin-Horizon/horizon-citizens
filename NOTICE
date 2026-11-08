@@ -1,0 +1,14 @@
+horizon-citizens
+
+Derived from Citizens (https://github.com/CitizensDev/Citizens2), licensed under the Open
+Software License 3.0 (see LICENSE). This is a modified version: the command handling, messages
+and permission nodes follow Citizens' NPCCommands, AdminCommands, plugin.yml and en.json; the
+rest is a port to Rust for the Horizon server. Changed from the original: everything, as it is
+a new implementation for a different server.
+
+Original copyright holders and licensor: the Citizens authors and contributors (fullwall and
+the contributors listed at https://github.com/CitizensDev/Citizens2/graphs/contributors).
+Citizens' source files carry no per-file copyright header; its LICENSE names no individual
+holder beyond "Citizens".
+
+Not endorsed by Citizens or its authors.

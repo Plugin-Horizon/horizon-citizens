@@ -1,0 +1,62 @@
+# horizon-citizens: player-like NPCs kept in a Citizens-compatible saves.yml.
+
+# saves.yml, relative to the server folder. Point a Paper server's Citizens and this mod at the
+# same file to share NPCs (not at the same time).
+saves-file = "plugins/Citizens/saves.yml"
+# Seconds between saves while NPCs changed; they are also saved when the server stops.
+save-delay-seconds = 5
+# Operator level needed for /npc.
+command-level = 2
+# Blocks around a player within which an NPC that is not out is spawned.
+spawn-radius = 96.0
+
+[worlds]
+# The world folder name of the overworld (level-name); <main>_nether and <main>_the_end are the
+# Nether and the End, as on Paper.
+main = "world"
+
+[worlds.extra]
+# "some_world" = "minecraft:overworld"
+
+[look-close]
+# For new NPCs.
+enabled = false
+range = 10.0
+random-look-delay-ticks = 60
+# Smallest change of a look, in degrees, that is sent.
+min-change-degrees = 2.0
+
+[hologram]
+default-line-height = 0.4
+# Height of the lowest line above a player NPC's feet (over its name tag).
+base-height = 2.3
+
+[skins]
+# An NPC without a skin wears the skin of its own name.
+try-fetch-default-skin = true
+# Look skin names up at Mojang and keep the signed texture in saves.yml. Off: clients look the
+# name up themselves.
+fetch = true
+profile-url = "https://sessionserver.mojang.com/session/minecraft/profile/"
+name-lookup-url = "https://api.mojang.com/users/profiles/minecraft/"
+
+[commands]
+# Clicks of one player on one NPC closer than this (ticks) run its commands once.
+global-cooldown-ticks = 20
+# Commands marked "player" run through "execute as <player> run ..." (with the console's rights).
+player-commands-via-execute = true
+
+[selection]
+# Right-clicking an NPC with this item selects it (operators of command-level).
+item = "minecraft:stick"
+message = "Selected [[<npc>]] (ID [[<id>]])."
+
+[talk]
+# What an NPC with text lines (`/npc text add`) says to a player who right-clicks it, one of its
+# lines picked at random. Citizens' npc.chat.format.no-targets.
+format = "[<npc>]: <text>"
+
+[messages]
+message = "&a"
+highlight = "&e"
+error = "&c"
