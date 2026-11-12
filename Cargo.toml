@@ -1,0 +1,13 @@
+[package]
+name = "mod-citizens"
+version = "0.1.0"
+edition = "2024"
+license = "OSL-3.0"
+publish = false
+
+[dependencies]
+# The launcher (or stage.py) points this at the Horizon source the game is built from.
+horizon-mod-api = { git = "https://github.com/arismoko/horizon" }
+horizon-citizens-core = { path = "core" }
+# Skin lookups at Mojang, on a thread of their own. In the engine's Cargo.lock (ureq 2.12.1).
+ureq = "2"
