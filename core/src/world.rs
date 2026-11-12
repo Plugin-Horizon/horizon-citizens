@@ -7,6 +7,8 @@
 //! [`World::take_events`].
 
 use crate::config::Config;
+use crate::tree::TreeExt;
+use crate::yaml::Node;
 use crate::look::{self, PlayerView, Rng};
 use crate::npc::{Hand, Location, NpcData, Skin};
 use crate::saves::Saves;
@@ -79,6 +81,10 @@ struct Live {
     at: Option<Location>,
     /// The last tick it took damage (to tell a death from a chunk unload).
     hurt: Option<u64>,
+    /// `Entity.moveDist` and `nextStep`: horizontal distance walked × 0.6, and where the next
+    /// footstep sounds.
+    walked: f64,
+    next_step: f64,
 }
 
 /// Walking toward a point (waypoints and `navigate_to`).
@@ -928,8 +934,8 @@ impl World {
             let speed = 0.2
                 * npc
                     .map
-                    .get_path(&["navigator", "speedmodifier"])
-                    .and_then(crate::yaml::Node::as_f64)
+                    .at(&["navigator", "speedmodifier"])
+                    .and_then(Node::as_f64)
                     .unwrap_or(1.0);
             let at = self.current_location(npc.id);
             let next = at.map_or(0, |a| nearest_point(&points, [a.x, a.y, a.z]));
@@ -981,11 +987,24 @@ impl World {
             let Some(uuid) = self.saves.get(id).and_then(NpcData::uuid) else {
                 continue;
             };
+            let mut step = false;
             if let Some(l) = self.live.get_mut(&id) {
+                if let Some(old) = &l.at {
+                    // Entity.move: moveDist grows by the horizontal distance × 0.6; past nextStep
+                    // a step sounds and nextStep becomes (int) moveDist + 1.
+                    l.walked += ((loc.x - old.x).powi(2) + (loc.z - old.z).powi(2)).sqrt() * 0.6;
+                    if l.walked > l.next_step {
+                        l.next_step = l.walked.floor() + 1.0;
+                        step = true;
+                    }
+                }
                 l.at = Some(loc.clone());
                 l.look = Some((loc.yaw, loc.pitch));
             }
             self.ops.push(Op::Console(spawn::teleport(uuid, &dimension, &loc)));
+            if step {
+                self.ops.extend(spawn::step_sound(&dimension, &loc).into_iter().map(Op::Console));
+            }
         }
         for (id, waypoint) in done {
             let following = self.walks.get(&id).is_some_and(|w| w.follow);
@@ -1001,8 +1020,8 @@ impl World {
                     * self
                         .saves
                         .get(id)
-                        .and_then(|n| n.map.get_path(&["navigator", "speedmodifier"]))
-                        .and_then(crate::yaml::Node::as_f64)
+                        .and_then(|n| n.map.at(&["navigator", "speedmodifier"]))
+                        .and_then(Node::as_f64)
                         .unwrap_or(1.0);
                 self.walks.insert(
                     id,
@@ -1077,7 +1096,7 @@ impl World {
         let new_id = self.saves.next_id();
         npc.id = new_id;
         npc.map
-            .set("uuid", crate::yaml::Node::str(&crate::ids::format_uuid(crate::ids::random_uuid())));
+            .set("uuid", Node::str(&crate::ids::format_uuid(crate::ids::random_uuid())));
         npc.set_location(&loc);
         self.saves.insert(npc);
         self.mark_dirty();
@@ -1306,6 +1325,21 @@ mod tests {
         w.tick(&[]);
         assert!(w.take_events().contains(&NpcEvent::NavigationComplete { npc: id }));
         assert!(!w.is_navigating(id));
+    }
+
+    /// Vanilla: a step every (int) moveDist + 1 with moveDist = distance × 0.6, so 10 blocks give 6.
+    #[test]
+    fn a_walking_npc_makes_footsteps() {
+        let mut w = world();
+        let id = spawned(&mut w, "Walker", 10);
+        assert!(w.navigate_to(id, [10.0, 64.0, 0.0], 0.2));
+        w.take_ops();
+        let mut steps = 0;
+        for _ in 0..60 {
+            w.tick(&[]);
+            steps += consoles(&mut w).iter().filter(|c| c.contains("block.stone.step")).count();
+        }
+        assert_eq!(steps, 6);
     }
 
     #[test]

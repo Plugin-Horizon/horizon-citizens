@@ -7,6 +7,8 @@
 //! Changed from the original: ported to Rust for Horizon. Commands that need a trait this port
 //! does not have are not registered (see GAPS.md).
 
+use crate::tree::TreeExt;
+use crate::yaml::Node;
 use crate::npc::{CommandSpec, Hand, Location, Nameplate, NpcData, Skin};
 use crate::saves::Saves;
 use crate::text;
@@ -1274,7 +1276,7 @@ fn create(w: &mut World, sender: &Sender, args: &Args) -> Res {
     }
     let id = w.create_with(&name, &kind, loc, sender.uuid, spawned, |npc| {
         if silent {
-            npc.map.set_path(&["metadata", "silent"], crate::yaml::Node::bool(true));
+            npc.map.put(&["metadata", "silent"], Node::bool(true));
         }
         if let Some(n) = nameplate {
             npc.set_nameplate(n);
@@ -1795,9 +1797,9 @@ fn skin(w: &mut World, sender: &Sender, args: &Args) -> Res {
             texture: Some(data.clone()),
             signature: Some(signature.clone()),
         });
-        npc.map.set_path(
+        npc.map.put(
             &["metadata", "cached-skin-uuid-name"],
-            crate::yaml::Node::str(&name.to_ascii_lowercase()),
+            Node::str(&name.to_ascii_lowercase()),
         );
         w.mark_dirty();
         w.respawn(id);
@@ -1933,7 +1935,7 @@ fn glowing(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let reply = if let Some(c) = colour {
         let npc = npc_mut(w, id)?;
         npc.set_team_color(c);
-        if npc.map.get_path(&["metadata", "glowing"]).is_none() {
+        if npc.map.at(&["metadata", "glowing"]).is_none() {
             npc.set_glowing(true);
         }
         let code = code_of(c).map_or(String::new(), |ch| format!("&{ch}"));
@@ -2048,12 +2050,12 @@ fn age(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let lock = args.has('l');
     let (age, locked) = {
         let npc = npc_mut(w, id)?;
-        let age = npc.map.get_path(&["traits", "age", "age"]).and_then(crate::yaml::Node::as_i64).unwrap_or(0);
-        let locked = npc.map.get_path(&["traits", "age", "locked"]).and_then(crate::yaml::Node::as_bool).unwrap_or(true);
+        let age = npc.map.at(&["traits", "age", "age"]).and_then(Node::as_i64).unwrap_or(0);
+        let locked = npc.map.at(&["traits", "age", "locked"]).and_then(Node::as_bool).unwrap_or(true);
         (age, locked)
     };
     if lock {
-        npc_mut(w, id)?.map.set_path(&["traits", "age", "locked"], crate::yaml::Node::bool(!locked));
+        npc_mut(w, id)?.map.put(&["traits", "age", "locked"], Node::bool(!locked));
         out.extend(ok(w, if !locked { M_AGE_LOCKED } else { M_AGE_UNLOCKED }, &[]));
     }
     let Some(arg) = args.words.first() else {
@@ -2080,9 +2082,9 @@ fn age(w: &mut World, sender: &Sender, args: &Args) -> Res {
     };
     {
         let npc = npc_mut(w, id)?;
-        npc.map.set_path(&["traits", "age", "age"], crate::yaml::Node::int(new_age));
-        if npc.map.get_path(&["traits", "age", "locked"]).is_none() {
-            npc.map.set_path(&["traits", "age", "locked"], crate::yaml::Node::bool(true));
+        npc.map.put(&["traits", "age", "age"], Node::int(new_age));
+        if npc.map.at(&["traits", "age", "locked"]).is_none() {
+            npc.map.put(&["traits", "age", "locked"], Node::bool(true));
         }
         npc.add_trait_name("age");
     }
@@ -2094,14 +2096,14 @@ fn age(w: &mut World, sender: &Sender, args: &Args) -> Res {
 fn powered(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let id = target_of_kind(w, sender, &["CREEPER"])?;
     let name = name_at(w, id);
-    let cur = w.saves.get(id).and_then(|n| n.map.get_path(&["traits", "powered"]).and_then(crate::yaml::Node::as_bool)).unwrap_or(false);
+    let cur = w.saves.get(id).and_then(|n| n.map.at(&["traits", "powered"]).and_then(Node::as_bool)).unwrap_or(false);
     let value = match args.value("set") {
         Some(v) => v.eq_ignore_ascii_case("true"),
         None => !cur,
     };
     {
         let npc = npc_mut(w, id)?;
-        npc.map.set_path(&["traits", "powered"], crate::yaml::Node::bool(value));
+        npc.map.put(&["traits", "powered"], Node::bool(value));
         npc.add_trait_name("powered");
     }
     w.mark_dirty();
@@ -2117,7 +2119,7 @@ fn sheep(w: &mut World, sender: &Sender, args: &Args) -> Res {
     if let Some(v) = args.value("sheared") {
         let sheared = v.eq_ignore_ascii_case("true");
         let npc = npc_mut(w, id)?;
-        npc.map.set_path(&["traits", "sheeptrait", "sheared"], crate::yaml::Node::bool(sheared));
+        npc.map.put(&["traits", "sheeptrait", "sheared"], Node::bool(sheared));
         npc.add_trait_name("sheeptrait");
         had_arg = true;
     }
@@ -2125,7 +2127,7 @@ fn sheep(w: &mut World, sender: &Sender, args: &Args) -> Res {
         let upper = v.to_ascii_uppercase().replace(' ', "_");
         if DYE_COLOURS.contains(&upper.as_str()) {
             let npc = npc_mut(w, id)?;
-            npc.map.set_path(&["traits", "sheeptrait", "color"], crate::yaml::Node::str(&upper));
+            npc.map.put(&["traits", "sheeptrait", "color"], Node::str(&upper));
             npc.add_trait_name("sheeptrait");
             out.extend(ok(w, M_SHEEP_COLOR_SET, &[&pretty_enum(&upper)]));
         } else {
@@ -2149,14 +2151,14 @@ fn slimesize(w: &mut World, sender: &Sender, args: &Args) -> Res {
         let size = w
             .saves
             .get(id)
-            .and_then(|n| n.map.get_path(&["traits", "slimesize", "size"]).and_then(crate::yaml::Node::as_i64))
+            .and_then(|n| n.map.at(&["traits", "slimesize", "size"]).and_then(Node::as_i64))
             .unwrap_or(3);
         return Ok(ok(w, M_SIZE_DESCRIBE, &[&name, &size.to_string()]));
     };
     let size = parse_i64(w, raw)?.max(-2);
     {
         let npc = npc_mut(w, id)?;
-        npc.map.set_path(&["traits", "slimesize", "size"], crate::yaml::Node::int(size));
+        npc.map.put(&["traits", "slimesize", "size"], Node::int(size));
         npc.add_trait_name("slimesize");
     }
     w.mark_dirty();
@@ -2184,7 +2186,7 @@ fn follow(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let name = name_at(w, id);
     if let Some(m) = args.value("margin") {
         let m: f64 = m.parse().map_err(|_| err(w, M_INVALID_NUMBER, &[]))?;
-        npc_mut(w, id)?.map.set_path(&["traits", "followtrait", "margin"], crate::yaml::Node::float(m));
+        npc_mut(w, id)?.map.put(&["traits", "followtrait", "margin"], Node::float(m));
         npc_mut(w, id)?.add_trait_name("followtrait");
         w.mark_dirty();
         w.cancel_follow_walk(id);
@@ -2229,7 +2231,7 @@ fn speed(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let id = target(w, sender)?;
     let v: f64 = args.words[0].parse().map_err(|_| err(w, M_INVALID_NUMBER, &[]))?;
     let v = (v as f32).abs();
-    npc_mut(w, id)?.map.set_path(&["navigator", "speedmodifier"], crate::yaml::Node::float(f64::from(v)));
+    npc_mut(w, id)?.map.put(&["navigator", "speedmodifier"], Node::float(f64::from(v)));
     w.mark_dirty();
     Ok(ok(w, M_SPEED_SET, &[&jfloat(v)]))
 }
@@ -2476,7 +2478,7 @@ fn pose(w: &mut World, sender: &Sender, args: &Args) -> Res {
         npc.set_string_list(&path, list);
         npc.add_trait_name("poses");
         if default {
-            npc.map.set_path(&["traits", "poses", "defaultPose"], crate::yaml::Node::str(&lower));
+            npc.map.put(&["traits", "poses", "defaultPose"], Node::str(&lower));
         }
         w.mark_dirty();
         Ok(())
@@ -2493,7 +2495,7 @@ fn pose(w: &mut World, sender: &Sender, args: &Args) -> Res {
         if !has(&list, name) {
             return Err(err(w, M_POSE_MISSING, &[name]));
         }
-        npc_mut(w, id)?.map.set_path(&["traits", "poses", "defaultPose"], crate::yaml::Node::str(name));
+        npc_mut(w, id)?.map.put(&["traits", "poses", "defaultPose"], Node::str(name));
         w.mark_dirty();
         out.extend(ok(w, M_POSE_DEFAULT, &[name]));
     } else if let Some(name) = args.value("assume") {
@@ -2582,9 +2584,9 @@ fn hurt(w: &mut World, sender: &Sender, args: &Args) -> Res {
 fn sound(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let id = target(w, sender)?;
     let name = name_at(w, id);
-    let get = |w: &World, k: &str| w.saves.get(id).and_then(|n| n.map.get_path(&["metadata", &format!("{k}-sound")]).and_then(crate::yaml::Node::text));
+    let get = |w: &World, k: &str| w.saves.get(id).and_then(|n| n.map.at(&["metadata", &format!("{k}-sound")]).and_then(Node::text));
     let (mut ambient, mut hurt, mut death) = (get(w, "ambient"), get(w, "hurt"), get(w, "death"));
-    let silent = |w: &World| w.saves.get(id).and_then(|n| n.map.get_path(&["metadata", "silent"]).and_then(crate::yaml::Node::as_bool)).unwrap_or(false);
+    let silent = |w: &World| w.saves.get(id).and_then(|n| n.map.at(&["metadata", "silent"]).and_then(Node::as_bool)).unwrap_or(false);
     if args.values.is_empty() && args.switches.is_empty() {
         let shown = |s: &Option<String>| s.clone().unwrap_or_else(|| "null".to_owned());
         return Ok(ok(w, M_SOUND_INFO, &[&name, &shown(&ambient), &shown(&hurt), &shown(&death), "any sound id"]));
@@ -2623,14 +2625,14 @@ fn sound(w: &mut World, sender: &Sender, args: &Args) -> Res {
         let npc = npc_mut(w, id)?;
         for (k, v) in [("ambient", &ambient), ("hurt", &hurt), ("death", &death)] {
             match v {
-                Some(v) => npc.map.set_path(&["metadata", &format!("{k}-sound")], crate::yaml::Node::str(v)),
+                Some(v) => npc.map.put(&["metadata", &format!("{k}-sound")], Node::str(v)),
                 None => {
-                    npc.map.remove_path(&["metadata", &format!("{k}-sound")]);
+                    npc.map.drop_path(&["metadata", &format!("{k}-sound")]);
                 }
             }
         }
         if let Some(s) = set_silent {
-            npc.map.set_path(&["metadata", "silent"], crate::yaml::Node::bool(s));
+            npc.map.put(&["metadata", "silent"], Node::bool(s));
         }
     }
     w.mark_dirty();
@@ -2694,11 +2696,11 @@ fn wander(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let provider = w
         .saves
         .get(id)
-        .and_then(|n| n.map.get_path(&["traits", "waypoints", "provider"]).and_then(crate::yaml::Node::text))
+        .and_then(|n| n.map.at(&["traits", "waypoints", "provider"]).and_then(Node::text))
         .unwrap_or_else(|| "linear".to_owned());
     let set_provider = |w: &mut World, name: &str| -> Result<(), Reply> {
         let npc = npc_mut(w, id)?;
-        npc.map.set_path(&["traits", "waypoints", "provider"], crate::yaml::Node::str(name));
+        npc.map.put(&["traits", "waypoints", "provider"], Node::str(name));
         npc.add_trait_name("waypoints");
         w.mark_dirty();
         w.cancel_follow_walk(id);
@@ -2722,8 +2724,8 @@ fn wander(w: &mut World, sender: &Sender, args: &Args) -> Res {
             }
             let (x, y) = (int(w, 1)?, int(w, 2)?);
             let npc = npc_mut(w, id)?;
-            npc.map.set_path(&["traits", "waypoints", "wander", "xrange"], crate::yaml::Node::int(x));
-            npc.map.set_path(&["traits", "waypoints", "wander", "yrange"], crate::yaml::Node::int(y));
+            npc.map.put(&["traits", "waypoints", "wander", "xrange"], Node::int(x));
+            npc.map.put(&["traits", "waypoints", "wander", "yrange"], Node::int(y));
             w.mark_dirty();
             Ok(ok(w, M_WANDER_RANGE, &[&x.to_string(), &y.to_string()]))
         }
@@ -2732,7 +2734,7 @@ fn wander(w: &mut World, sender: &Sender, args: &Args) -> Res {
                 return Err(usage_of(w, "wander"));
             }
             let d = int(w, 1)?;
-            npc_mut(w, id)?.map.set_path(&["traits", "waypoints", "wander", "delay"], crate::yaml::Node::int(d));
+            npc_mut(w, id)?.map.put(&["traits", "waypoints", "wander", "delay"], Node::int(d));
             w.mark_dirty();
             Ok(ok(w, M_WANDER_DELAY, &[&d.to_string()]))
         }
@@ -2741,7 +2743,7 @@ fn wander(w: &mut World, sender: &Sender, args: &Args) -> Res {
                 return Err(usage_of(w, "wander"));
             }
             let b = args.words[1].eq_ignore_ascii_case("true");
-            npc_mut(w, id)?.map.set_path(&["traits", "waypoints", "wander", "pathfind"], crate::yaml::Node::bool(b));
+            npc_mut(w, id)?.map.put(&["traits", "waypoints", "wander", "pathfind"], Node::bool(b));
             w.mark_dirty();
             Ok(ok(w, M_WANDER_PATHFIND, &[&b.to_string()]))
         }
@@ -2836,7 +2838,7 @@ fn hologram(w: &mut World, sender: &Sender, tail: &str) -> Res {
             let h: f64 = h.parse().map_err(|_| err(w, M_INVALID_NUMBER, &[]))?;
             npc_mut(w, id)?
                 .map
-                .set_path(&["traits", "hologramtrait", "lineHeight"], crate::yaml::Node::float(h));
+                .put(&["traits", "hologramtrait", "lineHeight"], Node::float(h));
             ok(w, M_HOLO_HEIGHT_SET, &[&jnum(h)])
         }
         "margintop" | "marginbottom" => {
@@ -3240,8 +3242,8 @@ fn trait_usage(w: &World, usage: &str) -> Reply {
 fn debug(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let id = target(w, sender)?;
     if args.has('p') {
-        let on = !w.saves.get(id).and_then(|n| n.map.get_path(&["navigator", "debug"])).is_some_and(|v| v.as_bool() == Some(true));
-        npc_mut(w, id)?.map.set_path(&["navigator", "debug"], crate::yaml::Node::bool(on));
+        let on = !w.saves.get(id).and_then(|n| n.map.at(&["navigator", "debug"])).is_some_and(|v| v.as_bool() == Some(true));
+        npc_mut(w, id)?.map.put(&["navigator", "debug"], Node::bool(on));
         w.mark_dirty();
         return Ok(say(w, &format!("Path debugging set to {on}")));
     }
@@ -3267,7 +3269,7 @@ fn gamemode(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let current = w
         .saves
         .get(id)
-        .and_then(|n| n.map.get_path(&["traits", "gamemodetrait", "gamemode"]))
+        .and_then(|n| n.map.at(&["traits", "gamemodetrait", "gamemode"]))
         .and_then(|v| v.text())
         .unwrap_or_else(|| "SURVIVAL".into());
     let Some(word) = args.words.first() else {
@@ -3278,7 +3280,7 @@ fn gamemode(w: &mut World, sender: &Sender, args: &Args) -> Res {
         return Err(err(w, M_GAMEMODE_INVALID, &[word]));
     }
     let npc = npc_mut(w, id)?;
-    npc.map.set_path(&["traits", "gamemodetrait", "gamemode"], crate::yaml::Node::str(&mode));
+    npc.map.put(&["traits", "gamemodetrait", "gamemode"], Node::str(&mode));
     npc.add_trait_name("gamemodetrait");
     w.mark_dirty();
     Ok(ok(w, M_GAMEMODE_SET, &[&pretty_enum(&mode)]))
@@ -3291,14 +3293,14 @@ fn flyable(w: &mut World, sender: &Sender, args: &Args) -> Res {
     if always.contains(&kind.as_str()) || kind.contains("GHAST") {
         return Err(err(w, M_REQUIREMENTS_INVALID_MOB_TYPE, &[&pretty_enum(&kind)]));
     }
-    let current = w.saves.get(id).and_then(|n| n.map.get_path(&["metadata", "flyable"])).is_some_and(|v| v.as_bool() == Some(true));
+    let current = w.saves.get(id).and_then(|n| n.map.at(&["metadata", "flyable"])).is_some_and(|v| v.as_bool() == Some(true));
     let on = match args.words.first().map(|s| s.to_ascii_lowercase()) {
         Some(v) if v == "true" => true,
         Some(v) if v == "false" => false,
         Some(_) => return Err(usage_of(w, "flyable")),
         None => !current,
     };
-    npc_mut(w, id)?.map.set_path(&["metadata", "flyable"], crate::yaml::Node::bool(on));
+    npc_mut(w, id)?.map.put(&["metadata", "flyable"], Node::bool(on));
     w.mark_dirty();
     let name = name_at(w, id);
     Ok(ok(w, if on { M_FLYABLE_SET } else { M_FLYABLE_UNSET }, &[&name]))
@@ -3652,7 +3654,7 @@ mod tests {
         let n = w.saves.get(0).unwrap();
         assert!(!n.spawned());
         assert_eq!(n.nameplate(), Nameplate::Hover);
-        assert!(n.map.get_path(&["metadata", "silent"]).is_some());
+        assert!(n.map.at(&["metadata", "silent"]).is_some());
         let r = run_ok(&mut w, &s, "npc create 12345678901234567");
         assert!(r[0].contains("cannot be longer than"), "{r:?}");
         assert_eq!(w.saves.get(1).unwrap().name(), "1234567890123456");

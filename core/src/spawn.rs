@@ -10,6 +10,7 @@ use crate::config::Config;
 use crate::ids::{derived_uuid, format_uuid, int_array_snbt};
 use crate::npc::{Location, Nameplate, NpcData, Skin};
 use crate::text;
+use crate::tree::TreeExt;
 use crate::yaml::Node;
 
 pub const TAG: &str = "citizens_npc";
@@ -118,7 +119,7 @@ pub fn npc_snbt(npc: &NpcData, uuid: u128, loc: &Location, cfg: &Config) -> Stri
     if npc.glowing() {
         parts.push("Glowing:1b".into());
     }
-    match npc.nameplate() {
+    match nameplate(npc) {
         Nameplate::Shown => {
             parts.push(format!("CustomName:{}", text::component_snbt(&npc.name())));
             parts.push("CustomNameVisible:1b".into());
@@ -136,12 +137,12 @@ pub fn npc_snbt(npc: &NpcData, uuid: u128, loc: &Location, cfg: &Config) -> Stri
         parts.push("NoAI:1b".into());
     }
     // Traits Citizens saves that show in the entity's own data (`/npc age|powered|sheep|slimesize`).
-    let tp = |trait_: &str, key: &str| npc.map.get_path(&["traits", trait_, key]);
+    let tp = |trait_: &str, key: &str| npc.map.at(&["traits", trait_, key]);
     if let Some(age) = tp("age", "age").and_then(Node::as_i64).filter(|a| *a < 0) {
         parts.push(format!("Age:{age}"));
         parts.push("IsBaby:1b".into());
     }
-    if kind == "minecraft:creeper" && npc.map.get_path(&["traits", "powered"]).and_then(Node::as_bool) == Some(true) {
+    if kind == "minecraft:creeper" && npc.map.at(&["traits", "powered"]).and_then(Node::as_bool) == Some(true) {
         parts.push("powered:1b".into());
     }
     if kind == "minecraft:sheep" {
@@ -158,13 +159,26 @@ pub fn npc_snbt(npc: &NpcData, uuid: u128, loc: &Location, cfg: &Config) -> Stri
             parts.push(format!("Size:{}", (size - 1).max(0)));
         }
     }
+    if let Some(effect) = npc.invisibility() {
+        // Citizens' persistent invisibility potion, as the entity's own effect.
+        let duration = effect.duration.map_or(-1, |d| d.min(i64::from(i32::MAX)));
+        parts.push(format!(
+            "ActiveEffects:[{{id:\"minecraft:invisibility\",amplifier:{}b,duration:{duration},show_particles:0b,show_icon:0b,ambient:0b}}]",
+            effect.amplifier
+        ));
+    }
     let equipment = npc.equipment();
     if !equipment.is_empty() {
         let items: Vec<String> = equipment
             .iter()
             .map(|e| {
+                let components = if e.components.is_empty() {
+                    String::new()
+                } else {
+                    format!(",components:{{{}}}", e.components.join(","))
+                };
                 format!(
-                    "{}:{{id:\"minecraft:{}\",count:{}}}",
+                    "{}:{{id:\"minecraft:{}\",count:{}{components}}}",
                     e.slot,
                     e.item.trim_start_matches("minecraft:"),
                     e.count
@@ -197,14 +211,39 @@ pub fn summon(npc: &NpcData, uuid: u128, dimension: &str, loc: &Location, cfg: &
     )
 }
 
-/// The hologram lines' positions and summon commands, top line first.
+/// Height of a player NPC: where Citizens puts a name hologram.
+const PLAYER_HEIGHT: f64 = 1.8;
+/// Which derived UUID the name hologram takes (the lines take 0, 1, ...).
+const NAME_HOLOGRAM: u32 = 0xFFFF;
+
+/// Whether the NPC's name is shown as a hologram instead of its name tag: a player NPC whose
+/// name (in its saved colour-code form) is longer than a game profile name may be (16). Seen on
+/// Paper: such an NPC's own name tag is hidden and a text display
+/// with the name sits at its height, raised 0.2 by the display's translation.
+pub fn name_hologram(npc: &NpcData) -> bool {
+    npc.kind().eq_ignore_ascii_case("PLAYER")
+        && npc.nameplate() != Nameplate::Hidden
+        && npc.name().chars().count() > 16
+}
+
+/// The name tag the entity itself shows (hidden while a name hologram shows the name).
+fn nameplate(npc: &NpcData) -> Nameplate {
+    if name_hologram(npc) {
+        Nameplate::Hidden
+    } else {
+        npc.nameplate()
+    }
+}
+
+/// The hologram lines' positions and summon commands, top line first; the name hologram (when
+/// there is one) last.
 pub fn hologram(npc: &NpcData, uuid: u128, dimension: &str, loc: &Location, cfg: &Config) -> Vec<(u128, String)> {
     let lines = npc.hologram_lines();
     let height = npc.hologram_line_height(cfg.hologram.default_line_height);
-    let mut y = loc.y + cfg.hologram.base_height;
-    let mut out = Vec::with_capacity(lines.len());
-    // Bottom up: the last line sits lowest.
-    for (i, line) in lines.iter().enumerate().rev() {
+    let mut y = loc.y + cfg.hologram.base_height + height;
+    let mut out = Vec::with_capacity(lines.len() + 1);
+    // Bottom up: the first line sits lowest (Citizens on Paper).
+    for (i, line) in lines.iter().enumerate() {
         y += line.margin_bottom;
         let id = derived_uuid(uuid, i as u32);
         let billboard = line.billboard.to_ascii_lowercase();
@@ -230,6 +269,27 @@ pub fn hologram(npc: &NpcData, uuid: u128, dimension: &str, loc: &Location, cfg:
         y += height + line.margin_top;
     }
     out.reverse();
+    if name_hologram(npc) {
+        let id = derived_uuid(uuid, NAME_HOLOGRAM);
+        let data = format!(
+            "{{UUID:{},Tags:[\"{HOLOGRAM_TAG}\",\"{TAG}_{}\"],text:{},billboard:\"center\",see_through:0b,shadow:1b,alignment:\"center\",transformation:{{translation:[0f,0.2f,0f],left_rotation:[0f,0f,0f,1f],right_rotation:[0f,0f,0f,1f],scale:[1f,1f,1f]}}}}",
+            int_array_snbt(id),
+            npc.id,
+            text::component_snbt(&npc.name()),
+        );
+        out.push((
+            id,
+            in_dim(
+                dimension,
+                &format!(
+                    "summon minecraft:text_display {} {} {} {data}",
+                    num(loc.x),
+                    num(loc.y + PLAYER_HEIGHT),
+                    num(loc.z)
+                ),
+            ),
+        ));
+    }
     out
 }
 
@@ -252,6 +312,43 @@ pub fn teleport(uuid: u128, dimension: &str, loc: &Location) -> String {
             num(f64::from(loc.pitch))
         ),
     )
+}
+
+/// Block groups and their step sound, for a walking NPC's footstep (`Entity.playStepSound`: the
+/// block's sound type at 15 % volume). The block under the feet (y - 0.2) picks the sound;
+/// anything else gets stone's, air included (air's sound type is stone: a walker
+/// walks on air at y 44 and Paper played 41 stone steps in 30 s).
+const STEP_SOUNDS: &[(&str, &str)] = &[
+    ("#minecraft:wool", "block.wool.step"),
+    ("#minecraft:wool_carpets", "block.wool.step"),
+    ("minecraft:grass_block", "block.grass.step"),
+    ("#minecraft:leaves", "block.grass.step"),
+    ("#minecraft:planks", "block.wood.step"),
+    ("#minecraft:logs", "block.wood.step"),
+    ("#minecraft:wooden_slabs", "block.wood.step"),
+    ("#minecraft:wooden_stairs", "block.wood.step"),
+    ("#minecraft:sand", "block.sand.step"),
+    ("minecraft:gravel", "block.gravel.step"),
+    ("minecraft:dirt", "block.gravel.step"),
+    ("minecraft:snow_block", "block.snow.step"),
+    ("minecraft:snow", "block.snow.step"),
+];
+
+/// The commands that sound one footstep of an NPC at `loc` (players hear it as a player's step).
+pub fn step_sound(dimension: &str, loc: &Location) -> Vec<String> {
+    let at = format!("{} {} {}", num(loc.x), num(loc.y), num(loc.z));
+    let below = format!("{} {} {}", num(loc.x), num(loc.y - 0.2), num(loc.z));
+    let play = |sound: &str| format!("playsound minecraft:{sound} player @a {at} 0.15 1");
+    let mut out: Vec<String> = STEP_SOUNDS
+        .iter()
+        .map(|(block, sound)| in_dim(dimension, &format!("execute if block {below} {block} run {}", play(sound))))
+        .collect();
+    let others: String = STEP_SOUNDS
+        .iter()
+        .map(|(block, _)| format!("unless block {below} {block} "))
+        .collect();
+    out.push(in_dim(dimension, &format!("execute {others}run {}", play("block.stone.step"))));
+    out
 }
 
 /// Turns the entity (head and body) without moving it.
@@ -288,7 +385,7 @@ pub fn team_join(color: &str, uuid: u128) -> String {
 
 /// `data merge` of the flags that change in place (glow, protection, gravity, name).
 pub fn refresh(npc: &NpcData, uuid: u128, dimension: &str) -> String {
-    let (name, visible) = match npc.nameplate() {
+    let (name, visible) = match nameplate(npc) {
         Nameplate::Shown => (text::component_snbt(&npc.name()), 1),
         Nameplate::Hover => (text::component_snbt(&npc.name()), 0),
         Nameplate::Hidden => ("\"\"".into(), 0),
@@ -398,10 +495,49 @@ mod tests {
         let loc = n.location().unwrap();
         let h = hologram(&n, 0x11, "minecraft:overworld", &loc, &Config::default());
         assert_eq!(h.len(), 2);
-        assert!(h[1].1.contains("text_display 100.5 48.3 -62.25"), "{}", h[1].1);
-        assert!(h[0].1.contains("text_display 100.5 48.7 -62.25"), "{}", h[0].1);
-        assert!(h[0].1.contains("\"bold\":true"));
+        // Paper's Citizens: 1.8 + 0.2 + 0.4 and one line height more.
+        // The first line is the lowest.
+        assert!(h[1].1.contains("text_display 100.5 48.4 -62.25"), "{}", h[1].1);
+        assert!(h[0].1.contains("text_display 100.5 48.8 -62.25"), "{}", h[0].1);
+        assert!(h[1].1.contains("\"bold\":true"));
         assert_ne!(h[0].0, h[1].0);
+    }
+
+    /// a "&f&lExample (Private)": the name over 16 characters is a hologram at the
+    /// NPC's height with translation 0.2, the entity's own name tag is hidden, and a line of
+    /// height 0.25 sits at 2.25 (a long-named NPC).
+    #[test]
+    fn a_long_name_is_a_hologram() {
+        let mut n = NpcData::new(4, 0x11, "&f&lExample (Private)", "PLAYER");
+        n.set_location(&npc().location().unwrap());
+        n.add_hologram_line("&c&lCLOSED");
+        n.map.put(&["traits", "hologramtrait", "lineHeight"], Node::float(0.25));
+        let loc = n.location().unwrap();
+        let h = hologram(&n, 0x11, "minecraft:overworld", &loc, &Config::default());
+        assert_eq!(h.len(), 2);
+        assert!(h[0].1.contains("text_display 100.5 48.25 -62.25"), "{}", h[0].1);
+        assert!(h[1].1.contains("text_display 100.5 47.8 -62.25"), "{}", h[1].1);
+        assert!(h[1].1.contains("translation:[0f,0.2f,0f]"), "{}", h[1].1);
+        assert!(h[1].1.contains("Example (Private)"), "{}", h[1].1);
+        let s = npc_snbt(&n, 5, &loc, &Config::default());
+        assert!(!s.contains("CustomName"), "{s}");
+        assert!(refresh(&n, 5, "minecraft:overworld").contains("CustomName:\"\",CustomNameVisible:0b"));
+        // 16 characters or fewer: the name tag, no name hologram
+        let short = npc();
+        assert!(!name_hologram(&short));
+        assert!(npc_snbt(&short, 5, &loc, &Config::default()).contains("CustomNameVisible:1b"));
+    }
+
+    /// a walker NPC: a footstep picks the sound by the block under the feet, stone by default.
+    #[test]
+    fn a_footstep_sounds_by_the_block_below() {
+        let loc = npc().location().unwrap();
+        let c = step_sound("minecraft:overworld", &loc);
+        assert!(c[0].contains("execute if block 100.5 45.8 -62.25 #minecraft:wool run playsound minecraft:block.wool.step player @a 100.5 46 -62.25 0.15 1"), "{}", c[0]);
+        let last = c.last().unwrap();
+        assert!(last.contains("unless block 100.5 45.8 -62.25 minecraft:snow run playsound minecraft:block.stone.step"), "{last}");
+        assert!(!last.contains("#minecraft:air"), "{last}");
+        assert!(last.starts_with("execute in minecraft:overworld run execute unless block"), "{last}");
     }
 
     #[test]

@@ -1,8 +1,8 @@
 # horizon-citizens
 
-> **Unofficial Rust port of Citizens for the Horizon server (https://github.com/horizon-rust/horizon). Not affiliated with or endorsed by the Citizens authors.**
+> **Unofficial Rust port of Citizens for the Horizon server (https://github.com/arismoko/horizon). Not affiliated with or endorsed by the Citizens authors.**
 
-Citizens-style NPCs as a native mod for [Horizon](https://github.com/horizon-rust/horizon), the
+Citizens-style NPCs as a native mod for [Horizon](https://github.com/arismoko/horizon), the
 Rust server/client for Minecraft 26.3: player-shaped NPCs with skins that turn to look at nearby
 players, can't be hurt, run commands when clicked and tell other mods about those clicks.
 They are kept in a `saves.yml` in the format the Citizens plugin uses, so the same NPCs can be
@@ -11,9 +11,15 @@ loaded by Citizens on a Paper server and by this mod on Horizon.
 Derived from Citizens (https://github.com/CitizensDev/Citizens2, Open Software License 3.0).
 Not affiliated with Citizens or its authors.
 
-**Status: written without a build of the game.** The core crate has unit tests and they pass; the
-glue to the game has never been compiled or run. See [STATUS.md](STATUS.md) for what to test
-first and [GAPS.md](GAPS.md) for what Horizon would need to do this more cleanly.
+> **Built for and working only with [arismoko/horizon](https://github.com/arismoko/horizon)** (the Horizon fork that carries the mod API). [horizon-rust/horizon](https://github.com/horizon-rust/horizon) is experimental for mods and not supported: the earlier version for its native hooks / horizon-mixins is frozen on the `horizon-plain` branch (work stopped on 2026-11-12).
+
+## Which Horizon
+
+This is a native trait mod: `horizon-mod.toml`, a `Cargo.toml` that depends on `horizon-mod-api`, `src/lib.rs` with the hooks, and the plugin logic in the `core/` crate (plain Rust, no engine needed for its tests).
+
+- Pin: `[native] horizon = "54090ee36c4e2c7b43b66db864220c577b94b7e0"` in `horizon-mod.toml` (game `26.3`). That is a development build of arismoko/horizon `main` plus mod API additions that are not all merged upstream yet, so a stock `main` may lack some host methods this mod calls until they land.
+- It compiled and loaded on that build and was smoke-tested there; it has not seen a long run with real players. Treat it as experimental.
+- Feature descriptions below were written for the earlier horizon-rust version; where they name engine calls (`native_*`) or old file paths, read them as descriptions only. The Known gaps list is current.
 
 ## What it does
 
@@ -21,7 +27,7 @@ first and [GAPS.md](GAPS.md) for what Horizon would need to do this more cleanly
   and `traits`, and writes the file back the same way. Keys it doesn't understand stay as they
   are, Sentinel's data included. A file that is read and then written without changes comes out
   byte for byte the same (checked on five real Citizens files of up to 62 NPCs, see
-  `api/core/examples/roundtrip.rs`, which prints no values).
+  `core/examples/roundtrip.rs`, which prints no values).
 - **Player NPCs** are `minecraft:mannequin`s, the game's own player-shaped entity: they wear a
   skin, are not in the Tab list and need no fake connection. Other types (`SNOW_GOLEM`, ...) are
   that mob with no AI. Each NPC entity gets the NPC's UUID and the tags `citizens_npc` and
@@ -73,7 +79,7 @@ first and [GAPS.md](GAPS.md) for what Horizon would need to do this more cleanly
 
 Not done: the equipment and NPC editors (GUIs), other traits (follow, poses, talk-close, shops,
 ...), other waypoint providers, pathfinding, the other ~80 `/npc` commands and `/trait`,
-`/template`, `/waypoints` (list in GAPS.md), the chat-based text editor, path recording, undo.
+`/template`, `/waypoints` (list in the Known gaps section), the chat-based text editor, path recording, undo.
 
 ## For other mods
 
@@ -97,7 +103,7 @@ An NPC that dies (not protected) stays out until `spawn(id)` brings it back.
 ## Config
 
 `config/citizens.toml`, written with the defaults on the first start
-([api/core/citizens.toml](api/core/citizens.toml)): `saves-file` (relative to the server folder;
+([core/citizens.toml](core/citizens.toml)): `saves-file` (relative to the server folder;
 default `plugins/Citizens/saves.yml`, where Citizens keeps it), `command-level`,
 `spawn-radius`, `[worlds]` (the overworld's world name; `<name>_nether` and `<name>_the_end`
 are the others, plus extra names), `[look-close]`, `[hologram]`, `[skins]`, `[commands]`,
@@ -105,16 +111,21 @@ are the others, plus extra names), `[look-close]`, `[hologram]`, `[skins]`, `[co
 
 ## Build
 
-A horizon-mixins bundle (this folder) with a trait mod package (`api`, which depends on
-`horizon-client` and on `core`) and no injections:
+Build it as a native trait mod with arismoko's launcher (see the "native mods" how-to in the arismoko/horizon docs):
 
 ```sh
-horizon-launcher native-build <this folder> ...
+horizon-launcher native-build <path to this folder> --server-output <dir> --version <tag> --trust-native-code
 ```
 
-`horizon_revision` in `horizon-mixin.toml` pins the Horizon commit the glue was written against.
-Unit tests: `cargo test` in `api/core/` with Horizon's `Cargo.lock` copied next to it (the crates
-it uses, serde, serde_json and toml, are all in it; `ureq` for the skin lookups is too).
+`--trust-native-code` is your consent to compile and run this code inside the server. The logic crate tests run without the engine: `(cd core && cargo test)`.
+
+## Known gaps
+
+What does not work yet on arismoko/horizon (each is marked `TODO(arismoko-api: ...)` in `src/lib.rs`):
+
+- The server folder is taken from the working directory (dedicated servers only).
+- `/npc`, `/citizens` and `/trait` sub-commands carry their own `citizens.*` nodes; the bare root commands carry none.
+- The `team add citizens_<colour>` console commands used for glow colours fail on arismoko's console (logged, glow colour falls back).
 
 ## Licence
 
@@ -126,8 +137,4 @@ The first version was written without opening Citizens' source. Since then the c
 (`plugin.yml`) and the traits `/npc` edits were compared with the source and ported line by line;
 the source files in question are marked as derived from Citizens. Parts of Citizens' API
 (command framework, `Paginator`, `SpigotUtil`) are not in that repository, so their behaviour
-here is a guess where STATUS.md says so. The tests use made-up NPCs.
-
-## Contributing
-
-Pull requests and improvements are always welcome! Open an issue or a PR -- direct pushes to main are disabled, every change goes through review.
+here is a guess where the Known gaps section says so. The tests use made-up NPCs.

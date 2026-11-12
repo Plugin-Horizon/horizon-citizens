@@ -3,7 +3,8 @@
 //! keys this mod understands and leave every other key (Sentinel's, poses, inventory, ...) as it is,
 //! so the file stays readable by Citizens itself.
 
-use crate::yaml::{Map, Node};
+use crate::tree::TreeExt;
+use crate::yaml::Node;
 
 /// Where an NPC stands: a Bukkit world name and a position with its rotation.
 #[derive(Clone, Debug, PartialEq)]
@@ -193,20 +194,118 @@ pub struct Equipped {
     /// The item id without namespace, as Citizens stores it (`diamond_sword`).
     pub item: String,
     pub count: i64,
+    /// The item's components as SNBT entries (`"minecraft:enchantments":{...}`), from its meta.
+    pub components: Vec<String>,
+}
+
+/// One stack of the Citizens inventory.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InventoryItem {
+    /// Its place in `traits.inventory`.
+    pub index: usize,
+    pub item: String,
+    pub count: i64,
+    pub components: Vec<String>,
+}
+
+/// A potion effect an NPC keeps (Citizens' `potioneffects`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Effect {
+    /// Ticks; `None` for good.
+    pub duration: Option<i64>,
+    pub amplifier: i64,
+}
+
+/// A stack as Citizens saves it (`type`, `amount`, `meta`, `durability`): its id without
+/// namespace, its count and its components. `None` for an empty or air stack.
+fn stack_of(m: &Node) -> Option<(String, i64, Vec<String>)> {
+    let item = m.get("type").and_then(Node::text)?.to_ascii_lowercase();
+    if item.is_empty() || item == "air" {
+        return None;
+    }
+    let count = m.get("amount").and_then(Node::as_i64).unwrap_or(1).max(1);
+    let mut components = match m.get("meta").and_then(Node::text) {
+        Some(meta) => crate::items::components_of(&meta).unwrap_or_else(|e| {
+            eprintln!("[citizens] item {item}: meta not read ({e}); the item has no components");
+            Vec::new()
+        }),
+        None => Vec::new(),
+    };
+    // Citizens' durability is the damage the item has taken (the meta's `Damage` wins if both).
+    if let Some(d) = m.get("durability").and_then(Node::as_i64)
+        && !components.iter().any(|c| c.starts_with("\"minecraft:damage\""))
+    {
+        components.push(format!("\"minecraft:damage\":{d}"));
+    }
+    Some((item, count, components))
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NpcData {
     pub id: i32,
-    pub map: Map,
+    pub map: Node,
 }
 
-fn text_at(m: &Map, path: &[&str]) -> Option<String> {
-    m.get_path(path).and_then(Node::text)
+/// A flag as Citizens reads it: a YAML boolean, or a quoted `'True'` / `'False'` (any case).
+/// The NPC keys the port reads, as `check_original` matches them (`*` one segment, trailing `**`
+/// any rest). Keys written but not read are not listed. Kept by hand: update it with the readers.
+pub const NPC_READ_PATHS: &[&str] = &[
+    "name",
+    "uuid",
+    "traitnames",
+    "navigator.speedmodifier",
+    "metadata.protected",
+    "metadata.glowing",
+    "metadata.nameplate-visible",
+    "traits.type",
+    "traits.location.world",
+    "traits.location.x",
+    "traits.location.y",
+    "traits.location.z",
+    "traits.location.yaw",
+    "traits.location.pitch",
+    "traits.location.bodyYaw",
+    "traits.spawned",
+    "traits.owner.uuid",
+    "traits.scoreboardtrait.color",
+    "traits.gravity.enabled",
+    "traits.skintrait.textureRaw",
+    "traits.skintrait.signature",
+    "traits.skintrait.skinName",
+    "traits.lookclose.enabled",
+    "traits.lookclose.range",
+    "traits.lookclose.enableRandomLook",
+    "traits.lookclose.randomYawRange.**",
+    "traits.lookclose.randomPitchRange.**",
+    "traits.hologramtrait.lines.**",
+    "traits.hologramtrait.lineHeight",
+    "traits.commandtrait.**",
+    "traits.equipment.*.type",
+    "traits.equipment.*.amount",
+    "traits.equipment.*.meta",
+    "traits.equipment.*.durability",
+    "traits.inventory.**",
+    "traits.potioneffects.persistent.invisibility.**",
+    "traits.waypoints.provider",
+    "traits.waypoints.linear.points.**",
+    "traits.text.texts.**",
+    "traits.sentinel.**",
+];
+
+fn bool_of(n: &Node) -> Option<bool> {
+    n.as_bool().or_else(|| match n.text()?.to_ascii_lowercase().as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    })
 }
 
-fn f64_at(m: &Map, path: &[&str]) -> Option<f64> {
-    m.get_path(path).and_then(Node::as_f64)
+fn text_at(m: &Node, path: &[&str]) -> Option<String> {
+    m.at(path).and_then(Node::text)
+}
+
+fn f64_at(m: &Node, path: &[&str]) -> Option<f64> {
+    m.at(path).and_then(Node::as_f64)
 }
 
 impl NpcData {
@@ -214,17 +313,17 @@ impl NpcData {
     pub fn new(id: i32, uuid: u128, name: &str, kind: &str) -> NpcData {
         let mut n = NpcData {
             id,
-            map: Map::default(),
+            map: Node::map(),
         };
-        n.map.set_path(&["metadata", "protected"], Node::bool(true));
-        n.map.set_path(&["traits", "type"], Node::str(kind));
+        n.map.put(&["metadata", "protected"], Node::bool(true));
+        n.map.put(&["traits", "type"], Node::str(kind));
         n.map
-            .set_path(&["traits", "scoreboardtrait", "tags"], Node::Seq(vec![Node::str("CITIZENS_NPC")]));
+            .put(&["traits", "scoreboardtrait", "tags"], Node::seq(vec![Node::str("CITIZENS_NPC")]));
         n.map.set("traitnames", Node::str("scoreboardtrait,spawned,type,location"));
         n.map.set("name", Node::str(name));
-        n.map.set_path(&["navigator", "usedefaultstuckaction"], Node::bool(false));
-        n.map.set_path(&["navigator", "speedmodifier"], Node::float(1.0));
-        n.map.set_path(&["navigator", "avoidwater"], Node::bool(false));
+        n.map.put(&["navigator", "usedefaultstuckaction"], Node::bool(false));
+        n.map.put(&["navigator", "speedmodifier"], Node::float(1.0));
+        n.map.put(&["navigator", "avoidwater"], Node::bool(false));
         n.map.set("uuid", Node::str(&crate::ids::format_uuid(uuid)));
         n
     }
@@ -247,7 +346,7 @@ impl NpcData {
         text_at(&self.map, &["traits", "type"]).unwrap_or_else(|| "PLAYER".into())
     }
     pub fn set_kind(&mut self, kind: &str) {
-        self.map.set_path(&["traits", "type"], Node::str(&kind.to_ascii_uppercase()));
+        self.map.put(&["traits", "type"], Node::str(&kind.to_ascii_uppercase()));
         self.add_trait_name("type");
     }
     pub fn is_player(&self) -> bool {
@@ -274,11 +373,11 @@ impl NpcData {
         }
     }
     pub fn has_trait(&self, name: &str) -> bool {
-        self.trait_names().iter().any(|n| n == name) || self.map.get_path(&["traits", name]).is_some()
+        self.trait_names().iter().any(|n| n == name) || self.map.at(&["traits", name]).is_some()
     }
 
     pub fn location(&self) -> Option<Location> {
-        let l = self.map.get_path(&["traits", "location"])?.as_map()?;
+        let l = self.map.at(&["traits", "location"])?.as_map()?;
         let yaw = l.get("yaw").and_then(Node::as_f64).unwrap_or(0.0) as f32;
         Some(Location {
             world: l.get("world").and_then(Node::text)?,
@@ -311,12 +410,12 @@ impl NpcData {
     /// `traits.spawned`: whether the NPC is out in the world (missing: yes).
     pub fn spawned(&self) -> bool {
         self.map
-            .get_path(&["traits", "spawned"])
-            .and_then(Node::as_bool)
+            .at(&["traits", "spawned"])
+            .and_then(bool_of)
             .unwrap_or(true)
     }
     pub fn set_spawned(&mut self, on: bool) {
-        self.map.set_path(&["traits", "spawned"], Node::bool(on));
+        self.map.put(&["traits", "spawned"], Node::bool(on));
         self.add_trait_name("spawned");
     }
 
@@ -347,32 +446,32 @@ impl NpcData {
     }
     /// The cached skin profile Citizens keeps beside the texture (`metadata.cached-skin-uuid`).
     pub fn set_cached_skin_profile(&mut self, uuid: u128, name: &str) {
-        self.map.set_path(
+        self.map.put(
             &["metadata", "cached-skin-uuid"],
             Node::str(&crate::ids::format_uuid(uuid)),
         );
-        self.map.set_path(&["metadata", "cached-skin-uuid-name"], Node::str(name));
+        self.map.put(&["metadata", "cached-skin-uuid-name"], Node::str(name));
     }
 
     /// `metadata.protected`: no damage, no targeting (missing: protected, Citizens' default).
     pub fn protected(&self) -> bool {
         self.map
-            .get_path(&["metadata", "protected"])
-            .and_then(Node::as_bool)
+            .at(&["metadata", "protected"])
+            .and_then(bool_of)
             .unwrap_or(true)
     }
     pub fn set_protected(&mut self, on: bool) {
-        self.map.set_path(&["metadata", "protected"], Node::bool(on));
+        self.map.put(&["metadata", "protected"], Node::bool(on));
     }
 
     pub fn glowing(&self) -> bool {
         self.map
-            .get_path(&["metadata", "glowing"])
-            .and_then(Node::as_bool)
+            .at(&["metadata", "glowing"])
+            .and_then(bool_of)
             .unwrap_or(false)
     }
     pub fn set_glowing(&mut self, on: bool) {
-        self.map.set_path(&["metadata", "glowing"], Node::bool(on));
+        self.map.put(&["metadata", "glowing"], Node::bool(on));
     }
 
     /// The scoreboard team colour (`traits.scoreboardtrait.color`, a `ChatColor` name).
@@ -381,12 +480,12 @@ impl NpcData {
     }
     pub fn set_team_color(&mut self, color: &str) {
         self.map
-            .set_path(&["traits", "scoreboardtrait", "color"], Node::str(&color.to_ascii_uppercase()));
+            .put(&["traits", "scoreboardtrait", "color"], Node::str(&color.to_ascii_uppercase()));
         self.add_trait_name("scoreboardtrait");
     }
 
     pub fn nameplate(&self) -> Nameplate {
-        match self.map.get_path(&["metadata", "nameplate-visible"]) {
+        match self.map.at(&["metadata", "nameplate-visible"]) {
             None => Nameplate::Shown,
             Some(n) => match n.text().unwrap_or_default().to_ascii_lowercase().as_str() {
                 "hover" => Nameplate::Hover,
@@ -402,17 +501,17 @@ impl NpcData {
             Nameplate::Hidden => Node::str("false"),
             Nameplate::Hover => Node::str("hover"),
         };
-        self.map.set_path(&["metadata", "nameplate-visible"], v);
+        self.map.put(&["metadata", "nameplate-visible"], v);
     }
 
     pub fn look_close(&self) -> bool {
         self.map
-            .get_path(&["traits", "lookclose", "enabled"])
-            .and_then(Node::as_bool)
+            .at(&["traits", "lookclose", "enabled"])
+            .and_then(bool_of)
             .unwrap_or(false)
     }
     pub fn set_look_close(&mut self, on: bool) {
-        self.map.set_path(&["traits", "lookclose", "enabled"], Node::bool(on));
+        self.map.put(&["traits", "lookclose", "enabled"], Node::bool(on));
         self.add_trait_name("lookclose");
     }
     /// The look-close range of this NPC, when it has its own.
@@ -420,24 +519,24 @@ impl NpcData {
         f64_at(&self.map, &["traits", "lookclose", "range"]).filter(|r| *r > 0.0)
     }
     pub fn set_look_range(&mut self, r: f64) {
-        self.map.set_path(&["traits", "lookclose", "range"], Node::float(r));
+        self.map.put(&["traits", "lookclose", "range"], Node::float(r));
     }
     pub fn random_look(&self) -> bool {
         self.map
-            .get_path(&["traits", "lookclose", "enableRandomLook"])
-            .and_then(Node::as_bool)
+            .at(&["traits", "lookclose", "enableRandomLook"])
+            .and_then(bool_of)
             .unwrap_or(false)
     }
     pub fn set_random_look(&mut self, on: bool) {
         self.map
-            .set_path(&["traits", "lookclose", "enableRandomLook"], Node::bool(on));
+            .put(&["traits", "lookclose", "enableRandomLook"], Node::bool(on));
     }
     /// Sets `randomYawRange` (`yaw`) or `randomPitchRange` as (min, max).
     pub fn set_random_range(&mut self, yaw: bool, min: f64, max: f64) {
         let key = if yaw { "randomYawRange" } else { "randomPitchRange" };
-        self.map.set_path(
+        self.map.put(
             &["traits", "lookclose", key],
-            Node::Seq(vec![Node::float(min), Node::float(max)]),
+            Node::seq(vec![Node::float(min), Node::float(max)]),
         );
         self.add_trait_name("lookclose");
     }
@@ -445,7 +544,7 @@ impl NpcData {
     pub fn random_ranges(&self) -> ((f64, f64), (f64, f64)) {
         let range = |k: &str, d: (f64, f64)| {
             self.map
-                .get_path(&["traits", "lookclose", k])
+                .at(&["traits", "lookclose", k])
                 .and_then(Node::as_seq)
                 .and_then(|s| Some((s.first()?.as_f64()?, s.get(1)?.as_f64()?)))
                 .unwrap_or(d)
@@ -457,12 +556,12 @@ impl NpcData {
     /// toggles it on to switch gravity off).
     pub fn no_gravity(&self) -> bool {
         self.map
-            .get_path(&["traits", "gravity", "enabled"])
-            .and_then(Node::as_bool)
+            .at(&["traits", "gravity", "enabled"])
+            .and_then(bool_of)
             .unwrap_or(false)
     }
     pub fn set_no_gravity(&mut self, on: bool) {
-        self.map.set_path(&["traits", "gravity", "enabled"], Node::bool(on));
+        self.map.put(&["traits", "gravity", "enabled"], Node::bool(on));
         self.add_trait_name("gravity");
     }
 
@@ -472,29 +571,29 @@ impl NpcData {
     /// Makes the server the owner (`/npc owner SERVER`): Citizens saves `owner: server` and no
     /// UUID.
     pub fn set_server_owner(&mut self) {
-        self.map.remove_path(&["traits", "owner", "uuid"]);
-        self.map.set_path(&["traits", "owner", "owner"], Node::str("server"));
+        self.map.drop_path(&["traits", "owner", "uuid"]);
+        self.map.put(&["traits", "owner", "owner"], Node::str("server"));
         self.add_trait_name("owner");
     }
     /// A list Citizens saves as `0: ..., 1: ...` (or a sequence), as text.
     pub fn string_list(&self, path: &[&str]) -> Vec<String> {
-        match self.map.get_path(path) {
-            Some(Node::Map(m)) => m.keys().filter_map(|k| m.get(k).and_then(Node::text)).collect(),
-            Some(Node::Seq(s)) => s.iter().filter_map(Node::text).collect(),
+        match self.map.at(path) {
+            Some(m) if m.is_map() => m.keys().filter_map(|k| m.get(k).and_then(Node::text)).collect(),
+            Some(s) if s.is_seq() => s.items().iter().filter_map(Node::text).collect(),
             _ => Vec::new(),
         }
     }
     /// Writes such a list as Citizens does (`0`, `1`, ...); an empty list removes it.
     pub fn set_string_list(&mut self, path: &[&str], items: &[String]) {
         if items.is_empty() {
-            self.map.remove_path(path);
+            self.map.drop_path(path);
             return;
         }
-        let mut m = Map::default();
+        let mut m = Node::map();
         for (i, item) in items.iter().enumerate() {
             m.set(&i.to_string(), Node::str(item));
         }
-        self.map.set_path(path, Node::Map(m));
+        self.map.put(path, m);
     }
     /// A sound Citizens plays for the NPC (`metadata.ambient-sound`, `hurt-sound`, `death-sound`):
     /// none when unset or empty.
@@ -513,9 +612,9 @@ impl NpcData {
         match target {
             Some(u) => self
                 .map
-                .set_path(&["traits", "followtrait", "followingUUID"], Node::str(&crate::ids::format_uuid(u))),
+                .put(&["traits", "followtrait", "followingUUID"], Node::str(&crate::ids::format_uuid(u))),
             None => {
-                self.map.remove_path(&["traits", "followtrait", "followingUUID"]);
+                self.map.drop_path(&["traits", "followtrait", "followingUUID"]);
             }
         }
         self.add_trait_name("followtrait");
@@ -531,7 +630,7 @@ impl NpcData {
         }
         let i = |k: &str, d: i64| {
             self.map
-                .get_path(&["traits", "waypoints", "wander", k])
+                .at(&["traits", "waypoints", "wander", k])
                 .and_then(Node::as_i64)
                 .unwrap_or(d)
         };
@@ -548,14 +647,14 @@ impl NpcData {
     }
     pub fn set_owner(&mut self, u: u128) {
         self.map
-            .set_path(&["traits", "owner", "uuid"], Node::str(&crate::ids::format_uuid(u)));
+            .put(&["traits", "owner", "uuid"], Node::str(&crate::ids::format_uuid(u)));
         self.add_trait_name("owner");
     }
 
     pub fn hologram_lines(&self) -> Vec<HologramLine> {
         let Some(lines) = self
             .map
-            .get_path(&["traits", "hologramtrait", "lines"])
+            .at(&["traits", "hologramtrait", "lines"])
             .and_then(Node::as_seq)
         else {
             return Vec::new();
@@ -563,9 +662,9 @@ impl NpcData {
         lines
             .iter()
             .filter_map(|l| match l {
-                Node::Map(m) => {
+                m if m.is_map() => {
                     let flag = |k: &str, d: bool| {
-                        m.get_path(&["renderer", k]).and_then(Node::as_bool).unwrap_or(d)
+                        m.at(&["renderer", k]).and_then(bool_of).unwrap_or(d)
                     };
                     Some(HologramLine {
                         text: m.get("text").and_then(Node::text)?,
@@ -578,8 +677,8 @@ impl NpcData {
                     })
                 }
                 // Older saves keep plain strings.
-                Node::Scalar(_) => Some(HologramLine::plain(l.text()?)),
-                Node::Seq(_) => None,
+                _ if matches!(l, Node::Scalar { .. }) => Some(HologramLine::plain(l.text()?)),
+                _ => None,
             })
             .collect()
     }
@@ -591,29 +690,29 @@ impl NpcData {
     }
     fn hologram_seq(&mut self) -> &mut Vec<Node> {
         let t = self.map.map_at(&["traits", "hologramtrait"]);
-        if !matches!(t.get("lines"), Some(Node::Seq(_))) {
-            t.set("lines", Node::Seq(Vec::new()));
+        if !t.get("lines").is_some_and(Node::is_seq) {
+            t.set("lines", Node::seq(Vec::new()));
         }
         match t.get_mut("lines") {
-            Some(Node::Seq(s)) => s,
+            Some(Node::Seq { items, .. }) => items,
             _ => unreachable!("just set to a sequence"),
         }
     }
     fn line_node(text: &str) -> Node {
-        let mut renderer = Map::default();
+        let mut renderer = Node::map();
         renderer.set("seeThrough", Node::bool(false));
         renderer.set("interpolationDelay", Node::int(0));
         renderer.set("shadowed", Node::bool(true));
         renderer.set("interpolationDuration", Node::int(0));
         renderer.set("billboard", Node::str("CENTER"));
-        let mut margin = Map::default();
+        let mut margin = Node::map();
         margin.set("top", Node::float(0.0));
         margin.set("bottom", Node::float(0.0));
-        let mut m = Map::default();
-        m.set("renderer", Node::Map(renderer));
-        m.set("margin", Node::Map(margin));
+        let mut m = Node::map();
+        m.set("renderer", renderer);
+        m.set("margin", margin);
         m.set("text", Node::str(text));
-        Node::Map(m)
+        m
     }
     pub fn add_hologram_line(&mut self, text: &str) {
         self.hologram_seq().push(Self::line_node(text));
@@ -623,7 +722,7 @@ impl NpcData {
     pub fn set_hologram_line(&mut self, i: usize, text: &str) -> bool {
         let seq = self.hologram_seq();
         match seq.get_mut(i) {
-            Some(Node::Map(m)) => {
+            Some(m) if m.is_map() => {
                 m.set("text", Node::str(text));
                 true
             }
@@ -649,12 +748,12 @@ impl NpcData {
         let seq = self.hologram_seq();
         match seq.get_mut(i) {
             Some(node) => {
-                if !matches!(node, Node::Map(_)) {
+                if !node.is_map() {
                     let text = node.text().unwrap_or_default();
                     *node = Self::line_node(&text);
                 }
-                if let Node::Map(m) = node {
-                    m.map_at(&["margin"]).set(if top { "top" } else { "bottom" }, Node::float(margin));
+                if node.is_map() {
+                    node.map_at(&["margin"]).set(if top { "top" } else { "bottom" }, Node::float(margin));
                 }
                 true
             }
@@ -675,20 +774,20 @@ impl NpcData {
     }
 
     pub fn commands(&self) -> Vec<NpcCommand> {
-        let Some(node) = self.map.get_path(&["traits", "commandtrait", "commands"]) else {
+        let Some(node) = self.map.at(&["traits", "commandtrait", "commands"]) else {
             return Vec::new();
         };
         let mode = self
             .map
-            .get_path(&["traits", "commandtrait", "executionmode"])
+            .at(&["traits", "commandtrait", "executionmode"])
             .and_then(Node::text)
             .unwrap_or_default();
         let entry = |key: String, n: &Node| -> Option<NpcCommand> {
             let m = n.as_map()?;
             let set = |k: &str| match m.get(k) {
                 None => false,
-                Some(Node::Seq(s)) => !s.is_empty(),
-                Some(Node::Map(x)) => !x.entries.is_empty(),
+                Some(s) if s.is_seq() => !s.items().is_empty(),
+                Some(x) if x.is_map() => !x.entries().is_empty(),
                 Some(v) => {
                     let t = v.text().unwrap_or_default();
                     let t = t.trim();
@@ -714,8 +813,8 @@ impl NpcData {
                         Hand::Unknown
                     }),
                 },
-                player: m.get("player").and_then(Node::as_bool).unwrap_or(false),
-                op: m.get("op").and_then(Node::as_bool).unwrap_or(false),
+                player: m.get("player").and_then(bool_of).unwrap_or(false),
+                op: m.get("op").and_then(bool_of).unwrap_or(false),
                 unenforced,
                 cooldown: m.get("cooldown").and_then(Node::as_i64).unwrap_or(0),
                 global_cooldown: m.get("globalcooldown").and_then(Node::as_i64).unwrap_or(0),
@@ -727,17 +826,18 @@ impl NpcData {
             })
         };
         match node {
-            Node::Map(m) => m
-                .entries
+            m if m.is_map() => m
+                .entries()
                 .iter()
-                .filter_map(|(k, v)| entry(k.name.clone(), v))
+                .filter_map(|e| entry(e.key.clone(), &e.value))
                 .collect(),
-            Node::Seq(s) => s
+            s if s.is_seq() => s
+                .items()
                 .iter()
                 .enumerate()
                 .filter_map(|(i, v)| entry(i.to_string(), v))
                 .collect(),
-            Node::Scalar(_) => Vec::new(),
+            _ => Vec::new(),
         }
     }
     /// Adds a command and returns its key. Kept in the map form when the NPC has it (or nothing),
@@ -751,7 +851,7 @@ impl NpcData {
     /// Adds a command the way Citizens saves one: only the keys that are set, and the lowest
     /// unused number as its id.
     pub fn add_command_spec(&mut self, spec: &CommandSpec) -> String {
-        let mut entry = Map::default();
+        let mut entry = Node::map();
         entry.set("command", Node::str(&spec.command));
         entry.set("hand", Node::str(spec.hand.name()));
         if spec.player {
@@ -781,85 +881,107 @@ impl NpcData {
             entry.set("experienceCost", Node::int(spec.experience_cost));
         }
         if !spec.permissions.is_empty() {
-            let mut perms = Map::default();
+            let mut perms = Node::map();
             for (i, p) in spec.permissions.iter().enumerate() {
                 perms.set(&i.to_string(), Node::str(p));
             }
-            entry.set("permissions", Node::Map(perms));
+            entry.set("permissions", perms);
         }
         self.add_trait_name("commandtrait");
         let t = self.map.map_at(&["traits", "commandtrait"]);
         match t.get_mut("commands") {
-            Some(Node::Seq(s)) => {
-                s.push(Node::Map(entry));
-                (s.len() - 1).to_string()
+            Some(Node::Seq { items, .. }) => {
+                items.push(entry);
+                (items.len() - 1).to_string()
             }
-            Some(Node::Map(m)) => {
+            Some(m) if m.is_map() => {
                 // Citizens' `getNewId`: the lowest id not in use.
                 let used: Vec<i64> = m.keys().filter_map(|k| k.parse::<i64>().ok()).collect();
                 let next = (0..).find(|i| !used.contains(i)).unwrap_or(0).to_string();
-                m.set(&next, Node::Map(entry));
+                m.set(&next, entry);
                 next
             }
             _ => {
-                let mut m = Map::default();
+                let mut m = Node::map();
                 // Citizens numbers commands from 0 (`[0]`, `[1]` in its list).
-                m.set("0", Node::Map(entry));
-                t.set("commands", Node::Map(m));
+                m.set("0", entry);
+                t.set("commands", m);
                 "0".into()
             }
         }
     }
     pub fn remove_command(&mut self, key: &str) -> bool {
-        let Some(node) = self.map.get_path(&["traits", "commandtrait", "commands"]).cloned() else {
+        let Some(node) = self.map.at(&["traits", "commandtrait", "commands"]).cloned() else {
             return false;
         };
         let t = self.map.map_at(&["traits", "commandtrait"]);
-        match node {
-            Node::Map(mut m) => {
-                let removed = m.remove(key).is_some();
-                t.set("commands", Node::Map(m));
-                removed
-            }
-            Node::Seq(mut s) => match key.parse::<usize>() {
-                Ok(i) if i < s.len() => {
-                    s.remove(i);
-                    t.set("commands", Node::Seq(s));
-                    true
+        let mut node = node;
+        if node.is_map() {
+            let removed = node.remove(key).is_some();
+            t.set("commands", node);
+            return removed;
+        }
+        match key.parse::<usize>() {
+            Ok(i) if node.is_seq() && i < node.items().len() => {
+                if let Node::Seq { items, .. } = &mut node {
+                    items.remove(i);
                 }
-                _ => false,
-            },
-            Node::Scalar(_) => false,
+                t.set("commands", node);
+                true
+            }
+            _ => false,
         }
     }
     pub fn clear_commands(&mut self) {
-        self.map.remove_path(&["traits", "commandtrait", "commands"]);
+        self.map.drop_path(&["traits", "commandtrait", "commands"]);
     }
 
     pub fn equipment(&self) -> Vec<Equipped> {
         let mut out = Vec::new();
         for (citizens, slot) in EQUIPMENT_SLOTS {
-            let Some(m) = self
-                .map
-                .get_path(&["traits", "equipment", citizens])
-                .and_then(Node::as_map)
-            else {
+            let Some(m) = self.map.at(&["traits", "equipment", citizens]) else {
                 continue;
             };
-            let Some(item) = m.get("type").and_then(Node::text) else {
-                continue;
-            };
-            let item = item.to_ascii_lowercase();
-            if item == "air" || item.is_empty() {
-                continue;
+            if let Some((item, count, components)) = stack_of(m) {
+                out.push(Equipped {
+                    slot,
+                    item,
+                    count,
+                    components,
+                });
             }
-            out.push(Equipped {
-                slot,
-                item,
-                count: m.get("amount").and_then(Node::as_i64).unwrap_or(1).max(1),
-            });
         }
         out
+    }
+    /// The Citizens inventory (`traits.inventory`, the items an NPC carries, not shown): what
+    /// Sentinel's autoswitch reads. Empty stacks are skipped; `index` is the place in the list.
+    pub fn inventory(&self) -> Vec<InventoryItem> {
+        let Some(items) = self.map.at(&["traits", "inventory"]).and_then(Node::as_seq) else {
+            return Vec::new();
+        };
+        items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, m)| {
+                let (item, count, components) = stack_of(m)?;
+                Some(InventoryItem {
+                    index,
+                    item,
+                    count,
+                    components,
+                })
+            })
+            .collect()
+    }
+    /// The invisibility potion of the NPC (`traits.potioneffects.persistent.invisibility`).
+    /// `duration` is in ticks, `None` when it lasts for good (negative or missing).
+    pub fn invisibility(&self) -> Option<Effect> {
+        let m = self.map.at(&["traits", "potioneffects", "persistent", "invisibility"])?;
+        let duration = m.get("duration").and_then(Node::as_i64).filter(|d| *d > 0);
+        Some(Effect {
+            duration,
+            amplifier: m.get("amplifier").and_then(Node::as_i64).unwrap_or(0).clamp(0, 255),
+        })
     }
     /// Sets (or with `None` empties) one Citizens equipment slot (`hand`, `helmet`, ...).
     pub fn set_equipment(&mut self, citizens_slot: &str, item: Option<(&str, i64)>) {
@@ -874,7 +996,7 @@ impl NpcData {
                 self.add_trait_name("equipment");
             }
             None => {
-                self.map.remove_path(&["traits", "equipment", citizens_slot]);
+                self.map.drop_path(&["traits", "equipment", citizens_slot]);
             }
         }
     }
@@ -883,7 +1005,7 @@ impl NpcData {
     pub fn waypoints(&self) -> Vec<Location> {
         let Some(points) = self
             .map
-            .get_path(&["traits", "waypoints", "linear", "points"])
+            .at(&["traits", "waypoints", "linear", "points"])
             .and_then(Node::as_seq)
         else {
             return Vec::new();
@@ -913,7 +1035,7 @@ impl NpcData {
     /// right-clicks the NPC.
     pub fn talk_lines(&self) -> Vec<String> {
         self.map
-            .get_path(&["traits", "text", "texts"])
+            .at(&["traits", "text", "texts"])
             .and_then(Node::as_seq)
             .map(|s| s.iter().filter_map(Node::text).collect())
             .unwrap_or_default()
@@ -925,19 +1047,19 @@ impl NpcData {
             return;
         }
         let seq = lines.iter().map(|l| Node::str(l)).collect();
-        self.map.set_path(&["traits", "text", "texts"], Node::Seq(seq));
+        self.map.put(&["traits", "text", "texts"], Node::seq(seq));
         self.add_trait_name("text");
     }
 
     fn waypoint_points(&self) -> Vec<Node> {
         self.map
-            .get_path(&["traits", "waypoints", "linear", "points"])
+            .at(&["traits", "waypoints", "linear", "points"])
             .and_then(Node::as_seq)
-            .cloned()
+            .map(<[Node]>::to_vec)
             .unwrap_or_default()
     }
     fn store_waypoint_points(&mut self, points: Vec<Node>) {
-        self.map.set_path(&["traits", "waypoints", "linear", "points"], Node::Seq(points));
+        self.map.put(&["traits", "waypoints", "linear", "points"], Node::seq(points));
         self.add_trait_name("waypoints");
     }
     /// Appends a linear waypoint (`/npc path add`), in the layout `waypoints()` reads.
@@ -970,19 +1092,19 @@ impl NpcData {
         true
     }
     pub fn clear_waypoints(&mut self) {
-        self.map.remove_path(&["traits", "waypoints", "linear", "points"]);
+        self.map.drop_path(&["traits", "waypoints", "linear", "points"]);
     }
 
     /// The raw data of a trait this mod does not interpret (`sentinel`), for other mods.
     pub fn trait_data(&self, name: &str) -> Option<&Node> {
-        self.map.get_path(&["traits", name])
+        self.map.at(&["traits", name])
     }
     pub fn set_trait_data(&mut self, name: &str, data: Node) {
-        self.map.set_path(&["traits", name], data);
+        self.map.put(&["traits", name], data);
         self.add_trait_name(name);
     }
     pub fn remove_trait(&mut self, name: &str) {
-        self.map.remove_path(&["traits", name]);
+        self.map.drop_path(&["traits", name]);
         let names: Vec<String> = self.trait_names().into_iter().filter(|n| n != name).collect();
         self.map.set("traitnames", Node::str(&names.join(",")));
     }
@@ -1063,7 +1185,7 @@ uuid: 00000000-0000-4000-8000-0000000000aa
     #[test]
     fn changes_keep_the_rest() {
         let mut n = sample();
-        let before = yaml::emit(&n.map, &[]);
+        let before = yaml::write(&n.map);
         n.set_protected(true);
         n.add_hologram_line("&a&lOPEN");
         n.set_hologram_line(0, "&c&lCLOSED");
@@ -1079,7 +1201,7 @@ uuid: 00000000-0000-4000-8000-0000000000aa
             pitch: 0.0,
             body_yaw: 45.0,
         });
-        let after = yaml::emit(&n.map, &[]);
+        let after = yaml::write(&n.map);
         assert!(after.contains("worldid"), "same world keeps its id");
         assert!(after.contains("x: 10.1235"));
         assert!(after.contains("text: '&c&lCLOSED'"));
@@ -1134,10 +1256,10 @@ uuid: 00000000-0000-4000-8000-0000000000aa
         let mut n = NpcData::new(1, 7, "A", "PLAYER");
         n.add_command("say a", Hand::Right, false, false);
         let mut cmds = n.map.map_at(&["traits", "commandtrait", "commands"]).clone();
-        if let Some(Node::Map(e)) = cmds.get_mut("0") {
+        if let Some(e) = cmds.get_mut("0").filter(|e| e.is_map()) {
             e.set("hand", Node::str("MIDDLE"));
         }
-        n.map.map_at(&["traits", "commandtrait"]).set("commands", Node::Map(cmds));
+        n.map.map_at(&["traits", "commandtrait"]).set("commands", cmds);
         let c = n.commands();
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].hand, Hand::Unknown);
@@ -1148,7 +1270,7 @@ uuid: 00000000-0000-4000-8000-0000000000aa
         // Review C7: Citizens keeps `nameplate-visible` as a string.
         let mut n = NpcData::new(1, 7, "A", "PLAYER");
         n.set_nameplate(Nameplate::Hidden);
-        let out = yaml::emit(&n.map, &[]);
+        let out = yaml::write(&n.map);
         assert!(out.contains("nameplate-visible: 'false'"), "{out}");
         assert_eq!(n.nameplate(), Nameplate::Hidden);
         n.set_nameplate(Nameplate::Shown);
@@ -1162,11 +1284,11 @@ uuid: 00000000-0000-4000-8000-0000000000aa
         n.add_command("say a", Hand::Right, false, false);
         n.add_command("say b", Hand::Right, false, false);
         let mut cmds = n.map.map_at(&["traits", "commandtrait", "commands"]).clone();
-        if let Some(Node::Map(e)) = cmds.get_mut("1") {
-            e.set("perms", Node::Seq(vec![Node::str("some.node")]));
-            e.set("n", Node::Scalar(yaml::Scalar { raw: "-1".into() }));
+        if let Some(e) = cmds.get_mut("1").filter(|e| e.is_map()) {
+            e.set("perms", Node::seq(vec![Node::str("some.node")]));
+            e.set("n", Node::int(-1));
         }
-        n.map.map_at(&["traits", "commandtrait"]).set("commands", Node::Map(cmds));
+        n.map.map_at(&["traits", "commandtrait"]).set("commands", cmds);
         let c = n.commands();
         assert_eq!(c[0].unenforced, None);
         assert_eq!(c[1].unenforced.as_deref(), Some("perms"));
@@ -1176,5 +1298,137 @@ uuid: 00000000-0000-4000-8000-0000000000aa
         assert!(n.commands().iter().all(|c| c.unenforced.is_some()));
         n.map.map_at(&["traits", "commandtrait"]).set("executionmode", Node::str("LINEAR"));
         assert_eq!(n.commands()[0].unenforced, None);
+    }
+}
+
+#[cfg(test)]
+mod citizens_item_tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::spawn;
+    use crate::yaml;
+
+    /// An NPC with a decorated sword in the hand, a potion of invisibility and two stacks in its
+    /// inventory (invented values; the blobs are synthetic).
+    fn carrier() -> NpcData {
+        let map = yaml::parse(&format!(
+            "name: Guard
+traitnames: equipment,inventory,potioneffects
+traits:
+  type: PLAYER
+  location:
+    world: stage
+    x: 1.0
+    y: 64.0
+    z: 2.0
+    yaw: 0.0
+    pitch: 0.0
+  equipment:
+    hand:
+      type: DIAMOND_SWORD
+      amount: 1
+      meta: '{BLADE}'
+    helmet:
+      type: LEATHER_HELMET
+      amount: 1
+      durability: 9
+    cosmetic_chestplate:
+      type: air
+  inventory:
+    - type: GOLDEN_APPLE
+      amount: 3
+    - type: AIR
+      amount: 1
+    - type: BOW
+      amount: 1
+      meta: '{POTION}'
+  potioneffects:
+    persistent:
+      invisibility:
+        type: INVISIBILITY
+        duration: -1
+        amplifier: 0
+        ambient: false
+        particles: false
+        icon: false
+",
+            BLADE = crate::items::fixtures::BLADE,
+            POTION = crate::items::fixtures::POTION,
+        ))
+        .unwrap();
+        NpcData { id: 3, map }
+    }
+
+    #[test]
+    fn equipment_carries_the_decoded_components() {
+        let n = carrier();
+        let eq = n.equipment();
+        assert_eq!(eq.len(), 2, "air and cosmetic slots are not shown");
+        let hand = eq.iter().find(|e| e.slot == "mainhand").unwrap();
+        assert_eq!(hand.item, "diamond_sword");
+        assert_eq!(hand.count, 1);
+        assert!(hand.components.iter().any(|c| c.starts_with("\"minecraft:custom_name\"")));
+        assert!(hand.components.iter().any(|c| c.contains("minecraft:sharpness")));
+        let head = eq.iter().find(|e| e.slot == "head").unwrap();
+        assert_eq!(head.components, vec!["\"minecraft:damage\":9".to_owned()], "durability is the damage");
+    }
+
+    #[test]
+    fn inventory_lists_the_stacks_in_order() {
+        let inv = carrier().inventory();
+        assert_eq!(inv.len(), 2, "the air stack is skipped");
+        assert_eq!((inv[0].index, inv[0].item.as_str(), inv[0].count), (0, "golden_apple", 3));
+        assert!(inv[0].components.is_empty());
+        assert_eq!((inv[1].index, inv[1].item.as_str()), (2, "bow"));
+        assert!(inv[1].components.iter().any(|c| c.contains("minecraft:potion_contents")));
+    }
+
+    #[test]
+    fn invisibility_is_read_and_summoned_as_an_effect() {
+        let n = carrier();
+        let e = n.invisibility().expect("invisible");
+        assert_eq!(e, Effect { duration: None, amplifier: 0 }, "-1 is for good");
+        let loc = Location { world: "stage".into(), x: 1.0, y: 64.0, z: 2.0, yaw: 0.0, pitch: 0.0, body_yaw: 0.0 };
+        let snbt = spawn::npc_snbt(&n, 7, &loc, &Config::default());
+        assert!(
+            snbt.contains("ActiveEffects:[{id:\"minecraft:invisibility\",amplifier:0b,duration:-1,"),
+            "{snbt}"
+        );
+        assert!(snbt.contains("hand:{id:\"minecraft:diamond_sword\",count:1,components:{"), "{snbt}");
+        assert!(!snbt.contains("cosmetic"), "cosmetic slots are not summoned");
+    }
+
+    #[test]
+    fn a_timed_invisibility_keeps_its_ticks() {
+        let mut n = carrier();
+        n.map.put(&["traits", "potioneffects", "persistent", "invisibility", "duration"], Node::int(200));
+        assert_eq!(n.invisibility().unwrap().duration, Some(200));
+    }
+
+    #[test]
+    fn a_plain_npc_has_no_effect_and_no_inventory() {
+        let n = NpcData::new(1, 2, "Plain", "PLAYER");
+        assert!(n.invisibility().is_none());
+        assert!(n.inventory().is_empty());
+    }
+
+    #[test]
+    fn a_left_click_command_does_not_run_on_a_right_click() {
+        // Commandtrait `hand` is an exact match (Citizens' `ClickType`), `player` only sets who runs it.
+        let mut n = NpcData::new(1, 2, "Hands", "PLAYER");
+        n.add_command("say left", Hand::Left, true, false);
+        n.add_command("say right", Hand::Right, false, false);
+        let cmds = n.commands();
+        let left: Vec<_> = cmds.iter().filter(|c| c.hand.matches(Hand::Left, false)).map(|c| c.command.clone()).collect();
+        let right: Vec<_> = cmds.iter().filter(|c| c.hand.matches(Hand::Right, false)).map(|c| c.command.clone()).collect();
+        assert_eq!(left, ["say left"]);
+        assert_eq!(right, ["say right"]);
+        assert!(cmds.iter().any(|c| c.hand == Hand::Left && c.player));
+    }
+
+    #[test]
+    fn the_read_paths_name_the_keys_the_port_reads() {
+        assert!(NPC_READ_PATHS.contains(&"traits.potioneffects.persistent.invisibility.**"));
+        assert!(NPC_READ_PATHS.contains(&"traits.equipment.*.meta"));
     }
 }

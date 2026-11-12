@@ -7,6 +7,7 @@
 
 use crate::npc::{Location, NpcData, Skin};
 use crate::world::{NpcEvent, Op, World};
+use crate::tree::TreeExt;
 use crate::yaml::Node;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -310,6 +311,22 @@ pub fn swing(id: i32) {
         }
     });
 }
+/// The Citizens inventory of an NPC (`traits.inventory`), for other mods (Sentinel's autoswitch).
+/// Empty when the NPC has none or does not exist.
+pub fn inventory(id: i32) -> Vec<crate::npc::InventoryItem> {
+    with_world(|w| w.saves.get(id).map(NpcData::inventory).unwrap_or_default()).unwrap_or_default()
+}
+
+/// The equipment of an NPC (the shown slots), with the components of each item.
+pub fn equipment(id: i32) -> Vec<crate::npc::Equipped> {
+    with_world(|w| w.saves.get(id).map(NpcData::equipment).unwrap_or_default()).unwrap_or_default()
+}
+
+/// The potion effect of invisibility the NPC keeps, if any.
+pub fn invisibility(id: i32) -> Option<crate::npc::Effect> {
+    with_world(|w| w.saves.get(id).and_then(NpcData::invisibility)).flatten()
+}
+
 /// Puts `item` (`minecraft:diamond_sword`, None to empty) in a Citizens equipment slot (`hand`,
 /// `off_hand`, `helmet`, `chestplate`, `leggings`, `boots`), saved and shown at once.
 pub fn set_equipment(id: i32, slot: &str, item: Option<(&str, i64)>) -> bool {
@@ -490,14 +507,14 @@ pub fn set_trait_data(id: i32, name: &str, data: Node) -> bool {
 }
 /// An NPC's metadata value (`metadata.<key>`), for flags other mods keep there.
 pub fn metadata(id: i32, key: &str) -> Option<Node> {
-    with_world(|w| w.saves.get(id).and_then(|n| n.map.get_path(&["metadata", key]).cloned())).flatten()
+    with_world(|w| w.saves.get(id).and_then(|n| n.map.at(&["metadata", key]).cloned())).flatten()
 }
 pub fn set_metadata(id: i32, key: &str, value: Node) -> bool {
     with_world(|w| {
         let Some(n) = w.saves.get_mut(id) else {
             return false;
         };
-        n.map.set_path(&["metadata", key], value);
+        n.map.put(&["metadata", key], value);
         w.mark_dirty();
         true
     })
@@ -557,9 +574,9 @@ mod tests {
         deliver(&events);
         assert_eq!(HEARD.load(Ordering::SeqCst), 1, "only the damage that went through");
 
-        let mut data = crate::yaml::Map::default();
+        let mut data = Node::map();
         data.set("respawnTime", Node::int(100));
-        assert!(set_trait_data(id, "sentinel", Node::Map(data)));
+        assert!(set_trait_data(id, "sentinel", data));
         assert_eq!(with_trait("sentinel"), vec![id]);
         assert_eq!(
             trait_data(id, "sentinel").unwrap().as_map().unwrap().get("respawnTime").unwrap().as_i64(),

@@ -28,8 +28,9 @@ min-change-degrees = 2.0
 
 [hologram]
 default-line-height = 0.4
-# Height of the lowest line above a player NPC's feet (over its name tag).
-base-height = 2.3
+# Height of the lowest line above a player NPC's feet, less one line height (Citizens on Paper:
+# line i from the bottom at 1.8 + 0.2 + line height x (i + 1)).
+base-height = 2.0
 
 [skins]
 # An NPC without a skin wears the skin of its own name.
