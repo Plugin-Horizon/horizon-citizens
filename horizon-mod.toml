@@ -2,7 +2,7 @@ id = "citizens"
 name = "Citizens"
 version = "0.1.0"
 description = "Citizens-compatible NPCs: saves.yml, look-close, clicks, /npc (clean-room port). Sentinel's NPC library."
-authors = ["CoreSMP"]
+authors = ["Plugin-Horizon contributors"]
 api = "0.2"
 capabilities = ["registries"]
 
