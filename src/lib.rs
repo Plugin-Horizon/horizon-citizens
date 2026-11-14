@@ -9,7 +9,7 @@ use mod_api::{
     AttackEntityEvent, Command, CommandArgumentValue, CommandInvocation, CommandSource, Config,
     ConfigKind, ConfigLoadingEvent, ConfigReloadingEvent, EntityInteractEvent,
     EntityJoinLevelEvent, EntityLeaveLevelEvent, Flow, Hand, Hooks, HostSide, LevelRandomHost,
-    LivingIncomingDamageEvent, PermissionLevel, PlayerRef, RegisterCommandsEvent,
+    LivingIncomingDamageEvent, PermissionLevel, PlayerCommandEvent, PlayerCommandsSentEvent, PlayerRef, RegisterCommandsEvent,
     RegisterConfigsEvent, RemovalReason, RunModCommandEvent, ServerHost, ServerStoppingEvent,
     ServerTickEvent, ServerTickPhase, Text,
 };
@@ -154,9 +154,8 @@ fn level_num(level: PermissionLevel) -> u8 {
     }
 }
 
-/// The `citizens.*` nodes a player below `command_level` holds: the help nodes unless a permissions
-/// provider says otherwise (`permission_value`), every other node through `has_permission` (the
-/// provider's answer, else operator level 2).
+/// The `citizens.*` nodes a player below `command_level` holds: through `has_permission` (the provider's
+/// answer, else operator level 2), or through a held parent node (`parents_of`, plugin.yml `children:`).
 fn granted_nodes(host: &dyn ServerHost, p: PlayerRef, level: u8, command_level: u8) -> Vec<String> {
     if level >= command_level {
         return Vec::new();
@@ -165,11 +164,10 @@ fn granted_nodes(host: &dyn ServerHost, p: PlayerRef, level: u8, command_level: 
         .iter()
         .copied()
         .filter(|node| {
-            if node.ends_with(".help") {
-                p.permission_value(host, node).unwrap_or(true)
-            } else {
-                p.has_permission(host, node)
-            }
+            p.has_permission(host, node)
+                || core::commands::parents_of(node)
+                    .iter()
+                    .any(|&parent| p.permission_value(host, parent) == Some(true))
         })
         .map(str::to_owned)
         .collect()
@@ -216,15 +214,17 @@ fn bodiless_sender(name: &str, level: PermissionLevel) -> core::world::Sender {
 
 /// The typed line, rebuilt from the parsed command: the literal path, then the present arguments
 /// in order. Citizens' usages take words, `text` (the rest of the line) and numbers only.
-fn command_line(cmd: &CommandInvocation) -> String {
+fn command_line(host: &dyn ServerHost, cmd: &CommandInvocation) -> String {
     let mut words = cmd.literals.clone();
-    words.extend(cmd.arguments.iter().map(|a| arg_text(&a.value)));
+    words.extend(cmd.arguments.iter().map(|a| arg_text(host, &a.value)));
     words.retain(|w| !w.is_empty());
     words.join(" ")
 }
 
-fn arg_text(value: &CommandArgumentValue) -> String {
+fn arg_text(host: &dyn ServerHost, value: &CommandArgumentValue) -> String {
     match value {
+        // An `item` argument (`setequipment hand stick`): the core wants the item id word.
+        CommandArgumentValue::Item(stack) => stack.item().id(host),
         CommandArgumentValue::String(s) => s.clone(),
         CommandArgumentValue::Integer(i) => i.to_string(),
         CommandArgumentValue::Number(n) => n.to_string(),
@@ -381,8 +381,12 @@ impl Citizens {
         for op in ops {
             match op {
                 core::world::Op::Console(line) => {
-                    // A `kill <uuid>` before a summon finds nothing unless a copy was saved: not an error.
-                    if !host.commands().run_command(&line) && !line.starts_with("kill ") {
+                    // A `kill <uuid>` before a summon finds nothing unless a copy was saved, and `team add` of
+                    // a team that exists (every spawn sends it) reports failure: neither is an error.
+                    if !host.commands().run_command(&line)
+                        && !line.starts_with("kill ")
+                        && !line.starts_with("team add ")
+                    {
                         eprintln!("[citizens] command failed: {line}");
                     }
                 }
@@ -473,17 +477,95 @@ impl Hooks for Citizens {
 
     fn register_commands(&self, _host: &mut dyn ServerHost, event: &mut RegisterCommandsEvent<'_>) {
         let level = lock(&self.state).cfg.command_level;
-        for usage in core::commands::usages() {
+        // The engine gates a bare root (`npc`, `citizens`) by its FIRST registered usage's node (command_nodes
+        // in the engine): register the bare roots first, so they have no node and stay open. Else `npc help`'s
+        // node gates every `npc` sub-command (retest 2026-11-14: `npc skin` granted alone = unknown command).
+        let mut usages = core::commands::usages();
+        usages.sort_by_key(|usage| usage.contains(' '));
+        for usage in usages {
             // Each sub-command path carries Citizens' node (`citizens.npc.create`, `node_of_usage`), so a
             // permissions mod can hand one to a non-operator; `level` decides when none answers. The bare
             // `/npc`, `/citizens` and `/trait` have none: a node there would gate every sub-command under it.
+            let node = core::commands::node_of_usage(&usage);
+            // The help nodes are `default: op` in plugin.yml, like every other node: no usage is level 0.
             let command = Command::op(&usage, level);
             event.commands.push(if usage.contains(' ') {
-                command.with_node(core::commands::node_of_usage(&usage))
+                command.with_node(node)
             } else {
                 command
             });
         }
+    }
+
+    /// A player without a sub-command's node is refused with Citizens' own line, not "unknown command": the
+    /// usage is hidden from them (`register_commands`). Help needs its node too (plugin.yml default: op).
+    fn player_command(&self, host: &mut dyn ServerHost, event: &mut PlayerCommandEvent<'_>) -> Flow {
+        let words: Vec<String> = event
+            .command
+            .trim_start_matches('/')
+            .split_whitespace()
+            .map(str::to_ascii_lowercase)
+            .collect();
+        let root = words.first().map(String::as_str).unwrap_or("");
+        if root != "npc" && root != "citizens" && root != "trait" {
+            return Flow::Continue;
+        }
+        let sub = if root == "trait" { "" } else { words.get(1).map(String::as_str).unwrap_or("") };
+        // A word that is no sub-command of ours is left to the engine ("unknown argument", as before).
+        if !sub.is_empty()
+            && root != "trait"
+            && !core::commands::usages()
+                .iter()
+                .any(|u| u.split_whitespace().nth(1) == Some(sub))
+        {
+            return Flow::Continue;
+        }
+        let node = core::commands::node_for(root, sub);
+        let level = lock(&self.state).cfg.command_level;
+        let allowed = host.player(event.player).is_some_and(|p| match p.permission_value(&*host, node) {
+            Some(answer) => answer,
+            None => {
+                // A held parent (`citizens.npc.*`, `citizens.*`) grants the node (plugin.yml `children:`).
+                core::commands::parents_of(node)
+                    .iter()
+                    .any(|&parent| p.permission_value(&*host, parent) == Some(true))
+                    || p.permission_level(&*host).unwrap_or(0) >= level
+            }
+        });
+        if allowed {
+            return Flow::Continue;
+        }
+        event.cancelled = true;
+        event.replies.push(Text::literal(
+            "\u{a7}cYou don't have permission to execute that command.",
+        ));
+        Flow::Cancel
+    }
+
+    /// Tab list: the `npc`, `citizens` and `trait` roots leave the tree of a player who may run none of their
+    /// usages (as Bukkit hides a command whose node the sender lacks). A player holding ONE node (or a
+    /// parent such as `citizens.npc.*`) keeps the root; the engine hides the sub-commands whose own node
+    /// they lack (`with_node` paths).
+    fn player_commands_sent(&self, host: &mut dyn ServerHost, event: &mut PlayerCommandsSentEvent<'_>) {
+        let level = lock(&self.state).cfg.command_level;
+        let usages = core::commands::usages();
+        let may_any = |host: &dyn ServerHost, root: &str| -> bool {
+            host.player(event.player).is_some_and(|p| {
+                p.permission_level(host).unwrap_or(0) >= level
+                    || usages.iter().filter(|u| u.split_whitespace().next() == Some(root)).any(|u| {
+                        let node = core::commands::node_of_usage(u);
+                        p.permission_value(host, node) == Some(true)
+                            || core::commands::parents_of(node)
+                                .iter()
+                                .any(|&parent| p.permission_value(host, parent) == Some(true))
+                    })
+            })
+        };
+        let hide: Vec<&str> = ["npc", "citizens", "trait"]
+            .into_iter()
+            .filter(|root| !may_any(&*host, root))
+            .collect();
+        event.names.retain(|n| !hide.contains(&n.to_ascii_lowercase().as_str()));
     }
 
     /// `/npc`, `/citizens` and `/trait`, typed by a player or the console (their Citizens lines).
@@ -503,7 +585,7 @@ impl Hooks for Citizens {
         }
         self.install(&*host);
         let cfg = lock(&self.state).cfg.clone();
-        let line = command_line(event.command);
+        let line = command_line(&*host, event.command);
         let console = matches!(event.source, CommandSource::Console { .. });
         let sender = match event.source {
             CommandSource::Player { player, .. } => {

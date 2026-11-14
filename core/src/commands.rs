@@ -625,6 +625,145 @@ pub fn node_of_usage(usage: &str) -> &'static str {
     node_for(root, sub)
 }
 
+/// Citizens' `plugin.yml` `children:` edges (parent, child) that lead to a node in [`NODES`], wildcards
+/// included, copied from the 2.0.44-b4268 jar. A parent granted to a player grants every child under it.
+const PARENT_EDGES: &[(&str, &str)] = &[
+    ("citizens.npc.trait.*", "citizens.npc.trait"),
+    ("citizens.admin.*", "citizens.admin"),
+    ("citizens.admin.*", "citizens.admin.remove.all"),
+    ("citizens.npc.*", "citizens.npc.age"),
+    ("citizens.npc.*", "citizens.npc.anchor"),
+    ("citizens.npc.*", "citizens.npc.command"),
+    ("citizens.npc.*", "citizens.npc.copy"),
+    ("citizens.npc.*", "citizens.npc.create"),
+    ("citizens.npc.*", "citizens.npc.create.player"),
+    ("citizens.npc.*", "citizens.npc.createall"),
+    ("citizens.npc.*", "citizens.npc.debug"),
+    ("citizens.npc.*", "citizens.npc.deselect"),
+    ("citizens.npc.*", "citizens.npc.despawn"),
+    ("citizens.npc.*", "citizens.npc.edit.equip"),
+    ("citizens.npc.*", "citizens.npc.edit.path"),
+    ("citizens.npc.*", "citizens.npc.edit.text"),
+    ("citizens.npc.*", "citizens.npc.flyable"),
+    ("citizens.npc.*", "citizens.npc.follow"),
+    ("citizens.npc.*", "citizens.npc.follow.others"),
+    ("citizens.npc.*", "citizens.npc.gamemode"),
+    ("citizens.npc.*", "citizens.npc.glowing"),
+    ("citizens.npc.*", "citizens.npc.gravity"),
+    ("citizens.npc.*", "citizens.npc.help"),
+    ("citizens.npc.*", "citizens.npc.hologram"),
+    ("citizens.npc.*", "citizens.npc.hurt"),
+    ("citizens.npc.*", "citizens.npc.id"),
+    ("citizens.npc.*", "citizens.npc.info"),
+    ("citizens.npc.*", "citizens.npc.list"),
+    ("citizens.npc.*", "citizens.npc.lookclose"),
+    ("citizens.npc.*", "citizens.npc.moveto"),
+    ("citizens.npc.*", "citizens.npc.name"),
+    ("citizens.npc.*", "citizens.npc.owner"),
+    ("citizens.npc.*", "citizens.npc.pathto"),
+    ("citizens.npc.*", "citizens.npc.playsound"),
+    ("citizens.npc.*", "citizens.npc.pose"),
+    ("citizens.npc.*", "citizens.npc.powered"),
+    ("citizens.npc.*", "citizens.npc.rename"),
+    ("citizens.npc.*", "citizens.npc.rotate"),
+    ("citizens.npc.*", "citizens.npc.select"),
+    ("citizens.npc.*", "citizens.npc.setequipment"),
+    ("citizens.npc.*", "citizens.npc.sheep"),
+    ("citizens.npc.*", "citizens.npc.skin"),
+    ("citizens.npc.*", "citizens.npc.slimesize"),
+    ("citizens.npc.*", "citizens.npc.sound"),
+    ("citizens.npc.*", "citizens.npc.spawn"),
+    ("citizens.npc.*", "citizens.npc.speed"),
+    ("citizens.npc.*", "citizens.npc.tp"),
+    ("citizens.npc.*", "citizens.npc.tphere"),
+    ("citizens.npc.*", "citizens.npc.tphere.multiworld"),
+    ("citizens.npc.*", "citizens.npc.tpto"),
+    ("citizens.npc.*", "citizens.npc.trait"),
+    ("citizens.npc.*", "citizens.npc.type"),
+    ("citizens.npc.*", "citizens.npc.vulnerable"),
+    ("citizens.npc.*", "citizens.npc.wander"),
+    ("citizens.*", "citizens.admin"),
+    ("citizens.*", "citizens.admin.remove.all"),
+    ("citizens.*", "citizens.citizens.help"),
+    ("citizens.*", "citizens.npc.age"),
+    ("citizens.*", "citizens.npc.anchor"),
+    ("citizens.*", "citizens.npc.command"),
+    ("citizens.*", "citizens.npc.copy"),
+    ("citizens.*", "citizens.npc.create"),
+    ("citizens.*", "citizens.npc.create.player"),
+    ("citizens.*", "citizens.npc.createall"),
+    ("citizens.*", "citizens.npc.debug"),
+    ("citizens.*", "citizens.npc.deselect"),
+    ("citizens.*", "citizens.npc.despawn"),
+    ("citizens.*", "citizens.npc.edit.equip"),
+    ("citizens.*", "citizens.npc.edit.path"),
+    ("citizens.*", "citizens.npc.edit.text"),
+    ("citizens.*", "citizens.npc.flyable"),
+    ("citizens.*", "citizens.npc.follow"),
+    ("citizens.*", "citizens.npc.follow.others"),
+    ("citizens.*", "citizens.npc.gamemode"),
+    ("citizens.*", "citizens.npc.glowing"),
+    ("citizens.*", "citizens.npc.gravity"),
+    ("citizens.*", "citizens.npc.help"),
+    ("citizens.*", "citizens.npc.hologram"),
+    ("citizens.*", "citizens.npc.hurt"),
+    ("citizens.*", "citizens.npc.id"),
+    ("citizens.*", "citizens.npc.info"),
+    ("citizens.*", "citizens.npc.list"),
+    ("citizens.*", "citizens.npc.lookclose"),
+    ("citizens.*", "citizens.npc.moveto"),
+    ("citizens.*", "citizens.npc.name"),
+    ("citizens.*", "citizens.npc.owner"),
+    ("citizens.*", "citizens.npc.pathto"),
+    ("citizens.*", "citizens.npc.playsound"),
+    ("citizens.*", "citizens.npc.pose"),
+    ("citizens.*", "citizens.npc.powered"),
+    ("citizens.*", "citizens.npc.rename"),
+    ("citizens.*", "citizens.npc.rotate"),
+    ("citizens.*", "citizens.npc.select"),
+    ("citizens.*", "citizens.npc.setequipment"),
+    ("citizens.*", "citizens.npc.sheep"),
+    ("citizens.*", "citizens.npc.skin"),
+    ("citizens.*", "citizens.npc.slimesize"),
+    ("citizens.*", "citizens.npc.sound"),
+    ("citizens.*", "citizens.npc.spawn"),
+    ("citizens.*", "citizens.npc.speed"),
+    ("citizens.*", "citizens.npc.tp"),
+    ("citizens.*", "citizens.npc.tphere"),
+    ("citizens.*", "citizens.npc.tphere.multiworld"),
+    ("citizens.*", "citizens.npc.tpto"),
+    ("citizens.*", "citizens.npc.trait"),
+    ("citizens.*", "citizens.npc.type"),
+    ("citizens.*", "citizens.npc.vulnerable"),
+    ("citizens.*", "citizens.npc.wander"),
+    ("citizens.npc.command.*", "citizens.npc.command"),
+    ("citizens.npc.tphere.*", "citizens.npc.tphere"),
+    ("citizens.npc.tphere.*", "citizens.npc.tphere.multiworld"),
+    ("citizens.npc.edit.*", "citizens.npc.edit.equip"),
+    ("citizens.npc.edit.*", "citizens.npc.edit.path"),
+    ("citizens.npc.edit.*", "citizens.npc.edit.text"),
+    ("citizens.npc.create.*", "citizens.npc.create"),
+    ("citizens.npc.create.*", "citizens.npc.create.player"),
+    ("citizens.npc.follow.*", "citizens.npc.follow"),
+    ("citizens.npc.follow.*", "citizens.npc.follow.others"),
+];
+
+/// The nodes above `node` in the tree (`citizens.npc.skin` has `citizens.npc.*` and `citizens.*`), nearest
+/// first in the order they are found. A player holding one of them holds `node` (`PARENT_EDGES`).
+pub fn parents_of(node: &str) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    let mut todo: Vec<&str> = vec![node];
+    while let Some(current) = todo.pop() {
+        for &(parent, child) in PARENT_EDGES {
+            if child == current && !out.contains(&parent) {
+                out.push(parent);
+                todo.push(parent);
+            }
+        }
+    }
+    out
+}
+
 /// Whether a sender may use `node`. Operators of `command_level` and above always may, as before;
 /// others need the node, or `citizens.admin`, granted by the permissions hook.
 pub fn allowed(sender: &Sender, command_level: u8, node: &str) -> bool {
@@ -1194,8 +1333,39 @@ fn max_name_length(kind: &str) -> usize {
     if kind.eq_ignore_ascii_case("PLAYER") { 16 } else { 256 }
 }
 
+/// The entity types Citizens accepts for `--type` and `npc type`, in lower case: the names its
+/// `citizens.npc.create.<type>` nodes list in plugin.yml (Citizens 2.0.44), plus the older Bukkit names
+/// that `spawn::entity_kind` maps. Any other word is refused with the invalid-type line.
+const ENTITY_TYPES: &[&str] = &[
+    "acacia_boat", "acacia_chest_boat", "allay", "area_effect_cloud", "armadillo", "armor_stand", "arrow",
+    "axolotl", "bamboo_chest_raft", "bamboo_raft", "bat", "bee", "birch_boat", "birch_chest_boat", "blaze",
+    "block_display", "bogged", "breeze", "breeze_wind_charge", "camel", "camel_husk", "cat", "cave_spider",
+    "cherry_boat", "cherry_chest_boat", "chest_minecart", "chicken", "cod", "command_block_minecart",
+    "copper_golem", "cow", "creaking", "creeper", "dark_oak_boat", "dark_oak_chest_boat", "dolphin", "donkey",
+    "dragon_fireball", "drowned", "egg", "elder_guardian", "end_crystal", "ender_dragon", "ender_pearl",
+    "enderman", "endermite", "evoker", "evoker_fangs", "experience_bottle", "experience_orb", "eye_of_ender",
+    "falling_block", "fireball", "firework_rocket", "fishing_bobber", "fox", "frog", "furnace_minecart",
+    "ghast", "giant", "glow_item_frame", "glow_squid", "goat", "guardian", "happy_ghast", "hoglin",
+    "hopper_minecart", "horse", "husk", "illusioner", "interaction", "iron_golem", "item", "item_display",
+    "item_frame", "jungle_boat", "jungle_chest_boat", "leash_knot", "lightning_bolt", "lingering_potion",
+    "llama", "llama_spit", "magma_cube", "mangrove_boat", "mangrove_chest_boat", "mannequin", "marker",
+    "minecart", "mooshroom", "mule", "nautilus", "oak_boat", "oak_chest_boat", "ocelot",
+    "ominous_item_spawner", "painting", "pale_oak_boat", "pale_oak_chest_boat", "panda", "parched", "parrot",
+    "phantom", "pig", "piglin", "piglin_brute", "pillager", "player", "polar_bear", "pufferfish", "rabbit",
+    "ravager", "salmon", "sheep", "shulker", "shulker_bullet", "silverfish", "skeleton", "skeleton_horse",
+    "slime", "small_fireball", "sniffer", "snow_golem", "snowball", "spawner_minecart", "spectral_arrow",
+    "spider", "splash_potion", "spruce_boat", "spruce_chest_boat", "squid", "stray", "strider", "tadpole",
+    "text_display", "tnt", "tnt_minecart", "trader_llama", "trident", "tropical_fish", "turtle", "vex",
+    "villager", "vindicator", "wandering_trader", "warden", "wind_charge", "witch", "wither",
+    "wither_skeleton", "wither_skull", "wolf", "zoglin", "zombie", "zombie_horse", "zombie_nautilus",
+    "zombie_villager", "zombified_piglin",
+    // Older Bukkit names (`spawn::entity_kind` maps them).
+    "snowman", "mushroom_cow", "pig_zombie", "villager_golem",
+];
+
+/// Whether `t` names an entity type, in any case (Bukkit's `EntityType` names, see [`ENTITY_TYPES`]).
 fn valid_type(t: &str) -> bool {
-    !t.is_empty() && t.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    ENTITY_TYPES.contains(&t.to_ascii_lowercase().as_str())
 }
 
 /// Cuts a name to Citizens' length limit, telling the sender; the length counts without colours.
@@ -1769,7 +1939,7 @@ fn skin(w: &mut World, sender: &Sender, args: &Args) -> Res {
         npc_mut(w, id)?.set_skin(&Skin::default());
         w.mark_dirty();
         w.respawn(id);
-        return Ok(ok(w, M_SKIN_CLEARED, &[]));
+        return Ok(ok(w, M_SKIN_CLEARED, &[&npc_name]));
     }
     if args.has_value("url") || args.has_value("file") {
         let what = args.value("url").or_else(|| args.value("file")).unwrap_or("");
