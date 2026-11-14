@@ -218,7 +218,7 @@ const NAME_HOLOGRAM: u32 = 0xFFFF;
 
 /// Whether the NPC's name is shown as a hologram instead of its name tag: a player NPC whose
 /// name (in its saved colour-code form) is longer than a game profile name may be (16). Seen on
-/// Paper: such an NPC's own name tag is hidden and a text display
+/// Paper (rec_lobby, rec_lobby_winter): such an NPC's own name tag is hidden and a text display
 /// with the name sits at its height, raised 0.2 by the display's translation.
 pub fn name_hologram(npc: &NpcData) -> bool {
     npc.kind().eq_ignore_ascii_case("PLAYER")
@@ -242,7 +242,7 @@ pub fn hologram(npc: &NpcData, uuid: u128, dimension: &str, loc: &Location, cfg:
     let height = npc.hologram_line_height(cfg.hologram.default_line_height);
     let mut y = loc.y + cfg.hologram.base_height + height;
     let mut out = Vec::with_capacity(lines.len() + 1);
-    // Bottom up: the first line sits lowest (Citizens on Paper).
+    // Bottom up: the first line sits lowest (Citizens on Paper, seen on rec_lobby).
     for (i, line) in lines.iter().enumerate() {
         y += line.margin_bottom;
         let id = derived_uuid(uuid, i as u32);
@@ -316,7 +316,7 @@ pub fn teleport(uuid: u128, dimension: &str, loc: &Location) -> String {
 
 /// Block groups and their step sound, for a walking NPC's footstep (`Entity.playStepSound`: the
 /// block's sound type at 15 % volume). The block under the feet (y - 0.2) picks the sound;
-/// anything else gets stone's, air included (air's sound type is stone: a walker
+/// anything else gets stone's, air included (air's sound type is stone: rec_lobby's walker
 /// walks on air at y 44 and Paper played 41 stone steps in 30 s).
 const STEP_SOUNDS: &[(&str, &str)] = &[
     ("#minecraft:wool", "block.wool.step"),
@@ -503,12 +503,12 @@ mod tests {
         assert_ne!(h[0].0, h[1].0);
     }
 
-    /// a "&f&lExample (Private)": the name over 16 characters is a hologram at the
+    /// rec_lobby's "&f&lMenahem (Private)": the name over 16 characters is a hologram at the
     /// NPC's height with translation 0.2, the entity's own name tag is hidden, and a line of
-    /// height 0.25 sits at 2.25 (a long-named NPC).
+    /// height 0.25 sits at 2.25 (rec_lobby_winter's FRONTIER NPC).
     #[test]
     fn a_long_name_is_a_hologram() {
-        let mut n = NpcData::new(4, 0x11, "&f&lExample (Private)", "PLAYER");
+        let mut n = NpcData::new(4, 0x11, "&f&lMenahem (Private)", "PLAYER");
         n.set_location(&npc().location().unwrap());
         n.add_hologram_line("&c&lCLOSED");
         n.map.put(&["traits", "hologramtrait", "lineHeight"], Node::float(0.25));
@@ -518,7 +518,7 @@ mod tests {
         assert!(h[0].1.contains("text_display 100.5 48.25 -62.25"), "{}", h[0].1);
         assert!(h[1].1.contains("text_display 100.5 47.8 -62.25"), "{}", h[1].1);
         assert!(h[1].1.contains("translation:[0f,0.2f,0f]"), "{}", h[1].1);
-        assert!(h[1].1.contains("Example (Private)"), "{}", h[1].1);
+        assert!(h[1].1.contains("Menahem (Private)"), "{}", h[1].1);
         let s = npc_snbt(&n, 5, &loc, &Config::default());
         assert!(!s.contains("CustomName"), "{s}");
         assert!(refresh(&n, 5, "minecraft:overworld").contains("CustomName:\"\",CustomNameVisible:0b"));
@@ -528,7 +528,7 @@ mod tests {
         assert!(npc_snbt(&short, 5, &loc, &Config::default()).contains("CustomNameVisible:1b"));
     }
 
-    /// a walker NPC: a footstep picks the sound by the block under the feet, stone by default.
+    /// rec_lobby's walker #30: a footstep picks the sound by the block under the feet, stone by default.
     #[test]
     fn a_footstep_sounds_by_the_block_below() {
         let loc = npc().location().unwrap();
