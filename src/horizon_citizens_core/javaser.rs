@@ -411,7 +411,7 @@ impl Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::items::{base64_decode, fixtures::POTION};
+    use crate::horizon_citizens_core::items::{base64_decode, fixtures::POTION};
 
     #[test]
     fn reads_the_bukkit_wrapper_and_its_map() {
@@ -427,7 +427,7 @@ mod tests {
 
     #[test]
     fn integers_in_a_map_are_boxed_objects() {
-        let bytes = base64_decode(crate::items::fixtures::BLADE).unwrap();
+        let bytes = base64_decode(crate::horizon_citizens_core::items::fixtures::BLADE).unwrap();
         let v = read(&bytes).unwrap();
         let entries = v.as_object().unwrap().field("map").unwrap().map_entries().unwrap();
         let (_, enchants) = entries.iter().find(|(k, _)| k.as_str() == Some("enchants")).unwrap();

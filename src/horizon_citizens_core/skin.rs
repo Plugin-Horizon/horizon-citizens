@@ -2,7 +2,7 @@
 //! `textures` property (`sessionserver.mojang.com`, `?unsigned=false`). The HTTP calls are the
 //! glue's (off the server thread); this reads the answers.
 
-use crate::config::Skins;
+use crate::horizon_citizens_core::config::Skins;
 use serde_json::Value;
 
 pub fn name_url(cfg: &Skins, name: &str) -> String {
@@ -16,7 +16,7 @@ pub fn profile_url(cfg: &Skins, id: u128) -> String {
 /// `{"id": "<32 hex>", "name": "..."}` -> (id, name with its real case).
 pub fn parse_name_lookup(body: &str) -> Option<(u128, String)> {
     let v: Value = serde_json::from_str(body).ok()?;
-    let id = crate::ids::parse_uuid(v.get("id")?.as_str()?)?;
+    let id = crate::horizon_citizens_core::ids::parse_uuid(v.get("id")?.as_str()?)?;
     Some((id, v.get("name")?.as_str()?.to_owned()))
 }
 

@@ -3,8 +3,8 @@
 //! keys this mod understands and leave every other key (Sentinel's, poses, inventory, ...) as it is,
 //! so the file stays readable by Citizens itself.
 
-use crate::tree::TreeExt;
-use crate::yaml::Node;
+use crate::horizon_citizens_core::tree::TreeExt;
+use crate::horizon_citizens_core::yaml::Node;
 
 /// Where an NPC stands: a Bukkit world name and a position with its rotation.
 #[derive(Clone, Debug, PartialEq)]
@@ -225,7 +225,7 @@ fn stack_of(m: &Node) -> Option<(String, i64, Vec<String>)> {
     }
     let count = m.get("amount").and_then(Node::as_i64).unwrap_or(1).max(1);
     let mut components = match m.get("meta").and_then(Node::text) {
-        Some(meta) => crate::items::components_of(&meta).unwrap_or_else(|e| {
+        Some(meta) => crate::horizon_citizens_core::items::components_of(&meta).unwrap_or_else(|e| {
             eprintln!("[citizens] item {item}: meta not read ({e}); the item has no components");
             Vec::new()
         }),
@@ -324,7 +324,7 @@ impl NpcData {
         n.map.put(&["navigator", "usedefaultstuckaction"], Node::bool(false));
         n.map.put(&["navigator", "speedmodifier"], Node::float(1.0));
         n.map.put(&["navigator", "avoidwater"], Node::bool(false));
-        n.map.set("uuid", Node::str(&crate::ids::format_uuid(uuid)));
+        n.map.set("uuid", Node::str(&crate::horizon_citizens_core::ids::format_uuid(uuid)));
         n
     }
 
@@ -335,10 +335,10 @@ impl NpcData {
         self.map.set("name", Node::str(name));
     }
     pub fn uuid(&self) -> Option<u128> {
-        text_at(&self.map, &["uuid"]).and_then(|s| crate::ids::parse_uuid(&s))
+        text_at(&self.map, &["uuid"]).and_then(|s| crate::horizon_citizens_core::ids::parse_uuid(&s))
     }
     pub fn set_uuid(&mut self, uuid: u128) {
-        self.map.set("uuid", Node::str(&crate::ids::format_uuid(uuid)));
+        self.map.set("uuid", Node::str(&crate::horizon_citizens_core::ids::format_uuid(uuid)));
     }
 
     /// The Bukkit entity type (`PLAYER`, `SNOW_GOLEM`).
@@ -448,7 +448,7 @@ impl NpcData {
     pub fn set_cached_skin_profile(&mut self, uuid: u128, name: &str) {
         self.map.put(
             &["metadata", "cached-skin-uuid"],
-            Node::str(&crate::ids::format_uuid(uuid)),
+            Node::str(&crate::horizon_citizens_core::ids::format_uuid(uuid)),
         );
         self.map.put(&["metadata", "cached-skin-uuid-name"], Node::str(name));
     }
@@ -566,7 +566,7 @@ impl NpcData {
     }
 
     pub fn owner(&self) -> Option<u128> {
-        text_at(&self.map, &["traits", "owner", "uuid"]).and_then(|s| crate::ids::parse_uuid(&s))
+        text_at(&self.map, &["traits", "owner", "uuid"]).and_then(|s| crate::horizon_citizens_core::ids::parse_uuid(&s))
     }
     /// Makes the server the owner (`/npc owner SERVER`): Citizens saves `owner: server` and no
     /// UUID.
@@ -602,7 +602,7 @@ impl NpcData {
     }
     /// `followtrait.followingUUID`.
     pub fn follow_target(&self) -> Option<u128> {
-        text_at(&self.map, &["traits", "followtrait", "followingUUID"]).and_then(|s| crate::ids::parse_uuid(&s))
+        text_at(&self.map, &["traits", "followtrait", "followingUUID"]).and_then(|s| crate::horizon_citizens_core::ids::parse_uuid(&s))
     }
     /// `followtrait.margin` (-1 when unset).
     pub fn follow_margin(&self) -> f64 {
@@ -612,7 +612,7 @@ impl NpcData {
         match target {
             Some(u) => self
                 .map
-                .put(&["traits", "followtrait", "followingUUID"], Node::str(&crate::ids::format_uuid(u))),
+                .put(&["traits", "followtrait", "followingUUID"], Node::str(&crate::horizon_citizens_core::ids::format_uuid(u))),
             None => {
                 self.map.drop_path(&["traits", "followtrait", "followingUUID"]);
             }
@@ -647,7 +647,7 @@ impl NpcData {
     }
     pub fn set_owner(&mut self, u: u128) {
         self.map
-            .put(&["traits", "owner", "uuid"], Node::str(&crate::ids::format_uuid(u)));
+            .put(&["traits", "owner", "uuid"], Node::str(&crate::horizon_citizens_core::ids::format_uuid(u)));
         self.add_trait_name("owner");
     }
 
@@ -1117,7 +1117,7 @@ fn round4(v: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::yaml;
+    use crate::horizon_citizens_core::yaml;
 
     fn sample() -> NpcData {
         let m = yaml::parse(
@@ -1304,9 +1304,9 @@ uuid: 00000000-0000-4000-8000-0000000000aa
 #[cfg(test)]
 mod citizens_item_tests {
     use super::*;
-    use crate::config::Config;
-    use crate::spawn;
-    use crate::yaml;
+    use crate::horizon_citizens_core::config::Config;
+    use crate::horizon_citizens_core::spawn;
+    use crate::horizon_citizens_core::yaml;
 
     /// An NPC with a decorated sword in the hand, a potion of invisibility and two stacks in its
     /// inventory (invented values; the blobs are synthetic).
@@ -1352,8 +1352,8 @@ traits:
         particles: false
         icon: false
 ",
-            BLADE = crate::items::fixtures::BLADE,
-            POTION = crate::items::fixtures::POTION,
+            BLADE = crate::horizon_citizens_core::items::fixtures::BLADE,
+            POTION = crate::horizon_citizens_core::items::fixtures::POTION,
         ))
         .unwrap();
         NpcData { id: 3, map }

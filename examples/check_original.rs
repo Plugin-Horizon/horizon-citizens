@@ -5,10 +5,10 @@
 //! `config.yml` goes through `Config::from_citizens_yaml`, `saves.yml` through `Saves::parse`.
 //! Key paths of a saved NPC are shown as `npc.*.<path>`; list items as `[]`.
 
-use horizon_citizens_core::config::{Config, CITIZENS_CONFIG_KEYS};
-use horizon_citizens_core::npc::NPC_READ_PATHS;
-use horizon_citizens_core::saves::Saves;
-use horizon_citizens_core::yaml::{self, Node};
+use mod_citizens::horizon_citizens_core::config::{Config, CITIZENS_CONFIG_KEYS};
+use mod_citizens::horizon_citizens_core::npc::NPC_READ_PATHS;
+use mod_citizens::horizon_citizens_core::saves::Saves;
+use mod_citizens::horizon_citizens_core::yaml::{self, Node};
 use std::collections::BTreeSet;
 
 fn key_paths(node: &Node, prefix: &str, out: &mut BTreeSet<String>) {

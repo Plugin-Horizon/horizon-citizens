@@ -6,14 +6,14 @@
 //! and runs outside its lock, and every event for other mods is an [`NpcEvent`] taken with
 //! [`World::take_events`].
 
-use crate::config::Config;
-use crate::tree::TreeExt;
-use crate::yaml::Node;
-use crate::look::{self, PlayerView, Rng};
-use crate::npc::{Hand, Location, NpcData, Skin};
-use crate::saves::Saves;
-use crate::spawn;
-use crate::text;
+use crate::horizon_citizens_core::config::Config;
+use crate::horizon_citizens_core::tree::TreeExt;
+use crate::horizon_citizens_core::yaml::Node;
+use crate::horizon_citizens_core::look::{self, PlayerView, Rng};
+use crate::horizon_citizens_core::npc::{Hand, Location, NpcData, Skin};
+use crate::horizon_citizens_core::saves::Saves;
+use crate::horizon_citizens_core::spawn;
+use crate::horizon_citizens_core::text;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
@@ -185,7 +185,7 @@ impl World {
             .find(|p| p.uuid == uuid)
             .map(|p| p.name.clone())
             .or_else(|| self.profiles.get(&uuid).cloned())
-            .unwrap_or_else(|| crate::ids::format_uuid(uuid))
+            .unwrap_or_else(|| crate::horizon_citizens_core::ids::format_uuid(uuid))
     }
     /// The UUID of a player by name (online, else looked up).
     pub fn player_by_name(&self, name: &str) -> Option<u128> {
@@ -279,7 +279,7 @@ impl World {
             None => {
                 // Review C8: an old or hand-made entry without (or with an unreadable) `uuid`
                 // gets one, written back at the next save, instead of never spawning.
-                let u = crate::ids::random_uuid();
+                let u = crate::horizon_citizens_core::ids::random_uuid();
                 eprintln!("[citizens] NPC {id} had no readable uuid: given a new one");
                 if let Some(n) = self.saves.get_mut(id) {
                     n.set_uuid(u);
@@ -523,7 +523,7 @@ impl World {
     /// click, and for a hit on a protected NPC).
     /// Says one of the NPC's talk lines (`/npc text add`), picked at random, to the player who
     /// right-clicked it.
-    fn talk(&mut self, player: &PlayerView, npc: &crate::npc::NpcData) {
+    fn talk(&mut self, player: &PlayerView, npc: &crate::horizon_citizens_core::npc::NpcData) {
         let lines = npc.talk_lines();
         if lines.is_empty() {
             return;
@@ -595,7 +595,7 @@ impl World {
                 let line = line.trim_start_matches('/').to_owned();
                 if c.player || c.op {
                     if self.cfg.commands.player_commands_via_execute {
-                        let who = crate::ids::format_uuid(player.uuid);
+                        let who = crate::horizon_citizens_core::ids::format_uuid(player.uuid);
                         self.ops
                             .push(Op::Console(format!("execute as {who} at {who} run {line}")));
                     } else {
@@ -699,7 +699,7 @@ impl World {
     // ---- skins --------------------------------------------------------------------------
 
     /// A skin lookup finished.
-    pub fn skin_fetched(&mut self, fetched: crate::skin::Fetched) {
+    pub fn skin_fetched(&mut self, fetched: crate::horizon_citizens_core::skin::Fetched) {
         self.fetching.remove(&fetched.npc);
         let Some(npc) = self.saves.get_mut(fetched.npc) else {
             return;
@@ -1058,7 +1058,7 @@ impl World {
         edit: impl FnOnce(&mut NpcData),
     ) -> i32 {
         let id = self.saves.next_id();
-        let mut npc = NpcData::new(id, crate::ids::random_uuid(), name, &kind.to_ascii_uppercase());
+        let mut npc = NpcData::new(id, crate::horizon_citizens_core::ids::random_uuid(), name, &kind.to_ascii_uppercase());
         npc.set_location(&loc);
         npc.set_spawned(spawned);
         if let Some(o) = owner {
@@ -1096,7 +1096,7 @@ impl World {
         let new_id = self.saves.next_id();
         npc.id = new_id;
         npc.map
-            .set("uuid", Node::str(&crate::ids::format_uuid(crate::ids::random_uuid())));
+            .set("uuid", Node::str(&crate::horizon_citizens_core::ids::format_uuid(crate::horizon_citizens_core::ids::random_uuid())));
         npc.set_location(&loc);
         self.saves.insert(npc);
         self.mark_dirty();
@@ -1394,10 +1394,10 @@ mod tests {
         assert!(ops.contains(&Op::FetchSkin { npc: id, name: "Steve".into() }));
         w.respawn(id);
         assert!(!w.take_ops().iter().any(|o| matches!(o, Op::FetchSkin { .. })));
-        w.skin_fetched(crate::skin::Fetched {
+        w.skin_fetched(crate::horizon_citizens_core::skin::Fetched {
             npc: id,
             requested: "Steve".into(),
-            result: Ok(crate::skin::FetchedSkin {
+            result: Ok(crate::horizon_citizens_core::skin::FetchedSkin {
                 profile: 5,
                 name: "Steve".into(),
                 texture: "VEVY".into(),

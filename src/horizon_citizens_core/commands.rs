@@ -7,12 +7,12 @@
 //! Changed from the original: ported to Rust for Horizon. Commands that need a trait this port
 //! does not have are not registered (see GAPS.md).
 
-use crate::tree::TreeExt;
-use crate::yaml::Node;
-use crate::npc::{CommandSpec, Hand, Location, Nameplate, NpcData, Skin};
-use crate::saves::Saves;
-use crate::text;
-use crate::world::{DespawnReason, Sender, World};
+use crate::horizon_citizens_core::tree::TreeExt;
+use crate::horizon_citizens_core::yaml::Node;
+use crate::horizon_citizens_core::npc::{CommandSpec, Hand, Location, Nameplate, NpcData, Skin};
+use crate::horizon_citizens_core::saves::Saves;
+use crate::horizon_citizens_core::text;
+use crate::horizon_citizens_core::world::{DespawnReason, Sender, World};
 
 // ---- messages (Citizens' en.json, `{n}` arguments, `[[x]]` highlights) ------------------------
 
@@ -1082,7 +1082,7 @@ enum Found {
 
 fn find(w: &World, raw: &str, range: Option<f64>, sender: &Sender) -> Found {
     if raw.len() == 36
-        && let Some(u) = crate::ids::parse_uuid(raw)
+        && let Some(u) = crate::horizon_citizens_core::ids::parse_uuid(raw)
     {
         return w.saves.by_uuid(u).map_or(Found::Missing, |n| Found::One(n.id));
     }
@@ -1099,7 +1099,7 @@ fn find(w: &World, raw: &str, range: Option<f64>, sender: &Sender) -> Found {
         if let (Some(r), Some((_, at))) = (range, sender.at.as_ref())
             && w.is_out(n.id)
             && let Some(l) = w.current_location(n.id)
-            && crate::look::dist2([l.x, l.y, l.z], [at.x, at.y, at.z]) > r * r
+            && crate::horizon_citizens_core::look::dist2([l.x, l.y, l.z], [at.x, at.y, at.z]) > r * r
         {
             continue;
         }
@@ -1299,7 +1299,7 @@ fn info(w: &World, sender: &Sender) -> Res {
     let npc = w.saves.get(id).ok_or_else(|| err(w, M_NPC_NOT_FOUND, &[]))?;
     let mut out = say(w, &header(&name_of(npc)));
     out.extend(say(w, &format!("    ID: [[{id}]]")));
-    out.extend(say(w, &format!("    UUID: [[{}]]", npc.uuid().map(crate::ids::format_uuid).unwrap_or_default())));
+    out.extend(say(w, &format!("    UUID: [[{}]]", npc.uuid().map(crate::horizon_citizens_core::ids::format_uuid).unwrap_or_default())));
     out.extend(say(w, &format!("    Type: [[{}]]", npc.kind())));
     if w.is_out(id)
         && let Some(l) = w.current_location(id)
@@ -1494,7 +1494,7 @@ fn remove(w: &mut World, sender: &Sender, args: &Args) -> Res {
         ids
     };
     if let Some(owner) = args.value("owner") {
-        let uuid = crate::ids::parse_uuid(owner);
+        let uuid = crate::horizon_citizens_core::ids::parse_uuid(owner);
         let ids = owned_where(w, &|n| uuid.is_some() && n.owner() == uuid);
         for id in ids {
             w.remove(id);
@@ -1511,7 +1511,7 @@ fn remove(w: &mut World, sender: &Sender, args: &Args) -> Res {
     }
     if let Some(eid) = args.value("eid") {
         // The NPC's entity carries the NPC's UUID.
-        let hit = crate::ids::parse_uuid(eid).and_then(|u| w.saves.by_uuid(u)).map(|n| n.id);
+        let hit = crate::horizon_citizens_core::ids::parse_uuid(eid).and_then(|u| w.saves.by_uuid(u)).map(|n| n.id);
         return match hit {
             Some(id) if owns(w, sender, id) => {
                 let name = name_at(w, id);
@@ -1610,7 +1610,7 @@ pub fn nearest(w: &World, dimension: &str, at: &Location, range: f64) -> Option<
         .filter_map(|n| {
             let l = w.current_location(n.id)?;
             (w.is_out(n.id) && w.cfg.worlds.dimension(&l.world).as_deref() == Some(dimension)).then(|| {
-                let d = crate::look::dist2([l.x, l.y, l.z], [at.x, at.y, at.z]);
+                let d = crate::horizon_citizens_core::look::dist2([l.x, l.y, l.z], [at.x, at.y, at.z]);
                 (n.id, d)
             })
         })
@@ -1630,7 +1630,7 @@ fn list(w: &World, sender: &Sender, args: &Args) -> Res {
     }
     let mut npcs: Vec<&NpcData> = w.saves.npcs.iter().collect();
     npcs.sort_by_key(|n| n.id);
-    let owner = args.value("owner").map(crate::ids::parse_uuid);
+    let owner = args.value("owner").map(crate::horizon_citizens_core::ids::parse_uuid);
     let mut shown: Vec<&NpcData> = if args.has('a') {
         npcs
     } else if let Some(o) = owner {
@@ -1752,9 +1752,9 @@ fn tp(w: &mut World, sender: &Sender, args: &Args) -> Res {
         return Err(err(w, M_TP_NO_LOCATION, &[]));
     };
     let to = if args.has('e') { loc } else { in_front(&loc) };
-    w.push_op(crate::world::Op::Console(format!(
+    w.push_op(crate::horizon_citizens_core::world::Op::Console(format!(
         "execute in {dim} run tp {} {} {} {} {} {}",
-        crate::ids::format_uuid(player),
+        crate::horizon_citizens_core::ids::format_uuid(player),
         to.x,
         to.y,
         to.z,
@@ -2172,7 +2172,7 @@ fn owner_cmd(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let uuid = if sender.uuid.is_some() && word.eq_ignore_ascii_case(&sender.name) {
         sender.uuid
     } else {
-        w.player_by_name(&word).or_else(|| crate::ids::parse_uuid(&word))
+        w.player_by_name(&word).or_else(|| crate::horizon_citizens_core::ids::parse_uuid(&word))
     };
     let Some(uuid) = uuid else {
         return Err(err(w, "Invalid UUID string: {0}", &[&word]));
@@ -2344,8 +2344,8 @@ fn jfloat(v: f32) -> String {
 }
 
 /// An online player by name (any case) or UUID.
-fn online_player<'a>(w: &'a World, raw: &str) -> Option<&'a crate::look::PlayerView> {
-    let uuid = if raw.len() == 36 { crate::ids::parse_uuid(raw) } else { None };
+fn online_player<'a>(w: &'a World, raw: &str) -> Option<&'a crate::horizon_citizens_core::look::PlayerView> {
+    let uuid = if raw.len() == 36 { crate::horizon_citizens_core::ids::parse_uuid(raw) } else { None };
     w.online
         .iter()
         .find(|p| Some(p.uuid) == uuid || p.name.eq_ignore_ascii_case(raw))
@@ -2463,7 +2463,7 @@ fn rotate(w: &mut World, sender: &Sender, args: &Args) -> Res {
         };
     }
     if let Some(t) = towards {
-        let (y, p) = crate::look::look_at(crate::look::eye([at.x, at.y, at.z]), t);
+        let (y, p) = crate::horizon_citizens_core::look::look_at(crate::horizon_citizens_core::look::eye([at.x, at.y, at.z]), t);
         w.face(id, y, p);
         return Ok(Vec::new());
     }
@@ -2525,9 +2525,9 @@ fn tpto(w: &mut World, sender: &Sender, args: &Args) -> Res {
                 return Err(err(w, M_WORLD_NOT_FOUND, &[]));
             }
         }
-        Who::Player(u) => w.push_op(crate::world::Op::Console(format!(
+        Who::Player(u) => w.push_op(crate::horizon_citizens_core::world::Op::Console(format!(
             "execute in {dim} run tp {} {} {} {}",
-            crate::ids::format_uuid(u),
+            crate::horizon_citizens_core::ids::format_uuid(u),
             pos.x,
             pos.y,
             pos.z
@@ -2744,9 +2744,9 @@ fn hurt(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let amount = parse_i64(w, &args.words[0])?;
     let uuid = w.saves.get(id).and_then(NpcData::uuid).ok_or_else(|| err(w, M_NPC_NOT_FOUND, &[]))?;
     let dim = w.dimension_of(id).ok_or_else(|| err(w, M_NPC_NOT_FOUND, &[]))?;
-    w.push_op(crate::world::Op::Console(format!(
+    w.push_op(crate::horizon_citizens_core::world::Op::Console(format!(
         "execute in {dim} run damage {} {amount}",
-        crate::ids::format_uuid(uuid)
+        crate::horizon_citizens_core::ids::format_uuid(uuid)
     )));
     Ok(Vec::new())
 }
@@ -2847,13 +2847,13 @@ fn playsound(w: &mut World, sender: &Sender, args: &Args) -> Res {
     };
     let targets = match args.value("to") {
         Some(t) => match online_player(w, t).map(|p| p.uuid) {
-            Some(u) => crate::ids::format_uuid(u),
+            Some(u) => crate::horizon_citizens_core::ids::format_uuid(u),
             None => return Ok(Vec::new()),
         },
         None => "@a".to_owned(),
     };
     // Vanilla's range is the volume; a player farther away than that hears nothing.
-    w.push_op(crate::world::Op::Console(format!(
+    w.push_op(crate::horizon_citizens_core::world::Op::Console(format!(
         "execute in {dim} run playsound {sound} {category} {targets} {} {} {} {volume} {pitch}",
         at.x, at.y, at.z
     )));
@@ -3049,7 +3049,7 @@ fn command(w: &mut World, sender: &Sender, tail: &str) -> Res {
     match op.to_ascii_lowercase().as_str() {
         "" => {
             let cmds = w.saves.get(id).map(NpcData::commands).unwrap_or_default();
-            let describe = |c: &crate::npc::NpcCommand| {
+            let describe = |c: &crate::horizon_citizens_core::npc::NpcCommand| {
                 let cd = if c.cooldown != 0 { c.cooldown } else { i64::from(w.cfg.commands.global_cooldown_ticks / 20) };
                 let cost = if c.cost > 0.0 { jnum(c.cost) } else { "default".to_owned() };
                 let exp = if c.experience_cost > 0 { c.experience_cost.to_string() } else { "default".to_owned() };
@@ -3241,7 +3241,7 @@ fn equip(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let id = target(w, sender)?;
     let usage = "Usage: /npc equip <hand|off_hand|helmet|chestplate|leggings|boots> [item] [amount]";
     let slot = args.words.first().ok_or_else(|| err(w, usage, &[]))?.to_ascii_lowercase();
-    if !crate::npc::EQUIPMENT_SLOTS.iter().any(|(c, _)| *c == slot) {
+    if !crate::horizon_citizens_core::npc::EQUIPMENT_SLOTS.iter().any(|(c, _)| *c == slot) {
         return Err(err(w, usage, &[]));
     }
     let item = args.words.get(1).filter(|s| !s.eq_ignore_ascii_case("air"));
@@ -3479,8 +3479,8 @@ fn flyable(w: &mut World, sender: &Sender, args: &Args) -> Res {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
-    use crate::world::Op;
+    use crate::horizon_citizens_core::config::Config;
+    use crate::horizon_citizens_core::world::Op;
 
     fn sender(level: u8) -> Sender {
         Sender {
@@ -3887,8 +3887,8 @@ mod tests {
         assert!(run_ok(&mut w, &s, "npc slimesize")[0].contains("size is"));
     }
 
-    fn player(uuid: u128, name: &str, x: f64, z: f64) -> crate::look::PlayerView {
-        crate::look::PlayerView {
+    fn player(uuid: u128, name: &str, x: f64, z: f64) -> crate::horizon_citizens_core::look::PlayerView {
+        crate::horizon_citizens_core::look::PlayerView {
             uuid,
             name: name.into(),
             dimension: "minecraft:overworld".into(),

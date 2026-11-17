@@ -6,12 +6,12 @@
 //! `citizens_npc` and `citizens_npc_<id>`. Hologram lines are `text_display`s with UUIDs derived
 //! from the NPC's.
 
-use crate::config::Config;
-use crate::ids::{derived_uuid, format_uuid, int_array_snbt};
-use crate::npc::{Location, Nameplate, NpcData, Skin};
-use crate::text;
-use crate::tree::TreeExt;
-use crate::yaml::Node;
+use crate::horizon_citizens_core::config::Config;
+use crate::horizon_citizens_core::ids::{derived_uuid, format_uuid, int_array_snbt};
+use crate::horizon_citizens_core::npc::{Location, Nameplate, NpcData, Skin};
+use crate::horizon_citizens_core::text;
+use crate::horizon_citizens_core::tree::TreeExt;
+use crate::horizon_citizens_core::yaml::Node;
 
 pub const TAG: &str = "citizens_npc";
 pub const HOLOGRAM_TAG: &str = "citizens_hologram";
@@ -147,7 +147,7 @@ pub fn npc_snbt(npc: &NpcData, uuid: u128, loc: &Location, cfg: &Config) -> Stri
     }
     if kind == "minecraft:sheep" {
         let colour = tp("sheeptrait", "color").and_then(Node::text).unwrap_or_default();
-        if let Some(i) = crate::commands::DYE_COLOURS.iter().position(|c| c.eq_ignore_ascii_case(&colour)) {
+        if let Some(i) = crate::horizon_citizens_core::commands::DYE_COLOURS.iter().position(|c| c.eq_ignore_ascii_case(&colour)) {
             parts.push(format!("Color:{i}b"));
         }
         if tp("sheeptrait", "sheared").and_then(Node::as_bool) == Some(true) {
@@ -405,7 +405,7 @@ pub fn refresh(npc: &NpcData, uuid: u128, dimension: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::npc::Hand;
+    use crate::horizon_citizens_core::npc::Hand;
 
     fn npc() -> NpcData {
         let mut n = NpcData::new(4, 0x11, "&6Guide", "PLAYER");

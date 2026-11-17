@@ -1,11 +1,11 @@
 //! `config/citizens.toml`. Key names follow Citizens' `config.yml` where there is one.
 
-use crate::tree::TreeExt;
-use crate::yaml;
+use crate::horizon_citizens_core::tree::TreeExt;
+use crate::horizon_citizens_core::yaml;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
-pub const DEFAULT_TOML: &str = include_str!("../citizens.toml");
+pub const DEFAULT_TOML: &str = include_str!("../../data/citizens/citizens.toml");
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, rename_all = "kebab-case")]

@@ -5,14 +5,14 @@
 //! glue once a tick, outside that lock, so a listener may call back into this API.
 //! Calls made before the server opens its world (or after it stopped) answer `None`/`false`.
 
-use crate::npc::{Location, NpcData, Skin};
-use crate::world::{NpcEvent, Op, World};
-use crate::tree::TreeExt;
-use crate::yaml::Node;
+use crate::horizon_citizens_core::npc::{Location, NpcData, Skin};
+use crate::horizon_citizens_core::world::{NpcEvent, Op, World};
+use crate::horizon_citizens_core::tree::TreeExt;
+use crate::horizon_citizens_core::yaml::Node;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
-pub use crate::world::DespawnReason;
+pub use crate::horizon_citizens_core::world::DespawnReason;
 
 static WORLD: Mutex<Option<World>> = Mutex::new(None);
 
@@ -295,7 +295,7 @@ pub fn face(id: i32, yaw: f32, pitch: f32) {
 pub fn look_at(id: i32, target: [f64; 3]) {
     with_world(|w| {
         if let Some(at) = w.current_location(id) {
-            let (yaw, pitch) = crate::look::look_at(crate::look::eye([at.x, at.y, at.z]), target);
+            let (yaw, pitch) = crate::horizon_citizens_core::look::look_at(crate::horizon_citizens_core::look::eye([at.x, at.y, at.z]), target);
             w.face(id, yaw, pitch);
         }
     });
@@ -307,30 +307,30 @@ pub fn swing(id: i32) {
             return;
         };
         if w.is_spawned(id) {
-            w.push_op(Op::Console(crate::spawn::swing(u, &d)));
+            w.push_op(Op::Console(crate::horizon_citizens_core::spawn::swing(u, &d)));
         }
     });
 }
 /// The Citizens inventory of an NPC (`traits.inventory`), for other mods (Sentinel's autoswitch).
 /// Empty when the NPC has none or does not exist.
-pub fn inventory(id: i32) -> Vec<crate::npc::InventoryItem> {
+pub fn inventory(id: i32) -> Vec<crate::horizon_citizens_core::npc::InventoryItem> {
     with_world(|w| w.saves.get(id).map(NpcData::inventory).unwrap_or_default()).unwrap_or_default()
 }
 
 /// The equipment of an NPC (the shown slots), with the components of each item.
-pub fn equipment(id: i32) -> Vec<crate::npc::Equipped> {
+pub fn equipment(id: i32) -> Vec<crate::horizon_citizens_core::npc::Equipped> {
     with_world(|w| w.saves.get(id).map(NpcData::equipment).unwrap_or_default()).unwrap_or_default()
 }
 
 /// The potion effect of invisibility the NPC keeps, if any.
-pub fn invisibility(id: i32) -> Option<crate::npc::Effect> {
+pub fn invisibility(id: i32) -> Option<crate::horizon_citizens_core::npc::Effect> {
     with_world(|w| w.saves.get(id).and_then(NpcData::invisibility)).flatten()
 }
 
 /// Puts `item` (`minecraft:diamond_sword`, None to empty) in a Citizens equipment slot (`hand`,
 /// `off_hand`, `helmet`, `chestplate`, `leggings`, `boots`), saved and shown at once.
 pub fn set_equipment(id: i32, slot: &str, item: Option<(&str, i64)>) -> bool {
-    let Some(game_slot) = crate::npc::EQUIPMENT_SLOTS
+    let Some(game_slot) = crate::horizon_citizens_core::npc::EQUIPMENT_SLOTS
         .iter()
         .find(|(c, _)| *c == slot)
         .map(|(_, g)| *g)
@@ -361,7 +361,7 @@ pub fn set_equipment(id: i32, slot: &str, item: Option<(&str, i64)>) -> bool {
             };
             w.push_op(Op::Console(format!(
                 "execute in {d} run item replace entity {} {target} with {what}",
-                crate::ids::format_uuid(u)
+                crate::horizon_citizens_core::ids::format_uuid(u)
             )));
         }
         true
@@ -475,7 +475,7 @@ pub fn set_hologram_lines(id: i32, lines: &[String]) -> bool {
     .unwrap_or(false)
 }
 /// The commands of the `commandtrait`.
-pub fn commands(id: i32) -> Vec<crate::npc::NpcCommand> {
+pub fn commands(id: i32) -> Vec<crate::horizon_citizens_core::npc::NpcCommand> {
     with_world(|w| w.saves.get(id).map(NpcData::commands).unwrap_or_default()).unwrap_or_default()
 }
 pub fn clear_commands(id: i32) -> bool {
@@ -528,8 +528,8 @@ pub fn selected(player: u128) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
-    use crate::saves::Saves;
+    use crate::horizon_citizens_core::config::Config;
+    use crate::horizon_citizens_core::saves::Saves;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// One test owns the process-wide registry (tests run in threads).

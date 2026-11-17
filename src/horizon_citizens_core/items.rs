@@ -8,8 +8,8 @@
 //! [`ItemMeta::unmapped`], so the caller can log them): armour `trim`, banner `base-color` and
 //! `patterns`, and any other key.
 
-use crate::javaser::{self, Value};
-use crate::text;
+use crate::horizon_citizens_core::javaser::{self, Value};
+use crate::horizon_citizens_core::text;
 
 /// What a meta blob holds, in components.
 #[derive(Clone, Debug, Default, PartialEq)]
