@@ -15,3 +15,4 @@ Round 1
   - A query error (undeclared node, handler failure) is a denial. The old fallback to the operator level for unanswered nodes is gone.
   - `entity_interact`: `Flow::Cancel` mapped to `InteractionResult::Consume` (no client swing). Not verified against Paper's cancel.
   - Warnings in `commands.rs` (unused `mut`, unused assignment) left as they are.
+- Fix round (docs only, no Citizens source): `/template`, `/waypoints` and 19 `/npc` modifiers added (see README "Docs gaps"); nodes `citizens.templates.*`, `citizens.waypoints.*` and the modifier nodes are declared with the other nodes. Roots `tpl` and `wp` are registered as aliases. Still open: bare roots carry no node (engine), offline owner names (no profile API), mob-specific modifiers, action modifiers (`jump`, `mount`, `speak`, `undo`, `item`, `drops`, `inventory`, `home`, ...), `/trait help` node.
