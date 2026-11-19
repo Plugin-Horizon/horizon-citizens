@@ -188,16 +188,18 @@ fn granted_nodes(host: &mut dyn ServerHost, p: PlayerRef, level: u8, command_lev
     if level >= command_level {
         return Vec::new();
     }
-    core::commands::NODES
-        .iter()
-        .copied()
+    // The per-type create nodes are asked by `create`, so they are part of the grants.
+    let mut all: Vec<String> = core::commands::NODES.iter().map(|n| (*n).to_owned()).collect();
+    all.extend(core::commands::create_type_nodes());
+    all.sort();
+    all.dedup();
+    all.into_iter()
         .filter(|node| {
             holds(host, p, node)
                 || core::commands::parents_of(node)
                     .iter()
                     .any(|&parent| holds(host, p, parent))
         })
-        .map(str::to_owned)
         .collect()
 }
 
@@ -528,10 +530,18 @@ impl Hooks for Citizens {
     }
 
     fn permission_gather_nodes(&self, event: &mut PermissionGatherNodesEvent<'_>) {
-        // Every non-wildcard node the commands ask, at the shipped `command-level` (2). The wildcard parents
-        // cannot be declared (HMOD-GAP(wildcard_nodes)). Gathering runs before the config is read.
-        for node in core::commands::NODES.iter().filter(|n| !n.contains('*')) {
-            let _ = event.nodes.add(perm_node(node), NodeDefault::Level(PermissionLevel::from_level(2)));
+        // Every non-wildcard node the commands ask, at the configured `command-level` (the level the command
+        // gate uses, so both agree; 2 when gathering runs before the config is read). The wildcard parents
+        // cannot be declared (HMOD-GAP(wildcard_nodes)).
+        let level = i32::from(lock(&self.state).cfg.command_level);
+        let mut all: Vec<String> = core::commands::NODES
+            .iter()
+            .filter(|n| !n.contains('*'))
+            .map(|n| (*n).to_owned())
+            .collect();
+        all.extend(core::commands::create_type_nodes());
+        for node in all {
+            let _ = event.nodes.add(perm_node(&node), NodeDefault::Level(PermissionLevel::from_level(level)));
         }
     }
 

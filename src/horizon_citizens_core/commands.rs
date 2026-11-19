@@ -1363,6 +1363,16 @@ const ENTITY_TYPES: &[&str] = &[
     "snowman", "mushroom_cow", "pig_zombie", "villager_golem",
 ];
 
+/// The per-type create nodes (`citizens.npc.create.zombie`, ...), one per entity type of plugin.yml
+/// (the older Bukkit names left out), as `create` asks them.
+pub fn create_type_nodes() -> Vec<String> {
+    ENTITY_TYPES
+        .iter()
+        .take_while(|t| **t != "snowman")
+        .map(|t| format!("citizens.npc.create.{t}"))
+        .collect()
+}
+
 /// Whether `t` names an entity type, in any case (Bukkit's `EntityType` names, see [`ENTITY_TYPES`]).
 fn valid_type(t: &str) -> bool {
     ENTITY_TYPES.contains(&t.to_ascii_lowercase().as_str())
@@ -4080,5 +4090,17 @@ mod tests {
         assert!(run_ok(&mut w, &s, "npc owner")[0].contains("owner is &eNotch"));
         run_ok(&mut w, &s, "npc pathto 32 65 48");
         assert!(w.is_navigating(0) || !w.is_out(0));
+    }
+
+    #[test]
+    fn create_type_nodes_name_each_entity_type_once() {
+        let nodes = create_type_nodes();
+        assert!(nodes.contains(&"citizens.npc.create.zombie".to_string()));
+        assert!(nodes.contains(&"citizens.npc.create.player".to_string()));
+        assert!(!nodes.contains(&"citizens.npc.create.snowman".to_string()));
+        let mut sorted = nodes.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), nodes.len());
     }
 }

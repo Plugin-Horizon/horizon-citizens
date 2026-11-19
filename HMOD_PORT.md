@@ -9,6 +9,7 @@ Round 1
 - Gaps:
   - HMOD-GAP(wildcard_nodes): `citizens.*`, `citizens.admin.*`, `citizens.npc.*` and the other wildcard parents cannot be declared as typed nodes (Horizon has no wildcards). A child node is granted only by its own node, not by a held parent; parent queries answer as a denial.
   - HMOD-GAP(profile_cache): Horizon main has no profile lookup for offline players. Owner and name lookups resolve online players only; offline owners show as their UUID. The core's own handling is unchanged.
+- Audit round: node defaults now follow the configured `command-level` (read at gather time, 2 when the config is not loaded yet); the per-type nodes `citizens.npc.create.<type>` are declared and included in the grants `create` asks (`core::commands::create_type_nodes`), so a non-operator holding `citizens.npc.create.zombie` can create zombies. Still open: `/template`, `/waypoints` and about 100 `/npc` modifiers (work, not API), the `ignoreerrors` nodes (no command-trait cost feature to gate), a parent grant does not pass the engine's per-usage node gate (needs a permission handler that expands wildcards itself, unverified).
 - Unsure:
   - Node defaults use the shipped `command-level` 2. The config value is read after gathering, so a changed `command-level` does not move the node defaults; the command gate itself still uses the config level.
   - A query error (undeclared node, handler failure) is a denial. The old fallback to the operator level for unanswered nodes is gone.
