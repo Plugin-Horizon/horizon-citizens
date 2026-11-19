@@ -133,7 +133,8 @@ pub fn npc_snbt(npc: &NpcData, uuid: u128, loc: &Location, cfg: &Config) -> Stri
         }
         parts.push("immovable:1b".into());
         parts.push("hide_description:1b".into());
-    } else {
+    } else if npc.map.at(&["traits", "ai", "enabled"]).and_then(Node::as_bool) != Some(true) {
+        // `/npc ai true` leaves the mob its own AI.
         parts.push("NoAI:1b".into());
     }
     // Traits Citizens saves that show in the entity's own data (`/npc age|powered|sheep|slimesize`).
@@ -479,6 +480,9 @@ mod tests {
         };
         let s = npc_snbt(&n, 5, &loc, &Config::default());
         assert!(s.contains("NoAI:1b"));
+        n.map.put(&["traits", "ai", "enabled"], Node::bool(true));
+        assert!(!npc_snbt(&n, 5, &loc, &Config::default()).contains("NoAI"), "`/npc ai true` keeps the mob's AI");
+        n.map.put(&["traits", "ai", "enabled"], Node::bool(false));
         assert!(!s.contains("Invulnerable"));
         assert!(!s.contains("CustomName"));
         assert!(s.contains("equipment:{head:{id:\"minecraft:carved_pumpkin\",count:1}}"));

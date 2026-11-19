@@ -7,6 +7,8 @@
 //! Changed from the original: ported to Rust for Horizon. Commands that need a trait this port
 //! does not have are not registered (see GAPS.md).
 
+mod modifiers;
+
 use crate::horizon_citizens_core::tree::TreeExt;
 use crate::horizon_citizens_core::yaml::Node;
 use crate::horizon_citizens_core::npc::{CommandSpec, Hand, Location, Nameplate, NpcData, Skin};
@@ -309,10 +311,29 @@ const CMDS: &[Cmd] = &[
         "citizens.npc.edit.equip",
     ),
     cmd("path", &[], "path [list|add|remove <point>|clear]", 1, None, "citizens.npc.edit.path"),
+    cmd("aggressive", &[], "aggressive [true|false] (-t(emporary))", 2, Some(2), "citizens.npc.aggressive"),
+    cmd("ai", &[], "ai (true|false)", 1, Some(2), "citizens.npc.ai"),
+    cmd("chunkload", &[], "chunkload (-t(emporary))", 1, Some(1), "citizens.npc.chunkload"),
+    cmd("collidable", &[], "collidable --fluids [true|false]", 1, Some(2), "citizens.npc.collidable"),
+    cmd("knockback", &[], "knockback (--explicit true|false)", 1, Some(2), "citizens.npc.knockback"),
+    cmd("leashable", &[], "leashable", 1, Some(2), "citizens.npc.leashable"),
+    cmd("passive", &[], "passive (--set [true|false])", 1, Some(2), "citizens.npc.passive"),
+    cmd("pickupitems", &[], "pickupitems (--set [true|false])", 1, Some(2), "citizens.npc.pickupitems"),
+    cmd("sitting", &[], "sitting (--explicit [true|false])", 1, Some(2), "citizens.npc.sitting"),
+    cmd("swim", &[], "swim (--set [true|false])", 1, Some(2), "citizens.npc.swim"),
+    cmd("targetable", &[], "targetable", 1, Some(2), "citizens.npc.targetable"),
+    cmd("activationrange", &[], "activationrange [range]", 1, Some(2), "citizens.npc.activationrange"),
+    cmd("respawn", &[], "respawn [delay]", 1, Some(2), "citizens.npc.respawn"),
+    cmd("scaledmaxhealth", &[], "scaledmaxhealth [health]", 1, Some(2), "citizens.npc.scaledmaxhealth"),
+    cmd("trackingrange", &[], "trackingrange [range]", 1, Some(2), "citizens.npc.trackingrange"),
+    cmd("playerlist", &[], "playerlist (-a(dd),r(emove))", 1, Some(1), "citizens.npc.playerlist"),
+    cmd("skinlayers", &[], "skinlayers (--cape [true|false]) (--hat [true|false]) (--jacket [true|false]) (--sleeves [true|false]) (--pants [true|false])", 1, Some(1), "citizens.npc.skinlayers"),
+    cmd("entitypose", &[], "entitypose [pose]", 1, Some(2), "citizens.npc.entitypose"),
+    cmd("metadata", &[], "metadata set|get|remove [key] (value) (-t(emporary))", 3, None, "citizens.npc.metadata"),
 ];
 
 /// Citizens modifiers this port does not have (they answer "not supported", not "Too many arguments").
-const CITIZENS_ONLY: &[&str] = &["activationrange", "aggressive", "ai", "armorstand", "attribute", "bat", "behavior", "breakblock", "chunkload", "cload", "collidable", "pushable", "configgui", "controllable", "control", "disguise", "drops", "endercrystal", "enderman", "entitypose", "eval", "fish", "forcefield", "hitbox", "home", "horse", "donkey", "mule", "inventory", "item", "itemframe", "jump", "knockback", "leashable", "metadata", "minecart", "mirror", "mount", "nophysics", "ocelot", "packet", "painting", "passive", "pathopt", "po", "patho", "pausepathfinding", "pickupitems", "panimate", "playerfilter", "playerlist", "rabbittype", "rbtype", "respawn", "rotationsettings", "scaledmaxhealth", "shop", "shopitem", "showshop", "sitting", "skinlayers", "speak", "spectate", "swim", "target", "targetable", "trackingrange", "undo", "useitem", "velocity", "vel", "wither", "wolf"];
+const CITIZENS_ONLY: &[&str] = &["armorstand", "attribute", "bat", "behavior", "breakblock", "cload", "pushable", "configgui", "controllable", "control", "disguise", "drops", "endercrystal", "enderman", "eval", "fish", "forcefield", "hitbox", "home", "horse", "donkey", "mule", "inventory", "item", "itemframe", "jump", "minecart", "mirror", "mount", "nophysics", "ocelot", "packet", "painting", "pathopt", "po", "patho", "pausepathfinding", "panimate", "playerfilter", "rabbittype", "rbtype", "rotationsettings", "shop", "shopitem", "showshop", "speak", "spectate", "target", "undo", "useitem", "velocity", "vel", "wither", "wolf"];
 
 fn find_cmd(sub: &str) -> Option<&'static Cmd> {
     let sub = sub.to_ascii_lowercase();
@@ -501,6 +522,40 @@ const TAILS: &[(&str, &[&str])] = &[
         ],
     ),
     ("path", &["", "list", "add", "remove <point:integer>", "clear"]),
+    ("aggressive", &["true", "false", "true -t", "false -t"]),
+    ("ai", &["", "true", "false"]),
+    ("chunkload", &["", "-t"]),
+    ("collidable", &["", "--fluids true", "--fluids false"]),
+    ("knockback", &["", "--explicit true", "--explicit false"]),
+    ("leashable", &[""]),
+    ("passive", &["", "--set true", "--set false"]),
+    ("pickupitems", &["", "--set true", "--set false"]),
+    ("sitting", &["", "--explicit true", "--explicit false"]),
+    ("swim", &["", "--set true", "--set false"]),
+    ("targetable", &[""]),
+    ("activationrange", &["<range:number>"]),
+    ("respawn", &["<delay:integer>"]),
+    ("scaledmaxhealth", &["<health:number>"]),
+    ("trackingrange", &["<range:number>"]),
+    ("playerlist", &["", "-a", "-r"]),
+    (
+        "skinlayers",
+        &[
+            "",
+            "--cape true",
+            "--cape false",
+            "--hat true",
+            "--hat false",
+            "--jacket true",
+            "--jacket false",
+            "--sleeves true",
+            "--sleeves false",
+            "--pants true",
+            "--pants false",
+        ],
+    ),
+    ("entitypose", &["", "<pose:word>"]),
+    ("metadata", &["get <key:word>", "set <key:word> <value:text>", "remove <key:word>"]),
 ];
 
 /// Every usage registered with the game, so chat completes them. Horizon merges them into one
@@ -597,6 +652,25 @@ pub const NODES: &[&str] = &[
     "citizens.npc.type",
     "citizens.npc.vulnerable",
     "citizens.npc.command",
+    "citizens.npc.aggressive",
+    "citizens.npc.ai",
+    "citizens.npc.chunkload",
+    "citizens.npc.collidable",
+    "citizens.npc.knockback",
+    "citizens.npc.leashable",
+    "citizens.npc.passive",
+    "citizens.npc.pickupitems",
+    "citizens.npc.sitting",
+    "citizens.npc.swim",
+    "citizens.npc.targetable",
+    "citizens.npc.activationrange",
+    "citizens.npc.respawn",
+    "citizens.npc.scaledmaxhealth",
+    "citizens.npc.trackingrange",
+    "citizens.npc.playerlist",
+    "citizens.npc.skinlayers",
+    "citizens.npc.entitypose",
+    "citizens.npc.metadata",
 ];
 
 /// The permission node of a command, by its root word and its first word after it. A word that
@@ -634,6 +708,25 @@ const PARENT_EDGES: &[(&str, &str)] = &[
     ("citizens.npc.*", "citizens.npc.age"),
     ("citizens.npc.*", "citizens.npc.anchor"),
     ("citizens.npc.*", "citizens.npc.command"),
+    ("citizens.npc.*", "citizens.npc.aggressive"),
+    ("citizens.npc.*", "citizens.npc.ai"),
+    ("citizens.npc.*", "citizens.npc.chunkload"),
+    ("citizens.npc.*", "citizens.npc.collidable"),
+    ("citizens.npc.*", "citizens.npc.knockback"),
+    ("citizens.npc.*", "citizens.npc.leashable"),
+    ("citizens.npc.*", "citizens.npc.passive"),
+    ("citizens.npc.*", "citizens.npc.pickupitems"),
+    ("citizens.npc.*", "citizens.npc.sitting"),
+    ("citizens.npc.*", "citizens.npc.swim"),
+    ("citizens.npc.*", "citizens.npc.targetable"),
+    ("citizens.npc.*", "citizens.npc.activationrange"),
+    ("citizens.npc.*", "citizens.npc.respawn"),
+    ("citizens.npc.*", "citizens.npc.scaledmaxhealth"),
+    ("citizens.npc.*", "citizens.npc.trackingrange"),
+    ("citizens.npc.*", "citizens.npc.playerlist"),
+    ("citizens.npc.*", "citizens.npc.skinlayers"),
+    ("citizens.npc.*", "citizens.npc.entitypose"),
+    ("citizens.npc.*", "citizens.npc.metadata"),
     ("citizens.npc.*", "citizens.npc.copy"),
     ("citizens.npc.*", "citizens.npc.create"),
     ("citizens.npc.*", "citizens.npc.create.player"),
@@ -688,6 +781,25 @@ const PARENT_EDGES: &[(&str, &str)] = &[
     ("citizens.*", "citizens.npc.age"),
     ("citizens.*", "citizens.npc.anchor"),
     ("citizens.*", "citizens.npc.command"),
+    ("citizens.*", "citizens.npc.aggressive"),
+    ("citizens.*", "citizens.npc.ai"),
+    ("citizens.*", "citizens.npc.chunkload"),
+    ("citizens.*", "citizens.npc.collidable"),
+    ("citizens.*", "citizens.npc.knockback"),
+    ("citizens.*", "citizens.npc.leashable"),
+    ("citizens.*", "citizens.npc.passive"),
+    ("citizens.*", "citizens.npc.pickupitems"),
+    ("citizens.*", "citizens.npc.sitting"),
+    ("citizens.*", "citizens.npc.swim"),
+    ("citizens.*", "citizens.npc.targetable"),
+    ("citizens.*", "citizens.npc.activationrange"),
+    ("citizens.*", "citizens.npc.respawn"),
+    ("citizens.*", "citizens.npc.scaledmaxhealth"),
+    ("citizens.*", "citizens.npc.trackingrange"),
+    ("citizens.*", "citizens.npc.playerlist"),
+    ("citizens.*", "citizens.npc.skinlayers"),
+    ("citizens.*", "citizens.npc.entitypose"),
+    ("citizens.*", "citizens.npc.metadata"),
     ("citizens.*", "citizens.npc.copy"),
     ("citizens.*", "citizens.npc.create"),
     ("citizens.*", "citizens.npc.create.player"),
@@ -1282,6 +1394,7 @@ fn npc(w: &mut World, sender: &Sender, rest: &str) -> Res {
         "text" => text_lines(w, sender, tail),
         "equip" => equip(w, sender, &args),
         "path" => path(w, sender, tail),
+        n if modifiers::handles(n) => modifiers::run(w, sender, n, &args),
         _ => Err(usage_error(w, Some(M_TOO_MANY), c)),
     }
 }
