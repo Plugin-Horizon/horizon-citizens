@@ -1081,6 +1081,16 @@ impl NpcData {
         points.push(point);
         self.store_waypoint_points(points);
     }
+    /// Inserts a linear waypoint at index `i` (0-based; the end when `i` is past it).
+    pub fn insert_waypoint(&mut self, i: usize, loc: &Location) {
+        self.add_waypoint(loc);
+        let mut points = self.waypoint_points();
+        if let Some(last) = points.pop() {
+            let at = i.min(points.len());
+            points.insert(at, last);
+        }
+        self.store_waypoint_points(points);
+    }
     /// Removes the waypoint at `i` (0-based, as `/npc path list` numbers them).
     pub fn remove_waypoint(&mut self, i: usize) -> bool {
         let mut points = self.waypoint_points();

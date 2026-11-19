@@ -8,6 +8,7 @@
 //! does not have are not registered (see GAPS.md).
 
 mod modifiers;
+mod templates;
 
 use crate::horizon_citizens_core::tree::TreeExt;
 use crate::horizon_citizens_core::yaml::Node;
@@ -584,6 +585,12 @@ pub fn usages() -> Vec<String> {
     for u in ["citizens help", "citizens", "citizens save", "citizens reload", "citizens load"] {
         out.push(u.to_owned());
     }
+    // `/template` (`/tpl`) and `/waypoints` (`/wp`).
+    for u in templates::USAGES {
+        out.push((*u).to_owned());
+        let alias = if u.starts_with("template") { u.replacen("template", "tpl", 1) } else { u.replacen("waypoints", "wp", 1) };
+        out.push(alias);
+    }
     out
 }
 
@@ -652,6 +659,15 @@ pub const NODES: &[&str] = &[
     "citizens.npc.type",
     "citizens.npc.vulnerable",
     "citizens.npc.command",
+    "citizens.templates.apply",
+    "citizens.templates.generate",
+    "citizens.templates.list",
+    "citizens.templates.help",
+    "citizens.waypoints.add",
+    "citizens.waypoints.remove",
+    "citizens.waypoints.provider",
+    "citizens.waypoints.disableteleport",
+    "citizens.waypoints.help",
     "citizens.npc.aggressive",
     "citizens.npc.ai",
     "citizens.npc.chunkload",
@@ -673,9 +689,18 @@ pub const NODES: &[&str] = &[
     "citizens.npc.metadata",
 ];
 
+/// Whether `root` is one of the commands this mod answers (`npc`, `citizens`, `trait`, `template`/`tpl`,
+/// `waypoints`/`wp`).
+pub fn is_root(root: &str) -> bool {
+    matches!(root, "npc" | "citizens" | "trait") || templates::ROOTS.contains(&root)
+}
+
 /// The permission node of a command, by its root word and its first word after it. A word that
 /// is no sub-command asks for `citizens.npc.info`, as Citizens' bare `/npc` does.
 pub fn node_for(root: &str, sub: &str) -> &'static str {
+    if templates::ROOTS.contains(&root) {
+        return templates::node(root, sub);
+    }
     if root == "citizens" {
         return match sub.to_ascii_lowercase().as_str() {
             "help" => "citizens.citizens.help",
@@ -705,6 +730,24 @@ const PARENT_EDGES: &[(&str, &str)] = &[
     ("citizens.npc.trait.*", "citizens.npc.trait"),
     ("citizens.admin.*", "citizens.admin"),
     ("citizens.admin.*", "citizens.admin.remove.all"),
+    ("citizens.templates.*", "citizens.templates.apply"),
+    ("citizens.templates.*", "citizens.templates.generate"),
+    ("citizens.templates.*", "citizens.templates.list"),
+    ("citizens.templates.*", "citizens.templates.help"),
+    ("citizens.*", "citizens.templates.apply"),
+    ("citizens.*", "citizens.templates.generate"),
+    ("citizens.*", "citizens.templates.list"),
+    ("citizens.*", "citizens.templates.help"),
+    ("citizens.waypoints.*", "citizens.waypoints.add"),
+    ("citizens.waypoints.*", "citizens.waypoints.remove"),
+    ("citizens.waypoints.*", "citizens.waypoints.provider"),
+    ("citizens.waypoints.*", "citizens.waypoints.disableteleport"),
+    ("citizens.waypoints.*", "citizens.waypoints.help"),
+    ("citizens.*", "citizens.waypoints.add"),
+    ("citizens.*", "citizens.waypoints.remove"),
+    ("citizens.*", "citizens.waypoints.provider"),
+    ("citizens.*", "citizens.waypoints.disableteleport"),
+    ("citizens.*", "citizens.waypoints.help"),
     ("citizens.npc.*", "citizens.npc.age"),
     ("citizens.npc.*", "citizens.npc.anchor"),
     ("citizens.npc.*", "citizens.npc.command"),
@@ -1249,6 +1292,12 @@ pub fn run(w: &mut World, sender: &Sender, line: &str, reload: impl FnOnce() -> 
     }
     match root {
         "citizens" => citizens(w, sender, rest, reload),
+        "template" | "tpl" => match templates::template(w, sender, rest) {
+            Ok(r) | Err(r) => r,
+        },
+        "waypoints" | "wp" => match templates::waypoints(w, sender, rest) {
+            Ok(r) | Err(r) => r,
+        },
         "trait" => match trait_cmd(w, sender, rest) {
             Ok(r) | Err(r) => r,
         },
@@ -1523,7 +1572,7 @@ fn create(w: &mut World, sender: &Sender, args: &Args) -> Res {
     {
         return Err(err(w, M_NO_PERM, &[]));
     }
-    if (args.has_value("at") || args.has_value("registry") || args.has_value("trait") || args.has_value("template"))
+    if (args.has_value("at") || args.has_value("registry") || args.has_value("trait") || args.has_value("templates"))
         && !exact(sender, level, "citizens.npc.admin")
     {
         return Err(err(w, M_NO_PERM, &[]));
@@ -1533,7 +1582,7 @@ fn create(w: &mut World, sender: &Sender, args: &Args) -> Res {
             return Err(err(w, M_UNSUPPORTED, &[what]));
         }
     }
-    for what in ["item", "model", "registry", "temporaryduration", "template"] {
+    for what in ["item", "model", "registry", "temporaryduration"] {
         if args.has_value(what) {
             return Err(err(w, M_UNSUPPORTED, &[&format!("--{what}")]));
         }
@@ -1581,6 +1630,15 @@ fn create(w: &mut World, sender: &Sender, args: &Args) -> Res {
     w.select(skey(sender), id);
     let shown = name_at(w, id);
     out.extend(ok(w, "Created [[{0}]] (ID [[{1}]]).", &[&shown, &id.to_string()]));
+    // `--templates a:b,c`: each is applied after the NPC exists (`/template apply`).
+    if let Some(list) = args.value("templates") {
+        for reference in list.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+            match templates::apply_named(w, id, reference) {
+                Ok(_) => out.extend(ok(w, "Applied template [[{0}]].", &[reference])),
+                Err(e) => out.extend(e),
+            }
+        }
+    }
     Ok(out)
 }
 

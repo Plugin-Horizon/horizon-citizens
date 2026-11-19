@@ -555,7 +555,7 @@ impl Hooks for Citizens {
             .map(str::to_ascii_lowercase)
             .collect();
         let root = words.first().map(String::as_str).unwrap_or("");
-        if root != "npc" && root != "citizens" && root != "trait" {
+        if !core::commands::is_root(root) {
             return Flow::Continue;
         }
         let sub = if root == "trait" { "" } else { words.get(1).map(String::as_str).unwrap_or("") };
@@ -588,7 +588,7 @@ impl Hooks for Citizens {
         let level = lock(&self.state).cfg.command_level;
         let usages = core::commands::usages();
         let mut hide: Vec<&str> = Vec::new();
-        for root in ["npc", "citizens", "trait"] {
+        for root in ["npc", "citizens", "trait", "template", "tpl", "waypoints", "wp"] {
             let allowed = match host.player(event.player) {
                 Some(p) => may_any(host, p, root, level, &usages),
                 None => false,
@@ -600,7 +600,7 @@ impl Hooks for Citizens {
         event.names.retain(|n| !hide.contains(&n.to_ascii_lowercase().as_str()));
     }
 
-    /// `/npc`, `/citizens` and `/trait`, typed by a player or the console (their Citizens lines).
+    /// `/npc`, `/citizens`, `/trait`, `/template` and `/waypoints`, typed by a player or the console (their Citizens lines).
     fn run_mod_command(
         &self,
         host: &mut dyn ServerHost,
@@ -612,7 +612,7 @@ impl Hooks for Citizens {
             .first()
             .map(String::as_str)
             .unwrap_or("");
-        if root != "npc" && root != "citizens" && root != "trait" {
+        if !core::commands::is_root(root) {
             return Flow::Continue;
         }
         self.install(&*host);
