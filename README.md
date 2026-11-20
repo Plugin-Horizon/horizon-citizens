@@ -1,5 +1,9 @@
 # horizon-citizens
 
+## Port status
+
+Compared with Citizens 2.0.x (estimate): **75 %** of the original's commands, permissions, config keys, messages and features work today; **78 %** once our open Horizon PRs are merged; **79 %** with the engine changes we are writing; **75 %** with the newest Horizon SDK. Estimated count: ~143/~190 items. Status: not yet compiled after the 2026-11-20 round.
+
 > **Unofficial Rust port of Citizens for the Horizon server (https://github.com/arismoko/horizon). Not affiliated with or endorsed by the Citizens authors.**
 
 Citizens-style NPCs as a native mod for [Horizon](https://github.com/arismoko/horizon), the
