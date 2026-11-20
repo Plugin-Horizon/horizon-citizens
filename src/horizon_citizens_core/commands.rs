@@ -4245,7 +4245,7 @@ mod tests {
         assert!(run_ok(&mut w, &s, "npc flyable")[0].contains("is now flyable"));
         assert!(run_ok(&mut w, &s, "npc flyable")[0].contains("no longer flyable"));
         // A real Citizens command this port lacks.
-        assert!(run_ok(&mut w, &s, "npc aggressive true")[0].contains("not supported"));
+        assert!(run_ok(&mut w, &s, "npc wolf")[0].contains("not supported"));
         // Not a Citizens command at all.
         assert!(run_ok(&mut w, &s, "npc sneak")[0].contains("Too many arguments"));
     }
