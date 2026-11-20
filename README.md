@@ -1,5 +1,9 @@
 # horizon-citizens
 
+## Port status
+
+Compared with Citizens 2.0.x (estimate): **75 %** of the original's commands, permissions, config keys, messages and features work today; **78 %** once our open Horizon PRs are merged; **79 %** with the engine changes we are writing; **75 %** with the newest Horizon SDK. Estimated count: ~143/~190 items. Status: not yet compiled after the 2026-11-20 round.
+
 > **Unofficial Rust port of Citizens for the Horizon server (https://github.com/arismoko/horizon). Not affiliated with or endorsed by the Citizens authors.**
 
 Citizens-style NPCs as a native mod for [Horizon](https://github.com/arismoko/horizon), the
@@ -78,8 +82,15 @@ This is a native trait mod: `horizon-mod.toml`, a `Cargo.toml` that depends on `
   on the server console.
 
 Not done: the equipment and NPC editors (GUIs), other traits (follow, poses, talk-close, shops,
-...), other waypoint providers, pathfinding, the other ~80 `/npc` commands and `/trait`,
-`/template`, `/waypoints` (list in the Known gaps section), the chat-based text editor, path recording, undo.
+...), pathfinding, the mob-specific `/npc` modifiers (`/npc wolf`, `/npc horse`, ...) and
+the actions (`jump`, `mount`, `speak`, `undo`, ...), the chat-based text editor, path recording.
+
+`/template` (`/tpl`: `list`, `apply`, `generate`, and `create --templates`) and `/waypoints` (`/wp`:
+`add`, `remove`, `provider`, `disableteleport`) follow the public Citizens wiki. So do `/npc ai`,
+`aggressive`, `passive`, `collidable`, `chunkload`, `leashable`, `targetable`, `knockback`, `swim`,
+`pickupitems`, `sitting`, `playerlist`, `skinlayers`, `entitypose`, `trackingrange`,
+`activationrange`, `respawn`, `scaledmaxhealth` and `metadata`: they save their setting, and only
+`ai` changes the spawned entity (the reply says so for the others).
 
 ## For other mods
 
@@ -126,6 +137,32 @@ What does not work yet on arismoko/horizon (each is marked `TODO(arismoko-api: .
 - The server folder is taken from the working directory (dedicated servers only).
 - `/npc`, `/citizens` and `/trait` sub-commands carry their own `citizens.*` nodes; the bare root commands carry none.
 - The `team add citizens_<colour>` console commands used for glow colours fail on arismoko's console (logged, glow colour falls back).
+
+## Docs gaps
+
+`/template`, `/waypoints` and the modifiers named above were written from the wiki's command table,
+its Templates and Waypoints pages and `plugin.yml` only (Citizens' source was not opened for them).
+Where those pages say nothing, this port decided, and the decision is in the module docs of
+`src/horizon_citizens_core/commands/modifiers.rs` and `templates.rs`:
+
+- reply texts and save keys (`traits.<modifier>.*`, `metadata.<key>`) are this port's own, so
+  Citizens may not read them back;
+- unset flags read as off, `collidable` as on; `respawn` is saved as a number, its unit is unknown;
+- templates: `override` missing means false; the `commands` section is counted, not run;
+  `generate` never overwrites; a name in several namespaces needs `namespace:name`;
+- waypoints: indices are 0-based, `remove` without arguments removes the last point, only the
+  linear provider keeps points, `hpa` (no description on the wiki) is not implemented.
+
+Round 3 (docs only again): about sixty more `/npc` modifiers (`src/horizon_citizens_core/commands/mobs.rs`):
+the mob-specific ones (`allay`, `armorstand`, `wolf`, `villager`, `cat`, `fox`, `horse`, `display`, ...),
+`home`, `hitbox`, `forcefield`, `pathopt`, `pausepathfinding`, `rotationsettings`, `bossbar`, `playerfilter`,
+`potioneffect`, `attribute`, `speak`, `panimate`, `undo`, `useitem`, `item`, `controllable`, ... They check the mob
+type and the values, save under `traits.<modifier>.<key>` and complete in chat. Live on the entity: `armorstand`,
+`phantom`, `pufferfish`, `textdisplay`, `villager`; `speak` reaches players in range (5 blocks without `--range`),
+`panimate` plays the arm swings, `undo` takes back the last create or remove. Every other setting is saved and the
+reply says Horizon does not act on it yet. Still answered "not supported": `behavior`, `configgui`, `copier`,
+`disguise`, `drops`, `eval`, `inventory`, `jump`, `mount`, `shop`, `showshop`, `spectate`, `target`, `warden`
+(GUIs, editors, other plugins, or no host API). Pathfinding stays a straight line: see HMOD_PORT.md.
 
 ## Licence
 

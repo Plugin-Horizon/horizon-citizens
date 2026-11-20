@@ -6,12 +6,12 @@
 //! `citizens_npc` and `citizens_npc_<id>`. Hologram lines are `text_display`s with UUIDs derived
 //! from the NPC's.
 
-use crate::config::Config;
-use crate::ids::{derived_uuid, format_uuid, int_array_snbt};
-use crate::npc::{Location, Nameplate, NpcData, Skin};
-use crate::text;
-use crate::tree::TreeExt;
-use crate::yaml::Node;
+use crate::horizon_citizens_core::config::Config;
+use crate::horizon_citizens_core::ids::{derived_uuid, format_uuid, int_array_snbt};
+use crate::horizon_citizens_core::npc::{Location, Nameplate, NpcData, Skin};
+use crate::horizon_citizens_core::text;
+use crate::horizon_citizens_core::tree::TreeExt;
+use crate::horizon_citizens_core::yaml::Node;
 
 pub const TAG: &str = "citizens_npc";
 pub const HOLOGRAM_TAG: &str = "citizens_hologram";
@@ -133,7 +133,8 @@ pub fn npc_snbt(npc: &NpcData, uuid: u128, loc: &Location, cfg: &Config) -> Stri
         }
         parts.push("immovable:1b".into());
         parts.push("hide_description:1b".into());
-    } else {
+    } else if npc.map.at(&["traits", "ai", "enabled"]).and_then(Node::as_bool) != Some(true) {
+        // `/npc ai true` leaves the mob its own AI.
         parts.push("NoAI:1b".into());
     }
     // Traits Citizens saves that show in the entity's own data (`/npc age|powered|sheep|slimesize`).
@@ -147,7 +148,7 @@ pub fn npc_snbt(npc: &NpcData, uuid: u128, loc: &Location, cfg: &Config) -> Stri
     }
     if kind == "minecraft:sheep" {
         let colour = tp("sheeptrait", "color").and_then(Node::text).unwrap_or_default();
-        if let Some(i) = crate::commands::DYE_COLOURS.iter().position(|c| c.eq_ignore_ascii_case(&colour)) {
+        if let Some(i) = crate::horizon_citizens_core::commands::DYE_COLOURS.iter().position(|c| c.eq_ignore_ascii_case(&colour)) {
             parts.push(format!("Color:{i}b"));
         }
         if tp("sheeptrait", "sheared").and_then(Node::as_bool) == Some(true) {
@@ -159,6 +160,8 @@ pub fn npc_snbt(npc: &NpcData, uuid: u128, loc: &Location, cfg: &Config) -> Stri
             parts.push(format!("Size:{}", (size - 1).max(0)));
         }
     }
+    // Settings of the mob-specific modifiers that the entity's own data can carry.
+    parts.extend(crate::horizon_citizens_core::commands::live_nbt(npc, &kind));
     if let Some(effect) = npc.invisibility() {
         // Citizens' persistent invisibility potion, as the entity's own effect.
         let duration = effect.duration.map_or(-1, |d| d.min(i64::from(i32::MAX)));
@@ -218,7 +221,7 @@ const NAME_HOLOGRAM: u32 = 0xFFFF;
 
 /// Whether the NPC's name is shown as a hologram instead of its name tag: a player NPC whose
 /// name (in its saved colour-code form) is longer than a game profile name may be (16). Seen on
-/// Paper (rec_lobby, rec_lobby_winter): such an NPC's own name tag is hidden and a text display
+/// Paper: such an NPC's own name tag is hidden and a text display
 /// with the name sits at its height, raised 0.2 by the display's translation.
 pub fn name_hologram(npc: &NpcData) -> bool {
     npc.kind().eq_ignore_ascii_case("PLAYER")
@@ -242,7 +245,7 @@ pub fn hologram(npc: &NpcData, uuid: u128, dimension: &str, loc: &Location, cfg:
     let height = npc.hologram_line_height(cfg.hologram.default_line_height);
     let mut y = loc.y + cfg.hologram.base_height + height;
     let mut out = Vec::with_capacity(lines.len() + 1);
-    // Bottom up: the first line sits lowest (Citizens on Paper, seen on rec_lobby).
+    // Bottom up: the first line sits lowest (Citizens on Paper).
     for (i, line) in lines.iter().enumerate() {
         y += line.margin_bottom;
         let id = derived_uuid(uuid, i as u32);
@@ -316,8 +319,8 @@ pub fn teleport(uuid: u128, dimension: &str, loc: &Location) -> String {
 
 /// Block groups and their step sound, for a walking NPC's footstep (`Entity.playStepSound`: the
 /// block's sound type at 15 % volume). The block under the feet (y - 0.2) picks the sound;
-/// anything else gets stone's, air included (air's sound type is stone: rec_lobby's walker
-/// walks on air at y 44 and Paper played 41 stone steps in 30 s).
+/// anything else gets stone's, air included (air's sound type is stone: a walker
+/// walking on air at y 44 made Paper play 41 stone steps in 30 s).
 const STEP_SOUNDS: &[(&str, &str)] = &[
     ("#minecraft:wool", "block.wool.step"),
     ("#minecraft:wool_carpets", "block.wool.step"),
@@ -405,7 +408,7 @@ pub fn refresh(npc: &NpcData, uuid: u128, dimension: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::npc::Hand;
+    use crate::horizon_citizens_core::npc::Hand;
 
     fn npc() -> NpcData {
         let mut n = NpcData::new(4, 0x11, "&6Guide", "PLAYER");
@@ -479,6 +482,9 @@ mod tests {
         };
         let s = npc_snbt(&n, 5, &loc, &Config::default());
         assert!(s.contains("NoAI:1b"));
+        n.map.put(&["traits", "ai", "enabled"], Node::bool(true));
+        assert!(!npc_snbt(&n, 5, &loc, &Config::default()).contains("NoAI"), "`/npc ai true` keeps the mob's AI");
+        n.map.put(&["traits", "ai", "enabled"], Node::bool(false));
         assert!(!s.contains("Invulnerable"));
         assert!(!s.contains("CustomName"));
         assert!(s.contains("equipment:{head:{id:\"minecraft:carved_pumpkin\",count:1}}"));
@@ -503,12 +509,12 @@ mod tests {
         assert_ne!(h[0].0, h[1].0);
     }
 
-    /// rec_lobby's "&f&lMenahem (Private)": the name over 16 characters is a hologram at the
+    /// A long name such as "&f&lVisitor Lounge (Private)": the name over 16 characters is a hologram at the
     /// NPC's height with translation 0.2, the entity's own name tag is hidden, and a line of
-    /// height 0.25 sits at 2.25 (rec_lobby_winter's FRONTIER NPC).
+    /// height 0.25 sits at 2.25 (a portal NPC).
     #[test]
     fn a_long_name_is_a_hologram() {
-        let mut n = NpcData::new(4, 0x11, "&f&lMenahem (Private)", "PLAYER");
+        let mut n = NpcData::new(4, 0x11, "&f&lVisitor Lounge (Private)", "PLAYER");
         n.set_location(&npc().location().unwrap());
         n.add_hologram_line("&c&lCLOSED");
         n.map.put(&["traits", "hologramtrait", "lineHeight"], Node::float(0.25));
@@ -518,7 +524,7 @@ mod tests {
         assert!(h[0].1.contains("text_display 100.5 48.25 -62.25"), "{}", h[0].1);
         assert!(h[1].1.contains("text_display 100.5 47.8 -62.25"), "{}", h[1].1);
         assert!(h[1].1.contains("translation:[0f,0.2f,0f]"), "{}", h[1].1);
-        assert!(h[1].1.contains("Menahem (Private)"), "{}", h[1].1);
+        assert!(h[1].1.contains("Visitor Lounge (Private)"), "{}", h[1].1);
         let s = npc_snbt(&n, 5, &loc, &Config::default());
         assert!(!s.contains("CustomName"), "{s}");
         assert!(refresh(&n, 5, "minecraft:overworld").contains("CustomName:\"\",CustomNameVisible:0b"));
@@ -528,7 +534,7 @@ mod tests {
         assert!(npc_snbt(&short, 5, &loc, &Config::default()).contains("CustomNameVisible:1b"));
     }
 
-    /// rec_lobby's walker #30: a footstep picks the sound by the block under the feet, stone by default.
+    /// A walking NPC: a footstep picks the sound by the block under the feet, stone by default.
     #[test]
     fn a_footstep_sounds_by_the_block_below() {
         let loc = npc().location().unwrap();

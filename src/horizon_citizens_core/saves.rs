@@ -6,9 +6,9 @@
 //! Nothing is dropped on the way: a key of the `npc` map that is not an id (or whose value is
 //! not a map) is kept where it is. An id whose NPC was removed is taken out.
 
-use crate::npc::NpcData;
-use crate::tree::TreeExt;
-use crate::yaml::{self, Document, Entry, Flow, Node, Style};
+use crate::horizon_citizens_core::npc::NpcData;
+use crate::horizon_citizens_core::tree::TreeExt;
+use crate::horizon_citizens_core::yaml::{self, Document, Entry, Flow, Node, Style};
 use std::path::Path;
 
 pub const HEADER: &str = "Citizens NPC Storage";
@@ -305,7 +305,7 @@ npc:
       traitnames: equipment,potioneffects
     uuid: 00000000-0000-4000-8000-000000000005
 ",
-            crate::items::fixtures::BLADE
+            crate::horizon_citizens_core::items::fixtures::BLADE
         )
     }
 

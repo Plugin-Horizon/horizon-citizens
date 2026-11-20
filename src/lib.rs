@@ -4,12 +4,15 @@
 //!
 //! Public interface for other mods (Sentinel's bridge, unchanged from 0.1.0):
 //! `mod_citizens::{api, npc, yaml, DespawnReason, NpcEvent}`.
+
+pub mod horizon_citizens_core;
 use horizon_citizens_core as core;
 use mod_api::{
     AttackEntityEvent, Command, CommandArgumentValue, CommandInvocation, CommandSource, Config,
     ConfigKind, ConfigLoadingEvent, ConfigReloadingEvent, EntityInteractEvent,
     EntityJoinLevelEvent, EntityLeaveLevelEvent, Flow, Hand, Hooks, HostSide, LevelRandomHost,
-    LivingIncomingDamageEvent, PermissionLevel, PlayerCommandEvent, PlayerCommandsSentEvent, PlayerRef, RegisterCommandsEvent,
+    LivingIncomingDamageEvent, NodeDefault, PermissionGatherNodesEvent, PermissionLevel, PermissionNode,
+    PermissionValueType, PlayerCommandEvent, PlayerCommandsSentEvent, PlayerRef, RegisterCommandsEvent, RegisterNodeCommandsEvent,
     RegisterConfigsEvent, RemovalReason, RunModCommandEvent, ServerHost, ServerStoppingEvent,
     ServerTickEvent, ServerTickPhase, Text,
 };
@@ -154,22 +157,49 @@ fn level_num(level: PermissionLevel) -> u8 {
     }
 }
 
-/// The `citizens.*` nodes a player below `command_level` holds: through `has_permission` (the provider's
-/// answer, else operator level 2), or through a held parent node (`parents_of`, plugin.yml `children:`).
-fn granted_nodes(host: &dyn ServerHost, p: PlayerRef, level: u8, command_level: u8) -> Vec<String> {
+/// The typed Boolean node of a Citizens permission name (`citizens.npc.create`).
+fn perm_node(name: &str) -> PermissionNode {
+    PermissionNode::new(name, PermissionValueType::Boolean)
+}
+
+/// Whether `p` holds the Boolean node `name` from the server's handler. A refused query (an undeclared name,
+/// a handler failure) is a denial.
+fn holds(host: &mut dyn ServerHost, p: PlayerRef, name: &str) -> bool {
+    p.permission_bool(host, &perm_node(name)).unwrap_or(false)
+}
+
+/// Whether `p` may run any usage under `root`: the operator level, or a node of one of its usages (or a parent).
+fn may_any(host: &mut dyn ServerHost, p: PlayerRef, root: &str, level: u8, usages: &[String]) -> bool {
+    if p.permission_level(&*host).unwrap_or(0) >= level {
+        return true;
+    }
+    usages
+        .iter()
+        .filter(|u| u.split_whitespace().next() == Some(root))
+        .any(|u| {
+            let node = core::commands::node_of_usage(u);
+            holds(host, p, node) || core::commands::parents_of(node).iter().any(|&parent| holds(host, p, parent))
+        })
+}
+
+/// The `citizens.*` nodes a player below `command_level` holds, as the handler answers them. Wildcard parents
+/// (`citizens.npc.*`) are not declared on Horizon, so their children are not granted by them (HMOD-GAP(wildcard_nodes)).
+fn granted_nodes(host: &mut dyn ServerHost, p: PlayerRef, level: u8, command_level: u8) -> Vec<String> {
     if level >= command_level {
         return Vec::new();
     }
-    core::commands::NODES
-        .iter()
-        .copied()
+    // The per-type create nodes are asked by `create`, so they are part of the grants.
+    let mut all: Vec<String> = core::commands::all_nodes().into_iter().map(str::to_owned).collect();
+    all.extend(core::commands::create_type_nodes());
+    all.sort();
+    all.dedup();
+    all.into_iter()
         .filter(|node| {
-            p.has_permission(host, node)
+            holds(host, p, node)
                 || core::commands::parents_of(node)
                     .iter()
-                    .any(|&parent| p.permission_value(host, parent) == Some(true))
+                    .any(|&parent| holds(host, p, parent))
         })
-        .map(str::to_owned)
         .collect()
 }
 
@@ -248,13 +278,15 @@ fn npc_kind(kind: &str) -> bool {
 
 /// The name of a player by UUID: online, else the server's user cache (`usercache.json`). Never asked
 /// of Mojang, so an owner who was never on the server shows as the UUID.
+/// HMOD-GAP(profile_cache): Horizon main has no profile lookup for offline players, so only online players resolve here.
 fn profile_by_uuid(host: &dyn ServerHost, uuid: u128) -> Option<String> {
-    host.profile_by_uuid(uuid).map(|p| p.name)
+    host.player(uuid)?.name(host)
 }
 
-/// A player by account name, any case: online, else the user cache. Never asked of Mojang.
+/// A player by account name, any case: online only (HMOD-GAP(profile_cache), see `profile_by_uuid`).
 fn profile_by_name(host: &dyn ServerHost, name: &str) -> Option<(u128, String)> {
-    host.profile_by_name(name).map(|p| (p.uuid, p.name))
+    let player = host.players().player_by_name(name)?;
+    Some((player.uuid(), player.name(host)?))
 }
 
 /// Names for `/npc owner`: the owners of all NPCs (UUID -> name) and the typed word as a name.
@@ -476,24 +508,44 @@ impl Hooks for Citizens {
     }
 
     fn register_commands(&self, _host: &mut dyn ServerHost, event: &mut RegisterCommandsEvent<'_>) {
+        // The bare roots (`/npc`, `/citizens`, `/trait`) have no node: a node there would gate every
+        // sub-command under it. They stay open and are registered here; the sub-commands go to
+        // `register_node_commands`.
         let level = lock(&self.state).cfg.command_level;
-        // The engine gates a bare root (`npc`, `citizens`) by its FIRST registered usage's node (command_nodes
-        // in the engine): register the bare roots first, so they have no node and stay open. Else `npc help`'s
-        // node gates every `npc` sub-command (retest 2026-11-14: `npc skin` granted alone = unknown command).
-        let mut usages = core::commands::usages();
-        usages.sort_by_key(|usage| usage.contains(' '));
-        for usage in usages {
+        for usage in core::commands::usages() {
+            if !usage.contains(' ') {
+                event.commands.push(Command::op(&usage, level));
+            }
+        }
+    }
+
+    fn register_node_commands(&self, _host: &mut dyn ServerHost, event: &mut RegisterNodeCommandsEvent<'_>) {
+        let level = lock(&self.state).cfg.command_level;
+        for usage in core::commands::usages() {
+            if !usage.contains(' ') {
+                continue;
+            }
             // Each sub-command path carries Citizens' node (`citizens.npc.create`, `node_of_usage`), so a
-            // permissions mod can hand one to a non-operator; `level` decides when none answers. The bare
-            // `/npc`, `/citizens` and `/trait` have none: a node there would gate every sub-command under it.
-            let node = core::commands::node_of_usage(&usage);
+            // permissions mod can hand one to a non-operator; `level` decides when none answers.
             // The help nodes are `default: op` in plugin.yml, like every other node: no usage is level 0.
-            let command = Command::op(&usage, level);
-            event.commands.push(if usage.contains(' ') {
-                command.with_node(node)
-            } else {
-                command
-            });
+            let node = core::commands::node_of_usage(&usage);
+            event.commands.push(Command::op(&usage, level).with_node(&perm_node(node)));
+        }
+    }
+
+    fn permission_gather_nodes(&self, event: &mut PermissionGatherNodesEvent<'_>) {
+        // Every non-wildcard node the commands ask, at the configured `command-level` (the level the command
+        // gate uses, so both agree; 2 when gathering runs before the config is read). The wildcard parents
+        // cannot be declared (HMOD-GAP(wildcard_nodes)).
+        let level = i32::from(lock(&self.state).cfg.command_level);
+        let mut all: Vec<String> = core::commands::all_nodes()
+            .into_iter()
+            .filter(|n| !n.contains('*'))
+            .map(str::to_owned)
+            .collect();
+        all.extend(core::commands::create_type_nodes());
+        for node in all {
+            let _ = event.nodes.add(perm_node(&node), NodeDefault::Level(PermissionLevel::from_level(level)));
         }
     }
 
@@ -507,7 +559,7 @@ impl Hooks for Citizens {
             .map(str::to_ascii_lowercase)
             .collect();
         let root = words.first().map(String::as_str).unwrap_or("");
-        if root != "npc" && root != "citizens" && root != "trait" {
+        if !core::commands::is_root(root) {
             return Flow::Continue;
         }
         let sub = if root == "trait" { "" } else { words.get(1).map(String::as_str).unwrap_or("") };
@@ -521,17 +573,7 @@ impl Hooks for Citizens {
             return Flow::Continue;
         }
         let node = core::commands::node_for(root, sub);
-        let level = lock(&self.state).cfg.command_level;
-        let allowed = host.player(event.player).is_some_and(|p| match p.permission_value(&*host, node) {
-            Some(answer) => answer,
-            None => {
-                // A held parent (`citizens.npc.*`, `citizens.*`) grants the node (plugin.yml `children:`).
-                core::commands::parents_of(node)
-                    .iter()
-                    .any(|&parent| p.permission_value(&*host, parent) == Some(true))
-                    || p.permission_level(&*host).unwrap_or(0) >= level
-            }
-        });
+        let allowed = host.player(event.player).is_some_and(|p| holds(host, p, node));
         if allowed {
             return Flow::Continue;
         }
@@ -549,26 +591,20 @@ impl Hooks for Citizens {
     fn player_commands_sent(&self, host: &mut dyn ServerHost, event: &mut PlayerCommandsSentEvent<'_>) {
         let level = lock(&self.state).cfg.command_level;
         let usages = core::commands::usages();
-        let may_any = |host: &dyn ServerHost, root: &str| -> bool {
-            host.player(event.player).is_some_and(|p| {
-                p.permission_level(host).unwrap_or(0) >= level
-                    || usages.iter().filter(|u| u.split_whitespace().next() == Some(root)).any(|u| {
-                        let node = core::commands::node_of_usage(u);
-                        p.permission_value(host, node) == Some(true)
-                            || core::commands::parents_of(node)
-                                .iter()
-                                .any(|&parent| p.permission_value(host, parent) == Some(true))
-                    })
-            })
-        };
-        let hide: Vec<&str> = ["npc", "citizens", "trait"]
-            .into_iter()
-            .filter(|root| !may_any(&*host, root))
-            .collect();
+        let mut hide: Vec<&str> = Vec::new();
+        for root in ["npc", "citizens", "trait", "template", "tpl", "waypoints", "wp"] {
+            let allowed = match host.player(event.player) {
+                Some(p) => may_any(host, p, root, level, &usages),
+                None => false,
+            };
+            if !allowed {
+                hide.push(root);
+            }
+        }
         event.names.retain(|n| !hide.contains(&n.to_ascii_lowercase().as_str()));
     }
 
-    /// `/npc`, `/citizens` and `/trait`, typed by a player or the console (their Citizens lines).
+    /// `/npc`, `/citizens`, `/trait`, `/template` and `/waypoints`, typed by a player or the console (their Citizens lines).
     fn run_mod_command(
         &self,
         host: &mut dyn ServerHost,
@@ -580,7 +616,7 @@ impl Hooks for Citizens {
             .first()
             .map(String::as_str)
             .unwrap_or("");
-        if root != "npc" && root != "citizens" && root != "trait" {
+        if !core::commands::is_root(root) {
             return Flow::Continue;
         }
         self.install(&*host);
@@ -594,7 +630,7 @@ impl Hooks for Citizens {
                 };
                 let mut sender = sender_of(&info, &cfg);
                 sender.grants = granted_nodes(
-                    &*host,
+                    host,
                     *player,
                     info.view.permission,
                     cfg.command_level,
@@ -627,28 +663,33 @@ impl Hooks for Citizens {
         Flow::Cancel
     }
 
+    /// A claimed click is `Consume` (no client swing, the entity's and the item's own use do not run), where
+    /// `Flow::Cancel` was. Falling through is `None`.
     fn entity_interact(
         &self,
-        host: &mut dyn ServerHost,
+        host: HostSide<'_>,
         event: &mut EntityInteractEvent<'_>,
-    ) -> Flow {
+    ) -> Option<mod_api::InteractionResult> {
+        let HostSide::Server(host) = host else {
+            return None;
+        };
         let Ok(entity) = u32::try_from(event.entity) else {
-            return Flow::Continue;
+            return None;
         };
         if event.hand == Hand::Off {
             // Asked after the main hand of the same click: refused when the main hand claimed it.
             let claimed = lock(&self.state).last_claim == Some(event.entity);
             return if claimed {
-                Flow::Cancel
+                Some(mod_api::InteractionResult::Consume)
             } else {
-                Flow::Continue
+                None
             };
         }
         let Some(player) = host.players().acting_player() else {
-            return Flow::Continue;
+            return None;
         };
         let Some(info) = player_info(&*host, player) else {
-            return Flow::Continue;
+            return None;
         };
         let held = held_item_id(&*host, player);
         let claimed = api::with_world(|w| {
@@ -658,9 +699,9 @@ impl Hooks for Citizens {
         lock(&self.state).last_claim = claimed.then_some(event.entity);
         // Claimed: the hand swings, the entity's and the item's own use do not run.
         if claimed {
-            Flow::Cancel
+            Some(mod_api::InteractionResult::Consume)
         } else {
-            Flow::Continue
+            None
         }
     }
 

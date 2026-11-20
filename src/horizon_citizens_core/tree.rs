@@ -1,7 +1,7 @@
 //! Path helpers over the vendored YAML tree (`yaml::Node`), in the shape the NPC code uses:
 //! `at` / `put` take a path as a slice of keys (no dots inside a key).
 
-use crate::yaml::Node;
+use crate::horizon_citizens_core::yaml::Node;
 
 pub trait TreeExt {
     /// The node at `path` (`None` when a key is missing or a step is not a map).

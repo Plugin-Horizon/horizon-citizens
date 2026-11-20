@@ -4,7 +4,7 @@
 //!
 //! `cargo run --example roundtrip -- path/to/saves.yml ...`
 
-use horizon_citizens_core::saves::Saves;
+use mod_citizens::horizon_citizens_core::saves::Saves;
 
 fn key_of(line: &str) -> String {
     let t = line.trim_start();

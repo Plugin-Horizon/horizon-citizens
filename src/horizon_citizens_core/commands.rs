@@ -7,12 +7,17 @@
 //! Changed from the original: ported to Rust for Horizon. Commands that need a trait this port
 //! does not have are not registered (see GAPS.md).
 
-use crate::tree::TreeExt;
-use crate::yaml::Node;
-use crate::npc::{CommandSpec, Hand, Location, Nameplate, NpcData, Skin};
-use crate::saves::Saves;
-use crate::text;
-use crate::world::{DespawnReason, Sender, World};
+mod mobs;
+mod modifiers;
+pub use mobs::live_nbt;
+mod templates;
+
+use crate::horizon_citizens_core::tree::TreeExt;
+use crate::horizon_citizens_core::yaml::Node;
+use crate::horizon_citizens_core::npc::{CommandSpec, Hand, Location, Nameplate, NpcData, Skin};
+use crate::horizon_citizens_core::saves::Saves;
+use crate::horizon_citizens_core::text;
+use crate::horizon_citizens_core::world::{DespawnReason, Sender, World};
 
 // ---- messages (Citizens' en.json, `{n}` arguments, `[[x]]` highlights) ------------------------
 
@@ -309,14 +314,35 @@ const CMDS: &[Cmd] = &[
         "citizens.npc.edit.equip",
     ),
     cmd("path", &[], "path [list|add|remove <point>|clear]", 1, None, "citizens.npc.edit.path"),
+    cmd("aggressive", &[], "aggressive [true|false] (-t(emporary))", 2, Some(2), "citizens.npc.aggressive"),
+    cmd("ai", &[], "ai (true|false)", 1, Some(2), "citizens.npc.ai"),
+    cmd("chunkload", &[], "chunkload (-t(emporary))", 1, Some(1), "citizens.npc.chunkload"),
+    cmd("collidable", &[], "collidable --fluids [true|false]", 1, Some(2), "citizens.npc.collidable"),
+    cmd("knockback", &[], "knockback (--explicit true|false)", 1, Some(2), "citizens.npc.knockback"),
+    cmd("leashable", &[], "leashable", 1, Some(2), "citizens.npc.leashable"),
+    cmd("passive", &[], "passive (--set [true|false])", 1, Some(2), "citizens.npc.passive"),
+    cmd("pickupitems", &[], "pickupitems (--set [true|false])", 1, Some(2), "citizens.npc.pickupitems"),
+    cmd("sitting", &[], "sitting (--explicit [true|false])", 1, Some(2), "citizens.npc.sitting"),
+    cmd("swim", &[], "swim (--set [true|false])", 1, Some(2), "citizens.npc.swim"),
+    cmd("targetable", &[], "targetable", 1, Some(2), "citizens.npc.targetable"),
+    cmd("activationrange", &[], "activationrange [range]", 1, Some(2), "citizens.npc.activationrange"),
+    cmd("respawn", &[], "respawn [delay]", 1, Some(2), "citizens.npc.respawn"),
+    cmd("scaledmaxhealth", &[], "scaledmaxhealth [health]", 1, Some(2), "citizens.npc.scaledmaxhealth"),
+    cmd("trackingrange", &[], "trackingrange [range]", 1, Some(2), "citizens.npc.trackingrange"),
+    cmd("playerlist", &[], "playerlist (-a(dd),r(emove))", 1, Some(1), "citizens.npc.playerlist"),
+    cmd("skinlayers", &[], "skinlayers (--cape [true|false]) (--hat [true|false]) (--jacket [true|false]) (--sleeves [true|false]) (--pants [true|false])", 1, Some(1), "citizens.npc.skinlayers"),
+    cmd("entitypose", &[], "entitypose [pose]", 1, Some(2), "citizens.npc.entitypose"),
+    cmd("metadata", &[], "metadata set|get|remove [key] (value) (-t(emporary))", 3, None, "citizens.npc.metadata"),
 ];
 
 /// Citizens modifiers this port does not have (they answer "not supported", not "Too many arguments").
-const CITIZENS_ONLY: &[&str] = &["activationrange", "aggressive", "ai", "armorstand", "attribute", "bat", "behavior", "breakblock", "chunkload", "cload", "collidable", "pushable", "configgui", "controllable", "control", "disguise", "drops", "endercrystal", "enderman", "entitypose", "eval", "fish", "forcefield", "hitbox", "home", "horse", "donkey", "mule", "inventory", "item", "itemframe", "jump", "knockback", "leashable", "metadata", "minecart", "mirror", "mount", "nophysics", "ocelot", "packet", "painting", "passive", "pathopt", "po", "patho", "pausepathfinding", "pickupitems", "panimate", "playerfilter", "playerlist", "rabbittype", "rbtype", "respawn", "rotationsettings", "scaledmaxhealth", "shop", "shopitem", "showshop", "sitting", "skinlayers", "speak", "spectate", "swim", "target", "targetable", "trackingrange", "undo", "useitem", "velocity", "vel", "wither", "wolf"];
+const CITIZENS_ONLY: &[&str] = &["behavior", "cload", "pushable", "configgui", "copier", "disguise", "drops", "eval", "fish", "inventory", "jump", "mount", "nophysics", "shop", "shopitem", "showshop", "spectate", "target", "velocity", "vel", "warden", "donkey", "mule"];
 
 fn find_cmd(sub: &str) -> Option<&'static Cmd> {
     let sub = sub.to_ascii_lowercase();
-    CMDS.iter().find(|c| c.name == sub || c.aliases.contains(&sub.as_str()))
+    CMDS.iter()
+        .chain(mobs::cmds())
+        .find(|c| c.name == sub || c.aliases.contains(&sub.as_str()))
 }
 
 const COLOURS: [&str; 16] = [
@@ -501,6 +527,40 @@ const TAILS: &[(&str, &[&str])] = &[
         ],
     ),
     ("path", &["", "list", "add", "remove <point:integer>", "clear"]),
+    ("aggressive", &["true", "false", "true -t", "false -t"]),
+    ("ai", &["", "true", "false"]),
+    ("chunkload", &["", "-t"]),
+    ("collidable", &["", "--fluids true", "--fluids false"]),
+    ("knockback", &["", "--explicit true", "--explicit false"]),
+    ("leashable", &[""]),
+    ("passive", &["", "--set true", "--set false"]),
+    ("pickupitems", &["", "--set true", "--set false"]),
+    ("sitting", &["", "--explicit true", "--explicit false"]),
+    ("swim", &["", "--set true", "--set false"]),
+    ("targetable", &[""]),
+    ("activationrange", &["<range:number>"]),
+    ("respawn", &["<delay:integer>"]),
+    ("scaledmaxhealth", &["<health:number>"]),
+    ("trackingrange", &["<range:number>"]),
+    ("playerlist", &["", "-a", "-r"]),
+    (
+        "skinlayers",
+        &[
+            "",
+            "--cape true",
+            "--cape false",
+            "--hat true",
+            "--hat false",
+            "--jacket true",
+            "--jacket false",
+            "--sleeves true",
+            "--sleeves false",
+            "--pants true",
+            "--pants false",
+        ],
+    ),
+    ("entitypose", &["", "<pose:word>"]),
+    ("metadata", &["get <key:word>", "set <key:word> <value:text>", "remove <key:word>"]),
 ];
 
 /// Every usage registered with the game, so chat completes them. Horizon merges them into one
@@ -522,6 +582,7 @@ pub fn usages() -> Vec<String> {
             }
         }
     }
+    out.extend(mobs::usages());
     out.push("npc".to_owned());
     for u in ["trait add <names:text>", "trait remove <names:text>", "trait list", "trait <names:text>"] {
         out.push(u.to_owned());
@@ -529,12 +590,18 @@ pub fn usages() -> Vec<String> {
     for u in ["citizens help", "citizens", "citizens save", "citizens reload", "citizens load"] {
         out.push(u.to_owned());
     }
+    // `/template` (`/tpl`) and `/waypoints` (`/wp`).
+    for u in templates::USAGES {
+        out.push((*u).to_owned());
+        let alias = if u.starts_with("template") { u.replacen("template", "tpl", 1) } else { u.replacen("waypoints", "wp", 1) };
+        out.push(alias);
+    }
     out
 }
 
 /// The help lines (`/npc help`): the syntax as players type it, without argument kinds.
 pub fn help_lines() -> Vec<String> {
-    CMDS.iter().map(|c| format!("npc {}", c.usage)).collect()
+    CMDS.iter().chain(mobs::cmds()).map(|c| format!("npc {}", c.usage)).collect()
 }
 
 /// Every permission node a command asks, as Citizens' `plugin.yml` names them (plus the ones its
@@ -597,11 +664,53 @@ pub const NODES: &[&str] = &[
     "citizens.npc.type",
     "citizens.npc.vulnerable",
     "citizens.npc.command",
+    "citizens.templates.apply",
+    "citizens.templates.generate",
+    "citizens.templates.list",
+    "citizens.templates.help",
+    "citizens.waypoints.add",
+    "citizens.waypoints.remove",
+    "citizens.waypoints.provider",
+    "citizens.waypoints.disableteleport",
+    "citizens.waypoints.help",
+    "citizens.npc.aggressive",
+    "citizens.npc.ai",
+    "citizens.npc.chunkload",
+    "citizens.npc.collidable",
+    "citizens.npc.knockback",
+    "citizens.npc.leashable",
+    "citizens.npc.passive",
+    "citizens.npc.pickupitems",
+    "citizens.npc.sitting",
+    "citizens.npc.swim",
+    "citizens.npc.targetable",
+    "citizens.npc.activationrange",
+    "citizens.npc.respawn",
+    "citizens.npc.scaledmaxhealth",
+    "citizens.npc.trackingrange",
+    "citizens.npc.playerlist",
+    "citizens.npc.skinlayers",
+    "citizens.npc.entitypose",
+    "citizens.npc.metadata",
 ];
+
+/// Every permission node a `/npc` modifier of the table or of the mob file asks.
+pub fn all_nodes() -> Vec<&'static str> {
+    NODES.iter().copied().chain(mobs::nodes()).collect()
+}
+
+/// Whether `root` is one of the commands this mod answers (`npc`, `citizens`, `trait`, `template`/`tpl`,
+/// `waypoints`/`wp`).
+pub fn is_root(root: &str) -> bool {
+    matches!(root, "npc" | "citizens" | "trait") || templates::ROOTS.contains(&root)
+}
 
 /// The permission node of a command, by its root word and its first word after it. A word that
 /// is no sub-command asks for `citizens.npc.info`, as Citizens' bare `/npc` does.
 pub fn node_for(root: &str, sub: &str) -> &'static str {
+    if templates::ROOTS.contains(&root) {
+        return templates::node(root, sub);
+    }
     if root == "citizens" {
         return match sub.to_ascii_lowercase().as_str() {
             "help" => "citizens.citizens.help",
@@ -631,9 +740,46 @@ const PARENT_EDGES: &[(&str, &str)] = &[
     ("citizens.npc.trait.*", "citizens.npc.trait"),
     ("citizens.admin.*", "citizens.admin"),
     ("citizens.admin.*", "citizens.admin.remove.all"),
+    ("citizens.templates.*", "citizens.templates.apply"),
+    ("citizens.templates.*", "citizens.templates.generate"),
+    ("citizens.templates.*", "citizens.templates.list"),
+    ("citizens.templates.*", "citizens.templates.help"),
+    ("citizens.*", "citizens.templates.apply"),
+    ("citizens.*", "citizens.templates.generate"),
+    ("citizens.*", "citizens.templates.list"),
+    ("citizens.*", "citizens.templates.help"),
+    ("citizens.waypoints.*", "citizens.waypoints.add"),
+    ("citizens.waypoints.*", "citizens.waypoints.remove"),
+    ("citizens.waypoints.*", "citizens.waypoints.provider"),
+    ("citizens.waypoints.*", "citizens.waypoints.disableteleport"),
+    ("citizens.waypoints.*", "citizens.waypoints.help"),
+    ("citizens.*", "citizens.waypoints.add"),
+    ("citizens.*", "citizens.waypoints.remove"),
+    ("citizens.*", "citizens.waypoints.provider"),
+    ("citizens.*", "citizens.waypoints.disableteleport"),
+    ("citizens.*", "citizens.waypoints.help"),
     ("citizens.npc.*", "citizens.npc.age"),
     ("citizens.npc.*", "citizens.npc.anchor"),
     ("citizens.npc.*", "citizens.npc.command"),
+    ("citizens.npc.*", "citizens.npc.aggressive"),
+    ("citizens.npc.*", "citizens.npc.ai"),
+    ("citizens.npc.*", "citizens.npc.chunkload"),
+    ("citizens.npc.*", "citizens.npc.collidable"),
+    ("citizens.npc.*", "citizens.npc.knockback"),
+    ("citizens.npc.*", "citizens.npc.leashable"),
+    ("citizens.npc.*", "citizens.npc.passive"),
+    ("citizens.npc.*", "citizens.npc.pickupitems"),
+    ("citizens.npc.*", "citizens.npc.sitting"),
+    ("citizens.npc.*", "citizens.npc.swim"),
+    ("citizens.npc.*", "citizens.npc.targetable"),
+    ("citizens.npc.*", "citizens.npc.activationrange"),
+    ("citizens.npc.*", "citizens.npc.respawn"),
+    ("citizens.npc.*", "citizens.npc.scaledmaxhealth"),
+    ("citizens.npc.*", "citizens.npc.trackingrange"),
+    ("citizens.npc.*", "citizens.npc.playerlist"),
+    ("citizens.npc.*", "citizens.npc.skinlayers"),
+    ("citizens.npc.*", "citizens.npc.entitypose"),
+    ("citizens.npc.*", "citizens.npc.metadata"),
     ("citizens.npc.*", "citizens.npc.copy"),
     ("citizens.npc.*", "citizens.npc.create"),
     ("citizens.npc.*", "citizens.npc.create.player"),
@@ -688,6 +834,25 @@ const PARENT_EDGES: &[(&str, &str)] = &[
     ("citizens.*", "citizens.npc.age"),
     ("citizens.*", "citizens.npc.anchor"),
     ("citizens.*", "citizens.npc.command"),
+    ("citizens.*", "citizens.npc.aggressive"),
+    ("citizens.*", "citizens.npc.ai"),
+    ("citizens.*", "citizens.npc.chunkload"),
+    ("citizens.*", "citizens.npc.collidable"),
+    ("citizens.*", "citizens.npc.knockback"),
+    ("citizens.*", "citizens.npc.leashable"),
+    ("citizens.*", "citizens.npc.passive"),
+    ("citizens.*", "citizens.npc.pickupitems"),
+    ("citizens.*", "citizens.npc.sitting"),
+    ("citizens.*", "citizens.npc.swim"),
+    ("citizens.*", "citizens.npc.targetable"),
+    ("citizens.*", "citizens.npc.activationrange"),
+    ("citizens.*", "citizens.npc.respawn"),
+    ("citizens.*", "citizens.npc.scaledmaxhealth"),
+    ("citizens.*", "citizens.npc.trackingrange"),
+    ("citizens.*", "citizens.npc.playerlist"),
+    ("citizens.*", "citizens.npc.skinlayers"),
+    ("citizens.*", "citizens.npc.entitypose"),
+    ("citizens.*", "citizens.npc.metadata"),
     ("citizens.*", "citizens.npc.copy"),
     ("citizens.*", "citizens.npc.create"),
     ("citizens.*", "citizens.npc.create.player"),
@@ -753,7 +918,16 @@ const PARENT_EDGES: &[(&str, &str)] = &[
 pub fn parents_of(node: &str) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
     let mut todo: Vec<&str> = vec![node];
+    let mob_nodes = mobs::nodes();
     while let Some(current) = todo.pop() {
+        if mob_nodes.contains(&current) {
+            for parent in ["citizens.npc.*", "citizens.*"] {
+                if !out.contains(&parent) {
+                    out.push(parent);
+                    todo.push(parent);
+                }
+            }
+        }
         for &(parent, child) in PARENT_EDGES {
             if child == current && !out.contains(&parent) {
                 out.push(parent);
@@ -1082,7 +1256,7 @@ enum Found {
 
 fn find(w: &World, raw: &str, range: Option<f64>, sender: &Sender) -> Found {
     if raw.len() == 36
-        && let Some(u) = crate::ids::parse_uuid(raw)
+        && let Some(u) = crate::horizon_citizens_core::ids::parse_uuid(raw)
     {
         return w.saves.by_uuid(u).map_or(Found::Missing, |n| Found::One(n.id));
     }
@@ -1099,7 +1273,7 @@ fn find(w: &World, raw: &str, range: Option<f64>, sender: &Sender) -> Found {
         if let (Some(r), Some((_, at))) = (range, sender.at.as_ref())
             && w.is_out(n.id)
             && let Some(l) = w.current_location(n.id)
-            && crate::look::dist2([l.x, l.y, l.z], [at.x, at.y, at.z]) > r * r
+            && crate::horizon_citizens_core::look::dist2([l.x, l.y, l.z], [at.x, at.y, at.z]) > r * r
         {
             continue;
         }
@@ -1137,6 +1311,12 @@ pub fn run(w: &mut World, sender: &Sender, line: &str, reload: impl FnOnce() -> 
     }
     match root {
         "citizens" => citizens(w, sender, rest, reload),
+        "template" | "tpl" => match templates::template(w, sender, rest) {
+            Ok(r) | Err(r) => r,
+        },
+        "waypoints" | "wp" => match templates::waypoints(w, sender, rest) {
+            Ok(r) | Err(r) => r,
+        },
         "trait" => match trait_cmd(w, sender, rest) {
             Ok(r) | Err(r) => r,
         },
@@ -1282,6 +1462,8 @@ fn npc(w: &mut World, sender: &Sender, rest: &str) -> Res {
         "text" => text_lines(w, sender, tail),
         "equip" => equip(w, sender, &args),
         "path" => path(w, sender, tail),
+        n if modifiers::handles(n) => modifiers::run(w, sender, n, &args),
+        n if mobs::handles(n) => mobs::run(w, sender, n, tail),
         _ => Err(usage_error(w, Some(M_TOO_MANY), c)),
     }
 }
@@ -1299,7 +1481,7 @@ fn info(w: &World, sender: &Sender) -> Res {
     let npc = w.saves.get(id).ok_or_else(|| err(w, M_NPC_NOT_FOUND, &[]))?;
     let mut out = say(w, &header(&name_of(npc)));
     out.extend(say(w, &format!("    ID: [[{id}]]")));
-    out.extend(say(w, &format!("    UUID: [[{}]]", npc.uuid().map(crate::ids::format_uuid).unwrap_or_default())));
+    out.extend(say(w, &format!("    UUID: [[{}]]", npc.uuid().map(crate::horizon_citizens_core::ids::format_uuid).unwrap_or_default())));
     out.extend(say(w, &format!("    Type: [[{}]]", npc.kind())));
     if w.is_out(id)
         && let Some(l) = w.current_location(id)
@@ -1363,6 +1545,16 @@ const ENTITY_TYPES: &[&str] = &[
     "snowman", "mushroom_cow", "pig_zombie", "villager_golem",
 ];
 
+/// The per-type create nodes (`citizens.npc.create.zombie`, ...), one per entity type of plugin.yml
+/// (the older Bukkit names left out), as `create` asks them.
+pub fn create_type_nodes() -> Vec<String> {
+    ENTITY_TYPES
+        .iter()
+        .take_while(|t| **t != "snowman")
+        .map(|t| format!("citizens.npc.create.{t}"))
+        .collect()
+}
+
 /// Whether `t` names an entity type, in any case (Bukkit's `EntityType` names, see [`ENTITY_TYPES`]).
 fn valid_type(t: &str) -> bool {
     ENTITY_TYPES.contains(&t.to_ascii_lowercase().as_str())
@@ -1400,7 +1592,7 @@ fn create(w: &mut World, sender: &Sender, args: &Args) -> Res {
     {
         return Err(err(w, M_NO_PERM, &[]));
     }
-    if (args.has_value("at") || args.has_value("registry") || args.has_value("trait") || args.has_value("template"))
+    if (args.has_value("at") || args.has_value("registry") || args.has_value("trait") || args.has_value("templates"))
         && !exact(sender, level, "citizens.npc.admin")
     {
         return Err(err(w, M_NO_PERM, &[]));
@@ -1410,7 +1602,7 @@ fn create(w: &mut World, sender: &Sender, args: &Args) -> Res {
             return Err(err(w, M_UNSUPPORTED, &[what]));
         }
     }
-    for what in ["item", "model", "registry", "temporaryduration", "template"] {
+    for what in ["item", "model", "registry", "temporaryduration"] {
         if args.has_value(what) {
             return Err(err(w, M_UNSUPPORTED, &[&format!("--{what}")]));
         }
@@ -1458,6 +1650,15 @@ fn create(w: &mut World, sender: &Sender, args: &Args) -> Res {
     w.select(skey(sender), id);
     let shown = name_at(w, id);
     out.extend(ok(w, "Created [[{0}]] (ID [[{1}]]).", &[&shown, &id.to_string()]));
+    // `--templates a:b,c`: each is applied after the NPC exists (`/template apply`).
+    if let Some(list) = args.value("templates") {
+        for reference in list.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+            match templates::apply_named(w, id, reference) {
+                Ok(_) => out.extend(ok(w, "Applied template [[{0}]].", &[reference])),
+                Err(e) => out.extend(e),
+            }
+        }
+    }
     Ok(out)
 }
 
@@ -1494,7 +1695,7 @@ fn remove(w: &mut World, sender: &Sender, args: &Args) -> Res {
         ids
     };
     if let Some(owner) = args.value("owner") {
-        let uuid = crate::ids::parse_uuid(owner);
+        let uuid = crate::horizon_citizens_core::ids::parse_uuid(owner);
         let ids = owned_where(w, &|n| uuid.is_some() && n.owner() == uuid);
         for id in ids {
             w.remove(id);
@@ -1511,7 +1712,7 @@ fn remove(w: &mut World, sender: &Sender, args: &Args) -> Res {
     }
     if let Some(eid) = args.value("eid") {
         // The NPC's entity carries the NPC's UUID.
-        let hit = crate::ids::parse_uuid(eid).and_then(|u| w.saves.by_uuid(u)).map(|n| n.id);
+        let hit = crate::horizon_citizens_core::ids::parse_uuid(eid).and_then(|u| w.saves.by_uuid(u)).map(|n| n.id);
         return match hit {
             Some(id) if owns(w, sender, id) => {
                 let name = name_at(w, id);
@@ -1610,7 +1811,7 @@ pub fn nearest(w: &World, dimension: &str, at: &Location, range: f64) -> Option<
         .filter_map(|n| {
             let l = w.current_location(n.id)?;
             (w.is_out(n.id) && w.cfg.worlds.dimension(&l.world).as_deref() == Some(dimension)).then(|| {
-                let d = crate::look::dist2([l.x, l.y, l.z], [at.x, at.y, at.z]);
+                let d = crate::horizon_citizens_core::look::dist2([l.x, l.y, l.z], [at.x, at.y, at.z]);
                 (n.id, d)
             })
         })
@@ -1630,7 +1831,7 @@ fn list(w: &World, sender: &Sender, args: &Args) -> Res {
     }
     let mut npcs: Vec<&NpcData> = w.saves.npcs.iter().collect();
     npcs.sort_by_key(|n| n.id);
-    let owner = args.value("owner").map(crate::ids::parse_uuid);
+    let owner = args.value("owner").map(crate::horizon_citizens_core::ids::parse_uuid);
     let mut shown: Vec<&NpcData> = if args.has('a') {
         npcs
     } else if let Some(o) = owner {
@@ -1752,9 +1953,9 @@ fn tp(w: &mut World, sender: &Sender, args: &Args) -> Res {
         return Err(err(w, M_TP_NO_LOCATION, &[]));
     };
     let to = if args.has('e') { loc } else { in_front(&loc) };
-    w.push_op(crate::world::Op::Console(format!(
+    w.push_op(crate::horizon_citizens_core::world::Op::Console(format!(
         "execute in {dim} run tp {} {} {} {} {} {}",
-        crate::ids::format_uuid(player),
+        crate::horizon_citizens_core::ids::format_uuid(player),
         to.x,
         to.y,
         to.z,
@@ -2172,7 +2373,7 @@ fn owner_cmd(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let uuid = if sender.uuid.is_some() && word.eq_ignore_ascii_case(&sender.name) {
         sender.uuid
     } else {
-        w.player_by_name(&word).or_else(|| crate::ids::parse_uuid(&word))
+        w.player_by_name(&word).or_else(|| crate::horizon_citizens_core::ids::parse_uuid(&word))
     };
     let Some(uuid) = uuid else {
         return Err(err(w, "Invalid UUID string: {0}", &[&word]));
@@ -2344,8 +2545,8 @@ fn jfloat(v: f32) -> String {
 }
 
 /// An online player by name (any case) or UUID.
-fn online_player<'a>(w: &'a World, raw: &str) -> Option<&'a crate::look::PlayerView> {
-    let uuid = if raw.len() == 36 { crate::ids::parse_uuid(raw) } else { None };
+fn online_player<'a>(w: &'a World, raw: &str) -> Option<&'a crate::horizon_citizens_core::look::PlayerView> {
+    let uuid = if raw.len() == 36 { crate::horizon_citizens_core::ids::parse_uuid(raw) } else { None };
     w.online
         .iter()
         .find(|p| Some(p.uuid) == uuid || p.name.eq_ignore_ascii_case(raw))
@@ -2463,7 +2664,7 @@ fn rotate(w: &mut World, sender: &Sender, args: &Args) -> Res {
         };
     }
     if let Some(t) = towards {
-        let (y, p) = crate::look::look_at(crate::look::eye([at.x, at.y, at.z]), t);
+        let (y, p) = crate::horizon_citizens_core::look::look_at(crate::horizon_citizens_core::look::eye([at.x, at.y, at.z]), t);
         w.face(id, y, p);
         return Ok(Vec::new());
     }
@@ -2525,9 +2726,9 @@ fn tpto(w: &mut World, sender: &Sender, args: &Args) -> Res {
                 return Err(err(w, M_WORLD_NOT_FOUND, &[]));
             }
         }
-        Who::Player(u) => w.push_op(crate::world::Op::Console(format!(
+        Who::Player(u) => w.push_op(crate::horizon_citizens_core::world::Op::Console(format!(
             "execute in {dim} run tp {} {} {} {}",
-            crate::ids::format_uuid(u),
+            crate::horizon_citizens_core::ids::format_uuid(u),
             pos.x,
             pos.y,
             pos.z
@@ -2744,9 +2945,9 @@ fn hurt(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let amount = parse_i64(w, &args.words[0])?;
     let uuid = w.saves.get(id).and_then(NpcData::uuid).ok_or_else(|| err(w, M_NPC_NOT_FOUND, &[]))?;
     let dim = w.dimension_of(id).ok_or_else(|| err(w, M_NPC_NOT_FOUND, &[]))?;
-    w.push_op(crate::world::Op::Console(format!(
+    w.push_op(crate::horizon_citizens_core::world::Op::Console(format!(
         "execute in {dim} run damage {} {amount}",
-        crate::ids::format_uuid(uuid)
+        crate::horizon_citizens_core::ids::format_uuid(uuid)
     )));
     Ok(Vec::new())
 }
@@ -2847,13 +3048,13 @@ fn playsound(w: &mut World, sender: &Sender, args: &Args) -> Res {
     };
     let targets = match args.value("to") {
         Some(t) => match online_player(w, t).map(|p| p.uuid) {
-            Some(u) => crate::ids::format_uuid(u),
+            Some(u) => crate::horizon_citizens_core::ids::format_uuid(u),
             None => return Ok(Vec::new()),
         },
         None => "@a".to_owned(),
     };
     // Vanilla's range is the volume; a player farther away than that hears nothing.
-    w.push_op(crate::world::Op::Console(format!(
+    w.push_op(crate::horizon_citizens_core::world::Op::Console(format!(
         "execute in {dim} run playsound {sound} {category} {targets} {} {} {} {volume} {pitch}",
         at.x, at.y, at.z
     )));
@@ -3049,7 +3250,7 @@ fn command(w: &mut World, sender: &Sender, tail: &str) -> Res {
     match op.to_ascii_lowercase().as_str() {
         "" => {
             let cmds = w.saves.get(id).map(NpcData::commands).unwrap_or_default();
-            let describe = |c: &crate::npc::NpcCommand| {
+            let describe = |c: &crate::horizon_citizens_core::npc::NpcCommand| {
                 let cd = if c.cooldown != 0 { c.cooldown } else { i64::from(w.cfg.commands.global_cooldown_ticks / 20) };
                 let cost = if c.cost > 0.0 { jnum(c.cost) } else { "default".to_owned() };
                 let exp = if c.experience_cost > 0 { c.experience_cost.to_string() } else { "default".to_owned() };
@@ -3241,7 +3442,7 @@ fn equip(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let id = target(w, sender)?;
     let usage = "Usage: /npc equip <hand|off_hand|helmet|chestplate|leggings|boots> [item] [amount]";
     let slot = args.words.first().ok_or_else(|| err(w, usage, &[]))?.to_ascii_lowercase();
-    if !crate::npc::EQUIPMENT_SLOTS.iter().any(|(c, _)| *c == slot) {
+    if !crate::horizon_citizens_core::npc::EQUIPMENT_SLOTS.iter().any(|(c, _)| *c == slot) {
         return Err(err(w, usage, &[]));
     }
     let item = args.words.get(1).filter(|s| !s.eq_ignore_ascii_case("air"));
@@ -3479,8 +3680,8 @@ fn flyable(w: &mut World, sender: &Sender, args: &Args) -> Res {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
-    use crate::world::Op;
+    use crate::horizon_citizens_core::config::Config;
+    use crate::horizon_citizens_core::world::Op;
 
     fn sender(level: u8) -> Sender {
         Sender {
@@ -3756,7 +3957,7 @@ mod tests {
     #[test]
     fn every_usage_has_a_listed_node() {
         for u in usages() {
-            assert!(NODES.contains(&node_of_usage(&u)), "{u}");
+            assert!(all_nodes().contains(&node_of_usage(&u)), "{u}");
         }
     }
 
@@ -3887,8 +4088,8 @@ mod tests {
         assert!(run_ok(&mut w, &s, "npc slimesize")[0].contains("size is"));
     }
 
-    fn player(uuid: u128, name: &str, x: f64, z: f64) -> crate::look::PlayerView {
-        crate::look::PlayerView {
+    fn player(uuid: u128, name: &str, x: f64, z: f64) -> crate::horizon_citizens_core::look::PlayerView {
+        crate::horizon_citizens_core::look::PlayerView {
             uuid,
             name: name.into(),
             dimension: "minecraft:overworld".into(),
@@ -4064,7 +4265,7 @@ mod tests {
         assert!(run_ok(&mut w, &s, "npc flyable")[0].contains("is now flyable"));
         assert!(run_ok(&mut w, &s, "npc flyable")[0].contains("no longer flyable"));
         // A real Citizens command this port lacks.
-        assert!(run_ok(&mut w, &s, "npc aggressive true")[0].contains("not supported"));
+        assert!(run_ok(&mut w, &s, "npc behavior")[0].contains("not supported"));
         // Not a Citizens command at all.
         assert!(run_ok(&mut w, &s, "npc sneak")[0].contains("Too many arguments"));
     }
@@ -4080,5 +4281,17 @@ mod tests {
         assert!(run_ok(&mut w, &s, "npc owner")[0].contains("owner is &eNotch"));
         run_ok(&mut w, &s, "npc pathto 32 65 48");
         assert!(w.is_navigating(0) || !w.is_out(0));
+    }
+
+    #[test]
+    fn create_type_nodes_name_each_entity_type_once() {
+        let nodes = create_type_nodes();
+        assert!(nodes.contains(&"citizens.npc.create.zombie".to_string()));
+        assert!(nodes.contains(&"citizens.npc.create.player".to_string()));
+        assert!(!nodes.contains(&"citizens.npc.create.snowman".to_string()));
+        let mut sorted = nodes.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), nodes.len());
     }
 }
