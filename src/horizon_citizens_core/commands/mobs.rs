@@ -561,10 +561,12 @@ fn parse(m: &'static Mob, tail: &str) -> Result<Parsed, ()> {
                 }
                 parts.join(" ")
             } else if matches!(op.v, V::Bool) {
-                match tokens.get(i + 1).map(|s| s.to_ascii_lowercase()) {
-                    Some(v) if v == "true" || v == "false" => {
+                // The usage shows `--small [small]`: the next plain word is the value, checked by `check` (so
+                // `maybe` answers "not a valid value"); a flag or nothing after it means true.
+                match tokens.get(i + 1) {
+                    Some(v) if !v.starts_with('-') => {
                         i += 1;
-                        v
+                        v.to_ascii_lowercase()
                     }
                     _ => "true".to_owned(),
                 }
@@ -687,6 +689,13 @@ pub fn run(w: &mut World, sender: &Sender, name: &str, tail: &str) -> Res {
     let Some(m) = row(name) else {
         return Err(Vec::new());
     };
+    // `undo` takes back a create or remove, not an edit of one NPC: it needs no selected NPC.
+    if name == "undo" {
+        let Ok(parsed) = parse(m, tail) else {
+            return Err(usage_of(w, name));
+        };
+        return undo(w, sender, &parsed);
+    }
     let id = target(w, sender)?;
     let kind = w.saves.get(id).map(NpcData::kind).unwrap_or_default().to_ascii_uppercase();
     if !kind_fits(m, &kind) {

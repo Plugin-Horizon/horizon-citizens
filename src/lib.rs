@@ -12,7 +12,7 @@ use mod_api::{
     ConfigKind, ConfigLoadingEvent, ConfigReloadingEvent, EntityInteractEvent,
     EntityJoinLevelEvent, EntityLeaveLevelEvent, Flow, Hand, Hooks, HostSide, LevelRandomHost,
     LivingIncomingDamageEvent, NodeDefault, PermissionGatherNodesEvent, PermissionLevel, PermissionNode,
-    PermissionValueType, PlayerCommandEvent, PlayerCommandsSentEvent, PlayerRef, RegisterCommandsEvent,
+    PermissionValueType, PlayerCommandEvent, PlayerCommandsSentEvent, PlayerRef, RegisterCommandsEvent, RegisterNodeCommandsEvent,
     RegisterConfigsEvent, RemovalReason, RunModCommandEvent, ServerHost, ServerStoppingEvent,
     ServerTickEvent, ServerTickPhase, Text,
 };
@@ -508,24 +508,28 @@ impl Hooks for Citizens {
     }
 
     fn register_commands(&self, _host: &mut dyn ServerHost, event: &mut RegisterCommandsEvent<'_>) {
+        // The bare roots (`/npc`, `/citizens`, `/trait`) have no node: a node there would gate every
+        // sub-command under it. They stay open and are registered here; the sub-commands go to
+        // `register_node_commands`.
         let level = lock(&self.state).cfg.command_level;
-        // The engine gates a bare root (`npc`, `citizens`) by its FIRST registered usage's node (command_nodes
-        // in the engine): register the bare roots first, so they have no node and stay open. Else `npc help`'s
-        // node gates every `npc` sub-command (retest 2026-11-14: `npc skin` granted alone = unknown command).
-        let mut usages = core::commands::usages();
-        usages.sort_by_key(|usage| usage.contains(' '));
-        for usage in usages {
+        for usage in core::commands::usages() {
+            if !usage.contains(' ') {
+                event.commands.push(Command::op(&usage, level));
+            }
+        }
+    }
+
+    fn register_node_commands(&self, _host: &mut dyn ServerHost, event: &mut RegisterNodeCommandsEvent<'_>) {
+        let level = lock(&self.state).cfg.command_level;
+        for usage in core::commands::usages() {
+            if !usage.contains(' ') {
+                continue;
+            }
             // Each sub-command path carries Citizens' node (`citizens.npc.create`, `node_of_usage`), so a
-            // permissions mod can hand one to a non-operator; `level` decides when none answers. The bare
-            // `/npc`, `/citizens` and `/trait` have none: a node there would gate every sub-command under it.
-            let node = core::commands::node_of_usage(&usage);
+            // permissions mod can hand one to a non-operator; `level` decides when none answers.
             // The help nodes are `default: op` in plugin.yml, like every other node: no usage is level 0.
-            let command = Command::op(&usage, level);
-            event.commands.push(if usage.contains(' ') {
-                command.with_node(&perm_node(node))
-            } else {
-                command
-            });
+            let node = core::commands::node_of_usage(&usage);
+            event.commands.push(Command::op(&usage, level).with_node(&perm_node(node)));
         }
     }
 
