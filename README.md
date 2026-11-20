@@ -149,6 +149,17 @@ Where those pages say nothing, this port decided, and the decision is in the mod
 - waypoints: indices are 0-based, `remove` without arguments removes the last point, only the
   linear provider keeps points, `hpa` (no description on the wiki) is not implemented.
 
+Round 3 (docs only again): about sixty more `/npc` modifiers (`src/horizon_citizens_core/commands/mobs.rs`):
+the mob-specific ones (`allay`, `armorstand`, `wolf`, `villager`, `cat`, `fox`, `horse`, `display`, ...),
+`home`, `hitbox`, `forcefield`, `pathopt`, `pausepathfinding`, `rotationsettings`, `bossbar`, `playerfilter`,
+`potioneffect`, `attribute`, `speak`, `panimate`, `undo`, `useitem`, `item`, `controllable`, ... They check the mob
+type and the values, save under `traits.<modifier>.<key>` and complete in chat. Live on the entity: `armorstand`,
+`phantom`, `pufferfish`, `textdisplay`, `villager`; `speak` reaches players in range (5 blocks without `--range`),
+`panimate` plays the arm swings, `undo` takes back the last create or remove. Every other setting is saved and the
+reply says Horizon does not act on it yet. Still answered "not supported": `behavior`, `configgui`, `copier`,
+`disguise`, `drops`, `eval`, `inventory`, `jump`, `mount`, `shop`, `showshop`, `spectate`, `target`, `warden`
+(GUIs, editors, other plugins, or no host API). Pathfinding stays a straight line: see HMOD_PORT.md.
+
 ## Licence
 
 Derived from Citizens (https://github.com/CitizensDev/Citizens2, Open Software License 3.0).

@@ -140,7 +140,18 @@ pub struct World {
     dirty_since: Option<u64>,
     rng: Rng,
     pub stopping: bool,
+    /// Creates and removes, newest last, for `/npc undo`.
+    history: Vec<Hist>,
 }
+
+/// One step `/npc undo` can take back.
+enum Hist {
+    Created(i32),
+    Removed(NpcData),
+}
+
+/// How many steps `/npc undo` remembers.
+const HISTORY_LIMIT: usize = 100;
 
 impl World {
     pub fn new(cfg: Config, saves: Saves, saves_path: Option<PathBuf>) -> World {
@@ -166,6 +177,7 @@ impl World {
             dirty_since: None,
             rng: Rng::new(0x5EED_C17E),
             stopping: false,
+            history: Vec::new(),
         }
     }
 
@@ -1069,6 +1081,7 @@ impl World {
         }
         edit(&mut npc);
         self.saves.insert(npc);
+        self.record(Hist::Created(id));
         self.mark_dirty();
         self.events.push(NpcEvent::Created { npc: id });
         if spawned {
@@ -1077,7 +1090,51 @@ impl World {
         id
     }
 
+    fn record(&mut self, step: Hist) {
+        self.history.push(step);
+        if self.history.len() > HISTORY_LIMIT {
+            self.history.remove(0);
+        }
+    }
+
+    /// Takes back the last create or remove (`/npc undo`); what it did, for the reply.
+    pub fn undo_last(&mut self) -> Option<String> {
+        loop {
+            match self.history.pop()? {
+                Hist::Created(id) => {
+                    let Some(name) = self.saves.get(id).map(|n| n.name()) else {
+                        continue;
+                    };
+                    self.remove_unrecorded(id);
+                    return Some(format!("create {name}"));
+                }
+                Hist::Removed(npc) => {
+                    let id = npc.id;
+                    if self.saves.get(id).is_some() {
+                        continue;
+                    }
+                    let name = npc.name();
+                    let spawned = npc.spawned();
+                    self.saves.insert(npc);
+                    self.mark_dirty();
+                    self.events.push(NpcEvent::Created { npc: id });
+                    if spawned {
+                        self.spawn(id);
+                    }
+                    return Some(format!("remove {name}"));
+                }
+            }
+        }
+    }
+
     pub fn remove(&mut self, id: i32) -> bool {
+        if let Some(npc) = self.saves.get(id).cloned() {
+            self.record(Hist::Removed(npc));
+        }
+        self.remove_unrecorded(id)
+    }
+
+    fn remove_unrecorded(&mut self, id: i32) -> bool {
         if self.saves.get(id).is_none() {
             return false;
         }

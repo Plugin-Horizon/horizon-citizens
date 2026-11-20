@@ -7,7 +7,9 @@
 //! Changed from the original: ported to Rust for Horizon. Commands that need a trait this port
 //! does not have are not registered (see GAPS.md).
 
+mod mobs;
 mod modifiers;
+pub use mobs::live_nbt;
 mod templates;
 
 use crate::horizon_citizens_core::tree::TreeExt;
@@ -334,11 +336,13 @@ const CMDS: &[Cmd] = &[
 ];
 
 /// Citizens modifiers this port does not have (they answer "not supported", not "Too many arguments").
-const CITIZENS_ONLY: &[&str] = &["armorstand", "attribute", "bat", "behavior", "breakblock", "cload", "pushable", "configgui", "controllable", "control", "disguise", "drops", "endercrystal", "enderman", "eval", "fish", "forcefield", "hitbox", "home", "horse", "donkey", "mule", "inventory", "item", "itemframe", "jump", "minecart", "mirror", "mount", "nophysics", "ocelot", "packet", "painting", "pathopt", "po", "patho", "pausepathfinding", "panimate", "playerfilter", "rabbittype", "rbtype", "rotationsettings", "shop", "shopitem", "showshop", "speak", "spectate", "target", "undo", "useitem", "velocity", "vel", "wither", "wolf"];
+const CITIZENS_ONLY: &[&str] = &["behavior", "cload", "pushable", "configgui", "copier", "disguise", "drops", "eval", "fish", "inventory", "jump", "mount", "nophysics", "shop", "shopitem", "showshop", "spectate", "target", "velocity", "vel", "warden", "donkey", "mule"];
 
 fn find_cmd(sub: &str) -> Option<&'static Cmd> {
     let sub = sub.to_ascii_lowercase();
-    CMDS.iter().find(|c| c.name == sub || c.aliases.contains(&sub.as_str()))
+    CMDS.iter()
+        .chain(mobs::cmds())
+        .find(|c| c.name == sub || c.aliases.contains(&sub.as_str()))
 }
 
 const COLOURS: [&str; 16] = [
@@ -578,6 +582,7 @@ pub fn usages() -> Vec<String> {
             }
         }
     }
+    out.extend(mobs::usages());
     out.push("npc".to_owned());
     for u in ["trait add <names:text>", "trait remove <names:text>", "trait list", "trait <names:text>"] {
         out.push(u.to_owned());
@@ -596,7 +601,7 @@ pub fn usages() -> Vec<String> {
 
 /// The help lines (`/npc help`): the syntax as players type it, without argument kinds.
 pub fn help_lines() -> Vec<String> {
-    CMDS.iter().map(|c| format!("npc {}", c.usage)).collect()
+    CMDS.iter().chain(mobs::cmds()).map(|c| format!("npc {}", c.usage)).collect()
 }
 
 /// Every permission node a command asks, as Citizens' `plugin.yml` names them (plus the ones its
@@ -688,6 +693,11 @@ pub const NODES: &[&str] = &[
     "citizens.npc.entitypose",
     "citizens.npc.metadata",
 ];
+
+/// Every permission node a `/npc` modifier of the table or of the mob file asks.
+pub fn all_nodes() -> Vec<&'static str> {
+    NODES.iter().copied().chain(mobs::nodes()).collect()
+}
 
 /// Whether `root` is one of the commands this mod answers (`npc`, `citizens`, `trait`, `template`/`tpl`,
 /// `waypoints`/`wp`).
@@ -908,7 +918,16 @@ const PARENT_EDGES: &[(&str, &str)] = &[
 pub fn parents_of(node: &str) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
     let mut todo: Vec<&str> = vec![node];
+    let mob_nodes = mobs::nodes();
     while let Some(current) = todo.pop() {
+        if mob_nodes.contains(&current) {
+            for parent in ["citizens.npc.*", "citizens.*"] {
+                if !out.contains(&parent) {
+                    out.push(parent);
+                    todo.push(parent);
+                }
+            }
+        }
         for &(parent, child) in PARENT_EDGES {
             if child == current && !out.contains(&parent) {
                 out.push(parent);
@@ -1444,6 +1463,7 @@ fn npc(w: &mut World, sender: &Sender, rest: &str) -> Res {
         "equip" => equip(w, sender, &args),
         "path" => path(w, sender, tail),
         n if modifiers::handles(n) => modifiers::run(w, sender, n, &args),
+        n if mobs::handles(n) => mobs::run(w, sender, n, tail),
         _ => Err(usage_error(w, Some(M_TOO_MANY), c)),
     }
 }
@@ -3937,7 +3957,7 @@ mod tests {
     #[test]
     fn every_usage_has_a_listed_node() {
         for u in usages() {
-            assert!(NODES.contains(&node_of_usage(&u)), "{u}");
+            assert!(all_nodes().contains(&node_of_usage(&u)), "{u}");
         }
     }
 

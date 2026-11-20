@@ -189,7 +189,7 @@ fn granted_nodes(host: &mut dyn ServerHost, p: PlayerRef, level: u8, command_lev
         return Vec::new();
     }
     // The per-type create nodes are asked by `create`, so they are part of the grants.
-    let mut all: Vec<String> = core::commands::NODES.iter().map(|n| (*n).to_owned()).collect();
+    let mut all: Vec<String> = core::commands::all_nodes().into_iter().map(str::to_owned).collect();
     all.extend(core::commands::create_type_nodes());
     all.sort();
     all.dedup();
@@ -534,10 +534,10 @@ impl Hooks for Citizens {
         // gate uses, so both agree; 2 when gathering runs before the config is read). The wildcard parents
         // cannot be declared (HMOD-GAP(wildcard_nodes)).
         let level = i32::from(lock(&self.state).cfg.command_level);
-        let mut all: Vec<String> = core::commands::NODES
-            .iter()
+        let mut all: Vec<String> = core::commands::all_nodes()
+            .into_iter()
             .filter(|n| !n.contains('*'))
-            .map(|n| (*n).to_owned())
+            .map(str::to_owned)
             .collect();
         all.extend(core::commands::create_type_nodes());
         for node in all {

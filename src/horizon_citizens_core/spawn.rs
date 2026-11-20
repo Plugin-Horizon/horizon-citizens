@@ -160,6 +160,8 @@ pub fn npc_snbt(npc: &NpcData, uuid: u128, loc: &Location, cfg: &Config) -> Stri
             parts.push(format!("Size:{}", (size - 1).max(0)));
         }
     }
+    // Settings of the mob-specific modifiers that the entity's own data can carry.
+    parts.extend(crate::horizon_citizens_core::commands::live_nbt(npc, &kind));
     if let Some(effect) = npc.invisibility() {
         // Citizens' persistent invisibility potion, as the entity's own effect.
         let duration = effect.duration.map_or(-1, |d| d.min(i64::from(i32::MAX)));

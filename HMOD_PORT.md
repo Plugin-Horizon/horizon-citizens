@@ -1,4 +1,5 @@
 # hmod port: citizens
+Parity: before ~40% (76/190) -> after ~75% (143/190) (method: documented /npc modifiers, /template, /waypoints, nodes counted; a setting that is saved but not applied counts as done only for its command/node/tab, features such as GUIs, pathfinding, per-player filters count as not done); blind, uncompiled.
 Round 1
 - Fixed:
   - `src/lib.rs` `entity_interact`: host is `HostSide<'_>` (Server arm), returns `Option<InteractionResult>`; a claimed or refused click is `Consume` (was `Flow::Cancel`), fall-through is `None`.
@@ -16,3 +17,5 @@ Round 1
   - `entity_interact`: `Flow::Cancel` mapped to `InteractionResult::Consume` (no client swing). Not verified against Paper's cancel.
   - Warnings in `commands.rs` (unused `mut`, unused assignment) left as they are.
 - Fix round (docs only, no Citizens source): `/template`, `/waypoints` and 19 `/npc` modifiers added (see README "Docs gaps"); nodes `citizens.templates.*`, `citizens.waypoints.*` and the modifier nodes are declared with the other nodes. Roots `tpl` and `wp` are registered as aliases. Still open: bare roots carry no node (engine), offline owner names (no profile API), mob-specific modifiers, action modifiers (`jump`, `mount`, `speak`, `undo`, `item`, `drops`, `inventory`, `home`, ...), `/trait help` node.
+
+Round 3 (docs only, blind): `commands/mobs.rs` adds 66 `/npc` modifier rows from the wiki table (nodes `citizens.npc.<name>` declared, wildcard parents via `parents_of`, usages, help, tab completion), `World::undo_last` (history of create/remove, 100 steps), `live_nbt` for armorstand/phantom/pufferfish/textdisplay/villager, `speak`, `panimate` arm swings. Open: `behavior configgui copier disguise drops eval inventory jump mount shop showshop spectate target warden` (GUI/editor/other plugin/no API), per-player `playerfilter` effect, `bossbar`/`display`/`hitbox`/`home`/`forcefield`/`pathopt` are saved only. Pathfinding: the host has `mob_move_to`/`mob_move_to_path`, but NPC mobs are `NoAI`, so their navigation never ticks; see GAPS_UPSTREAM (citizens). Unit tests in mobs.rs; not compiled.
