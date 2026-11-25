@@ -260,6 +260,10 @@ pub struct World {
     /// `MountTrait.currentMount`: NPC id -> (its entity, the entity it sits on).
     mounted: HashMap<i32, (u32, u32)>,
     menus: HashMap<u128, MenuSession>,
+    /// Players with the NPC copier on: the NPC they copy.
+    pub copiers: HashMap<u128, i32>,
+    /// `WardenTrait.anger`: NPC id -> entity uuid -> anger.
+    warden_anger: HashMap<i32, BTreeMap<u128, i32>>,
     teams_made: BTreeSet<String>,
     fetching: BTreeSet<i32>,
     pub tick: u64,
@@ -310,6 +314,8 @@ impl World {
             player_cost: None,
             mounted: HashMap::new(),
             menus: HashMap::new(),
+            copiers: HashMap::new(),
+            warden_anger: HashMap::new(),
             teams_made: BTreeSet::new(),
             fetching: BTreeSet::new(),
             tick: 0,
@@ -1062,6 +1068,25 @@ impl World {
     // ---- the tick -----------------------------------------------------------------------
 
     /// One server tick, with the players online.
+    /// The dimension an online player stands in.
+    pub fn online_dimension(&self, player: u128) -> Option<String> {
+        self.online.iter().find(|p| p.uuid == player).map(|p| p.dimension.clone())
+    }
+
+    /// `WardenTrait.addAnger`: the warden's `anger` suspects are written to its entity data.
+    pub fn warden_anger(&mut self, npc: i32, entity: u128, anger: i32) {
+        let map = self.warden_anger.entry(npc).or_default();
+        map.insert(entity, anger);
+        let suspects: Vec<String> = map
+            .iter()
+            .map(|(u, a)| format!("{{uuid:{},anger:{a}}}", crate::horizon_citizens_core::ids::int_array_snbt(*u)))
+            .collect();
+        if let Some(uuid) = self.saves.get(npc).and_then(NpcData::uuid) {
+            let who = crate::horizon_citizens_core::ids::format_uuid(uuid);
+            self.ops.push(Op::Console(format!("data merge entity {who} {{anger:{{suspects:[{}]}}}}", suspects.join(","))));
+        }
+    }
+
     // ---- the inventory and drops menus ----------------------------------------------------
 
     /// `/npc inventory`: the NPC's `inventory` trait in a chest for `player` (`Inventory.openInventory`).

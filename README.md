@@ -136,6 +136,7 @@ What does not work yet on arismoko/horizon (each is marked `TODO(arismoko-api: .
 
 - The server folder is taken from the working directory (dedicated servers only).
 - `/npc`, `/citizens` and `/trait` sub-commands carry their own `citizens.*` nodes; the bare root commands carry none.
+- Needs engine (see ENGINE_NEEDS): `spectate` (camera), `warden dig/emerge/roar` (pose), `disguise`, the chat-based editors and `configgui` (text input). Not ported, unused on the rec servers: shops, behavior trees, `eval`.
 - `/npc inventory` and `/npc drops` edit by clicks (take, deposit, drops chance), not by dragging; both traits use the CitizensAPI save layout; the commandtrait `cost` (money) is skipped (no economy); the `npc` flag runs as the console's `execute as` (see ENGINE_NEEDS `npc_run_command_as_entity`).
 - The `team add citizens_<colour>` console commands used for glow colours fail on arismoko's console (logged, glow colour falls back).
 

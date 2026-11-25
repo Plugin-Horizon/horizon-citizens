@@ -944,6 +944,12 @@ impl Hooks for Citizens {
         self.run_work(host);
     }
 
+    fn right_click_block(&self, _host: HostSide, event: &mut mod_api::RightClickBlockEvent<'_>) -> Flow {
+        let (player, pos) = (event.click.player, event.click.pos);
+        let ours = api::with_world(|w| core::commands::copier_click(w, player, pos)).unwrap_or(false);
+        if ours { Flow::Cancel } else { Flow::Continue }
+    }
+
     fn menu_closed(&self, _: &mut dyn ServerHost, event: &mut MenuClosedEvent) {
         let (uuid, window) = (event.uuid, event.window);
         api::with_world(|w| w.menu_closed(uuid, window));

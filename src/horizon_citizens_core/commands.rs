@@ -322,6 +322,8 @@ const CMDS: &[Cmd] = &[
     cmd("leashable", &[], "leashable", 1, Some(2), "citizens.npc.leashable"),
     cmd("mount", &[], "mount (--onnpc <npc id|uuid>) (-d(ismount)) (-c(ancel))", 1, Some(1), "citizens.npc.mount"),
     cmd("jump", &[], "jump", 1, Some(1), "citizens.npc.jump"),
+    cmd("copier", &[], "copier", 1, Some(1), "citizens.npc.edit.copier"),
+    cmd("warden", &[], "warden dig|emerge|roar|anger [entity uuid/player name] [anger]", 1, Some(4), "citizens.npc.warden"),
     cmd("inventory", &[], "inventory (player name/uuid)", 1, Some(2), "citizens.npc.inventory"),
     cmd("drops", &[], "drops", 1, Some(1), "citizens.npc.drops"),
     cmd("passive", &[], "passive (--set [true|false])", 1, Some(2), "citizens.npc.passive"),
@@ -340,7 +342,7 @@ const CMDS: &[Cmd] = &[
 ];
 
 /// Citizens modifiers this port does not have (they answer "not supported", not "Too many arguments").
-const CITIZENS_ONLY: &[&str] = &["behavior", "cload", "pushable", "configgui", "copier", "disguise", "eval", "fish", "nophysics", "shop", "shopitem", "showshop", "spectate", "target", "velocity", "vel", "warden", "donkey", "mule"];
+const CITIZENS_ONLY: &[&str] = &["behavior", "cload", "pushable", "configgui", "disguise", "eval", "fish", "nophysics", "shop", "shopitem", "showshop", "spectate", "target", "velocity", "vel", "donkey", "mule"];
 
 fn find_cmd(sub: &str) -> Option<&'static Cmd> {
     let sub = sub.to_ascii_lowercase();
@@ -539,6 +541,8 @@ const TAILS: &[(&str, &[&str])] = &[
     ("leashable", &[""]),
     ("mount", &["", "--onnpc", "-d", "-c"]),
     ("jump", &[""]),
+    ("copier", &[""]),
+    ("warden", &["anger", "dig", "emerge", "roar"]),
     ("inventory", &[""]),
     ("drops", &[""]),
     ("passive", &["", "--set true", "--set false"]),
@@ -689,6 +693,8 @@ pub const NODES: &[&str] = &[
     "citizens.npc.leashable",
     "citizens.npc.mount",
     "citizens.npc.jump",
+    "citizens.npc.edit.copier",
+    "citizens.npc.warden",
     "citizens.npc.inventory",
     "citizens.npc.drops",
     "citizens.npc.passive",
@@ -781,6 +787,7 @@ const PARENT_EDGES: &[(&str, &str)] = &[
     ("citizens.npc.*", "citizens.npc.leashable"),
     ("citizens.npc.*", "citizens.npc.mount"),
     ("citizens.npc.*", "citizens.npc.jump"),
+    ("citizens.npc.*", "citizens.npc.warden"),
     ("citizens.npc.*", "citizens.npc.inventory"),
     ("citizens.npc.*", "citizens.npc.drops"),
     ("citizens.npc.*", "citizens.npc.passive"),
@@ -858,6 +865,7 @@ const PARENT_EDGES: &[(&str, &str)] = &[
     ("citizens.*", "citizens.npc.leashable"),
     ("citizens.*", "citizens.npc.mount"),
     ("citizens.*", "citizens.npc.jump"),
+    ("citizens.*", "citizens.npc.warden"),
     ("citizens.*", "citizens.npc.inventory"),
     ("citizens.*", "citizens.npc.drops"),
     ("citizens.*", "citizens.npc.passive"),
@@ -1483,6 +1491,8 @@ fn npc(w: &mut World, sender: &Sender, rest: &str) -> Res {
         "equip" => equip(w, sender, &args),
         "mount" => mount(w, sender, &args),
         "jump" => jump(w, sender),
+        "copier" => copier(w, sender),
+        "warden" => warden(w, sender, &args),
         "inventory" => inventory(w, sender, &args),
         "drops" => drops(w, sender),
         "path" => path(w, sender, tail),
@@ -3549,6 +3559,85 @@ fn drops(w: &mut World, sender: &Sender) -> Res {
     Ok(Vec::new())
 }
 
+const M_COPIER_BEGIN: &str = "Entered the NPC copier!<br>Click anywhere to copy the currently selected NPC.";
+const M_COPIER_END: &str = "Exited the NPC copier. ";
+const M_WARDEN_ANGER: &str = "[[{1}]] anger added towards [[{0}]].";
+const M_WARDEN_POSE: &str = "[[{0}]]''s pose set to [[{1}]].";
+
+/// `/npc copier`: toggles the copier; while on, a right click on a block copies the selected NPC there.
+fn copier(w: &mut World, sender: &Sender) -> Res {
+    let id = target(w, sender)?;
+    let Some(who) = sender.uuid else {
+        return Err(err(w, M_MUST_BE_INGAME, &[]));
+    };
+    if w.copiers.remove(&who).is_some() {
+        return Ok(ok(w, M_COPIER_END, &[]));
+    }
+    w.copiers.insert(who, id);
+    Ok(ok(w, M_COPIER_BEGIN, &[]))
+}
+
+/// A right click on the block `pos` by `player` while the copier is on (`CopierEditor.onBlockClick`): the
+/// copy stands on that block (its corner, as `Block.getLocation`), keeps the original's name and turn.
+/// Whether the click was the copier's (the game then cancels it).
+pub fn copier_click(w: &mut World, player: u128, pos: [i32; 3]) -> bool {
+    let Some(id) = w.copiers.get(&player).copied() else {
+        return false;
+    };
+    let Some(dim) = w.online_dimension(player) else {
+        return false;
+    };
+    let Some(npc) = w.saves.get(id) else {
+        w.copiers.remove(&player);
+        return false;
+    };
+    let name = npc.name();
+    let (yaw, pitch) = npc.location().map_or((0.0, 0.0), |l| (l.yaw, l.pitch));
+    let loc = Location {
+        world: w.cfg.worlds.world_name(&dim),
+        x: f64::from(pos[0]),
+        y: f64::from(pos[1]),
+        z: f64::from(pos[2]),
+        yaw,
+        pitch,
+        body_yaw: yaw,
+    };
+    let Some(new_id) = w.copy(id, loc) else {
+        return false;
+    };
+    let _ = new_id;
+    let plain = text::strip(&name);
+    for line in ok(w, M_COPIED, &[&plain]) {
+        w.push_op(crate::horizon_citizens_core::world::Op::Tell { player, legacy: line });
+    }
+    true
+}
+
+/// `/npc warden anger <uuid|name> <n>`: anger toward an entity (a warden's `anger` suspects, kept per NPC and
+/// written with the entity data). `dig`, `emerge` and `roar` set the pose: the game has no call for a pose
+/// (ENGINE_NEEDS `entity_set_pose`), so they only answer.
+fn warden(w: &mut World, sender: &Sender, args: &Args) -> Res {
+    let id = target(w, sender)?;
+    if !w.saves.get(id).is_some_and(|n| n.kind().eq_ignore_ascii_case("WARDEN")) {
+        return Err(err(w, M_DISALLOWED_MOBTYPE, &["warden"]));
+    }
+    let sub = args.words.first().map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+    let name = w.saves.get(id).map(NpcData::name).unwrap_or_default();
+    match sub.as_str() {
+        "anger" => {
+            let (Some(who), Some(n)) = (args.words.get(1), args.words.get(2).and_then(|a| a.parse::<i32>().ok())) else {
+                return Err(usage_error(w, None, find_cmd("warden").ok_or_else(Vec::new)?));
+            };
+            let uuid = crate::horizon_citizens_core::ids::parse_uuid(who).or_else(|| w.player_by_name(who));
+            let Some(uuid) = uuid else { return Ok(Vec::new()) };
+            w.warden_anger(id, uuid, n);
+            Ok(ok(w, M_WARDEN_ANGER, &[who, &n.to_string()]))
+        }
+        "dig" | "emerge" | "roar" => Ok(ok(w, M_WARDEN_POSE, &[&name, &sub])),
+        _ => Err(usage_error(w, None, find_cmd("warden").ok_or_else(Vec::new)?)),
+    }
+}
+
 /// `/npc jump`: the NPC jumps on its next tick (`NMS.setShouldJump`).
 fn jump(w: &mut World, sender: &Sender) -> Res {
     let id = target(w, sender)?;
@@ -4474,6 +4563,46 @@ mod tests {
         assert!(w.take_ops().iter().any(|o| matches!(o, Op::OpenMenu { player: 0xA1, rows: 4, .. })));
         assert!(run_ok(&mut w, &s, "npc drops").is_empty());
         assert!(w.take_ops().iter().any(|o| matches!(o, Op::OpenMenu { player: 0xA1, rows: 5, .. })));
+    }
+
+    #[test]
+    fn copier_toggles_and_copies_on_a_block_click() {
+        let mut w = world();
+        let s = sender(2);
+        two_spawned(&mut w, &s);
+        let r = run_ok(&mut w, &s, "npc copier");
+        assert!(r[0].contains("Entered the NPC copier!"), "{r:?}");
+        w.online = vec![crate::horizon_citizens_core::look::PlayerView {
+            uuid: 0xA1,
+            name: "Alex".into(),
+            dimension: "minecraft:overworld".into(),
+            pos: [0.0; 3],
+            game_mode: 0,
+            permission: 2,
+            entity_id: 900,
+            sneaking: false,
+        }];
+        let before = w.saves.npcs.len();
+        assert!(copier_click(&mut w, 0xA1, [5, 70, -3]));
+        assert_eq!(w.saves.npcs.len(), before + 1);
+        let l = w.saves.get(w.saves.npcs.last().unwrap().id).unwrap().location().unwrap();
+        assert_eq!((l.x, l.y, l.z), (5.0, 70.0, -3.0));
+        assert!(w.take_ops().iter().any(|o| matches!(o, Op::Tell { legacy, .. } if legacy.contains("has been copied."))));
+        let r = run_ok(&mut w, &s, "npc copier");
+        assert!(r[0].contains("Exited the NPC copier."), "{r:?}");
+        assert!(!copier_click(&mut w, 0xA1, [0, 0, 0]));
+    }
+
+    #[test]
+    fn warden_anger_is_kept_and_pose_answers() {
+        let mut w = world();
+        let s = sender(2);
+        run_ok(&mut w, &s, "npc create Deep --type warden");
+        let r = run_ok(&mut w, &s, "npc warden anger 00000000-0000-0000-0000-0000000000a1 40");
+        assert!(r[0].contains("anger added towards"), "{r:?}");
+        assert!(run_ok(&mut w, &s, "npc warden roar")[0].contains("pose set to"));
+        run_ok(&mut w, &s, "npc create Bob");
+        assert!(run_ok(&mut w, &s, "npc warden roar")[0].contains("cannot be the mob type"));
     }
 
     #[test]
