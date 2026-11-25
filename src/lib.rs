@@ -1385,7 +1385,7 @@ impl Hooks for Citizens {
                     let seen = info.view.dimension == v.dimension
                         && core::world::hologram_seen(v.view, v.vertical, v.pos, info.view.pos);
                     for u in &v.uuids {
-                        if let Some(e) = host.entity_by_uuid(*u) {
+                        if let Some(e) = host.entity_by_uuid(mod_api::EntityUuid(*u)) {
                             let _ = e.set_visible_to(host, p, seen);
                         }
                     }
