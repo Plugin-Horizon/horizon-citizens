@@ -2484,6 +2484,87 @@ impl World {
         v
     }
 
+    /// `hologram edit_npc`: the NPC behind a hologram line (`key`: a line number, `name` or `template`), made as a temporary
+    /// text display NPC the first time; it carries the line's text and flags and writes changes back (see [`World::sync_hologram_template`]).
+    pub fn hologram_template(&mut self, owner: i32, key: &str, text: &str) -> Option<i32> {
+        let tag = format!("{owner}:{key}");
+        if let Some(n) = self.saves.npcs.iter().find(|n| n.hologram_template_tag().as_deref() == Some(tag.as_str())) {
+            return Some(n.id);
+        }
+        let loc = self.current_location(owner)?;
+        let lines = self.saves.get(owner)?.hologram_lines();
+        let line = key.parse::<usize>().ok().and_then(|i| lines.get(i).cloned());
+        let (text, tag2) = (text.to_owned(), tag.clone());
+        let id = self.create_with(&text.clone(), "TEXT_DISPLAY", loc, None, false, move |n| {
+            n.set_hologram_template_tag(&tag2);
+            n.map.put(&["traits", "textdisplay", "text"], Node::str(&text));
+            if let Some(l) = line {
+                n.map.put(&["traits", "textdisplay", "shadowed"], Node::bool(l.shadowed));
+                n.map.put(&["traits", "textdisplay", "seethrough"], Node::bool(l.see_through));
+            }
+        });
+        self.saves.temporary.insert(id);
+        Some(id)
+    }
+
+    pub fn is_hologram_template(&self, id: i32) -> bool {
+        self.saves.get(id).is_some_and(|n| n.hologram_template_tag().is_some())
+    }
+
+    /// Copies the template NPC's text display settings (text, shadowed, seethrough) to its hologram line.
+    pub fn sync_hologram_template(&mut self, template: i32) {
+        let Some(tag) = self.saves.get(template).and_then(NpcData::hologram_template_tag) else { return };
+        let Some((owner, key)) = tag.split_once(':') else { return };
+        let Ok(owner) = owner.parse::<i32>() else { return };
+        let (text, shadowed, see) = {
+            let Some(t) = self.saves.get(template) else { return };
+            let b = |k: &str| t.map.at(&["traits", "textdisplay", k]).and_then(Node::as_bool);
+            (t.map.at(&["traits", "textdisplay", "text"]).and_then(Node::text), b("shadowed"), b("seethrough"))
+        };
+        if let (Ok(i), Some(npc)) = (key.parse::<usize>(), self.saves.get_mut(owner)) {
+            if let Some(t) = &text {
+                npc.set_hologram_line(i, t);
+            }
+            npc.set_hologram_renderer_flags(i, shadowed, see);
+        }
+        self.mark_dirty();
+        self.refresh_holograms(owner);
+    }
+
+    /// The holograms with a view range that are due a visibility check now (every `hologramUpdateRate` ticks, 20 by default).
+    pub fn hologram_views(&self) -> Vec<HoloView> {
+        let mut out = Vec::new();
+        for (id, live) in &self.live {
+            let Some(npc) = self.saves.get(*id) else { continue };
+            let rate = npc.hologram_int("hologramUpdateRate").filter(|r| *r > 0).unwrap_or(20) as u64;
+            if self.tick % rate != 0 || live.holograms.is_empty() {
+                continue;
+            }
+            let view = npc.hologram_int("viewRange").unwrap_or(-1) as f64;
+            let vertical = npc.hologram_int("verticalViewRange").unwrap_or(-1) as f64;
+            let Some(at) = &live.at else { continue };
+            if view <= 0.0 && vertical <= 0.0 {
+                continue;
+            }
+            out.push(HoloView { uuids: live.holograms.clone(), pos: [at.x, at.y, at.z], dimension: live.dimension.clone(), view, vertical });
+        }
+        out
+    }
+
+    /// The (world, region id) pairs of the wandering NPCs that have a `worldguardregion`, for the host to look up.
+    pub fn wander_regions_wanted(&self) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = self
+            .saves
+            .npcs
+            .iter()
+            .filter(|n| n.wander().is_some())
+            .filter_map(|n| Some((self.current_location(n.id)?.world, n.wander_region()?)))
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
     /// The out `lookclose -r` NPCs: (id, eye, dimension), for the host's line-of-sight checks.
     pub fn sight_wanted(&self) -> Vec<(i32, [f64; 3], String)> {
         self.live
