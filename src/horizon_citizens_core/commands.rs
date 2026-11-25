@@ -5532,7 +5532,7 @@ mod tests {
         run_ok(&mut w, &s, "npc create -c Mid --at 3.7:64:4.2:world");
         let l = w.saves.get(2).unwrap().location().unwrap();
         assert_eq!((l.x, l.z), (3.5, 4.5));
-        assert!(run_ok(&mut w, &s, "npc create -b Baby")[0].contains("not supported"));
+        assert!(run_ok(&mut w, &s, "npc create -b Baby").join("|").contains("as a baby"));
     }
 
     #[test]

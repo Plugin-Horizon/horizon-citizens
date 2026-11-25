@@ -4230,7 +4230,8 @@ mod tests {
         cmd(&mut w, "npc setequipment helmet hand");
         let eq = w.saves.get(id).unwrap().equipment();
         assert!(eq.iter().any(|e| e.slot == "head" && e.item == "stick" && e.count == 3), "{eq:?}");
-        assert!(eq.iter().all(|e| !(e.slot == "mainhand" && e.item == "diamond_sword")), "the cosmetic shows in the real slot only");
+        assert!(eq.iter().any(|e| e.slot == "mainhand" && e.item == "diamond_sword"), "a cosmetic item shows in its slot (Equipment.getCosmetic)");
+        assert!(w.saves.get(id).unwrap().map.at(&["traits", "equipment", "hand"]).is_none(), "the real slot is not touched by -c");
     }
 
     #[test]
