@@ -257,7 +257,7 @@ const MOBS: &[Mob] = &[
         live: true, ..m!("llama", [], "llama (--color color) (--strength strength)")
     },
     Mob {
-        kinds: &["MANNEQUIN"],
+        kinds: &["MANNEQUIN", "PLAYER"],
         opts: &[
             o("hide_description", V::Bool),
             o("immovable", V::Bool),
@@ -1077,7 +1077,8 @@ fn tbool(npc: &NpcData, name: &str, key: &str) -> Option<bool> {
 }
 
 fn tint(npc: &NpcData, name: &str, key: &str) -> Option<i64> {
-    npc.map.at(&["traits", name, key]).and_then(Node::as_i64)
+    let n = npc.map.at(&["traits", name, key])?;
+    n.as_i64().or_else(|| n.text().and_then(|t| t.trim().parse().ok()))
 }
 
 fn tnum_list(npc: &NpcData, name: &str, key: &str) -> Option<Vec<f64>> {
