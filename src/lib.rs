@@ -15,6 +15,7 @@ use mod_api::{
     PermissionValueType, PlayerCommandEvent, PlayerCommandsSentEvent, PlayerRef, RegisterCommandsEvent, RegisterNodeCommandsEvent,
     RegisterConfigsEvent, RemovalReason, RunModCommandEvent, ServerHost, ServerStoppingEvent,
     ServerTickEvent, ServerTickPhase, Text, ItemStack, MenuClickedEvent, MenuClosedEvent, MenuReplace, ServerChatEvent,
+    MerchantTradeSelectedEvent, MerchantOffer, ItemCost, Pose as GamePose, SynchedState,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -332,6 +333,101 @@ fn shop_apply(host: &mut dyn ServerHost, uuid: u128, levels: Option<i32>, slots:
     }
 }
 
+/// One host call of `entity_set` for an NPC's entity. A call the game refuses (a setting the kind has no
+/// use for) is dropped: a fox's state on a panda, a disguise as a type the clients do not have.
+fn apply_entity_set(host: &mut dyn ServerHost, entity: u32, set: core::entity_set::EntitySet) {
+    use horizon_citizens_core::entity_set::{EntitySet, Pose, Synched};
+    let Some(e) = host.entity(entity) else { return };
+    match set {
+        EntitySet::Disguise(kind) => {
+            let key = match &kind {
+                None => None,
+                Some(id) => {
+                    let found = host.entity_type_keys().into_iter().find(|k| k.id(&*host).to_string() == *id);
+                    if found.is_none() {
+                        eprintln!("[citizens] unknown disguise type {id}");
+                        return;
+                    }
+                    found
+                }
+            };
+            let _ = e.set_disguise(host, key);
+        }
+        EntitySet::Pose(p) => {
+            let pose = match p {
+                Pose::Digging => GamePose::Digging,
+                Pose::Emerging => GamePose::Emerging,
+                Pose::Roaring => GamePose::Roaring,
+            };
+            let _ = e.set_pose(host, pose);
+        }
+        EntitySet::Synched(state, on) => {
+            let state = match state {
+                Synched::FoxInterested => SynchedState::FoxInterested,
+                Synched::FoxPouncing => SynchedState::FoxPouncing,
+                Synched::FoxFaceplanted => SynchedState::FoxFaceplanted,
+                Synched::PandaSneezing => SynchedState::PandaSneezing,
+                Synched::PandaRolling => SynchedState::PandaRolling,
+                Synched::PandaSitting => SynchedState::PandaSitting,
+                Synched::AllayDancing => SynchedState::AllayDancing,
+                Synched::VexCharging => SynchedState::VexCharging,
+                Synched::PolarBearStanding => SynchedState::PolarBearStanding,
+            };
+            let _ = e.set_synched_state(host, state, on);
+        }
+        EntitySet::Targetable(b) => {
+            let _ = e.set_targetable(host, b);
+        }
+        EntitySet::Leashable(b) => {
+            let _ = e.set_leashable(host, b);
+        }
+        EntitySet::TrackingRange(r) => {
+            let _ = e.set_tracking_range(host, r);
+        }
+        EntitySet::ActivationRange(r) => {
+            let _ = e.set_activation_range(host, r);
+        }
+        EntitySet::DestroyBlocks(b) => {
+            if let Some(d) = host.dragon(e) {
+                let _ = d.set_destroy_blocks(host, b);
+            }
+        }
+        EntitySet::NavigationTicks(b) => {
+            if let Some(m) = host.mob(e)
+                && m.set_navigation_ticks(host, b)
+                && b
+            {
+                api::with_world(|w| w.nav_ready(entity));
+            }
+        }
+        EntitySet::MoveTo { target, speed } => {
+            if let Some(m) = host.mob(e) {
+                let _ = m.move_to(host, target, speed);
+            }
+        }
+        EntitySet::StopNavigation => {
+            if let Some(m) = host.mob(e) {
+                let _ = m.stop(host);
+            }
+        }
+    }
+}
+
+/// A trader shop's merchant screen. Each trade pays with up to two stacks and gives the display item; a
+/// trade the game cannot build (an unknown item) is left out.
+fn open_merchant(host: &mut dyn ServerHost, player: u128, title: &str, trades: &[core::world::Trade]) -> Option<i32> {
+    let mut offers = Vec::new();
+    for t in trades {
+        let costs: Vec<ItemStack> = t.costs.iter().filter_map(|c| item_stack_of(&*host, c)).collect();
+        let (Some(result), Some(first)) = (item_stack_of(&*host, &t.result), costs.first().cloned()) else { continue };
+        // The original gives each trade 100000000 uses.
+        offers.push(MerchantOffer::new(ItemCost::new(first), costs.get(1).cloned().map(ItemCost::new), result, 100_000_000, 0, 0.0));
+    }
+    let p = host.player(player)?;
+    let title = plain(&*host, title);
+    p.open_merchant(host, title, offers).ok().flatten()
+}
+
 fn sender_of(info: &PlayerInfo, cfg: &core::config::Config) -> core::world::Sender {
     core::world::Sender {
         uuid: Some(info.view.uuid),
@@ -596,6 +692,19 @@ impl Citizens {
                     let stacks: Vec<Option<ItemStack>> =
                         items.iter().map(|i| i.as_ref().and_then(|s| item_stack_of(&*host, s))).collect();
                     let _ = host.menu_set_items(player, window, stacks);
+                }
+                core::world::Op::Entity { entity, set } => apply_entity_set(host, entity, set),
+                core::world::Op::Camera { player, entity } => {
+                    if let Some(p) = host.player(player) {
+                        let target = entity.and_then(|e| host.entity(e));
+                        if entity.is_none() || target.is_some() {
+                            let _ = p.set_camera_entity(host, target);
+                        }
+                    }
+                }
+                core::world::Op::OpenMerchant { player, title, trades } => {
+                    let window = open_merchant(host, player, &title, &trades);
+                    api::with_world(|w| w.merchant_opened(player, window));
                 }
                 core::world::Op::Jump { entity } => {
                     if let Some(mob) = host.entity(entity).and_then(|e| host.mob(e)) {
@@ -996,7 +1105,21 @@ impl Hooks for Citizens {
             .into_iter()
             .filter_map(|p| player_info(&*host, p).map(|i| (i.view.uuid, i.rot)))
             .collect();
+        // Where the path-following NPCs stand and whether their paths are finished.
+        let followers = api::with_world(|w| w.real_entities()).unwrap_or_default();
+        let reports: Vec<(i32, [f64; 3], bool)> = followers
+            .into_iter()
+            .filter_map(|(id, e)| {
+                let ent = host.entity(e)?;
+                let pos = ent.position(&*host)?;
+                let done = host.mob(ent).and_then(|m| m.is_done(&*host)).unwrap_or(true);
+                Some((id, pos, done))
+            })
+            .collect();
         api::with_world(|w| {
+            for (id, pos, done) in reports {
+                w.nav_report(id, pos, done);
+            }
             w.rotations = rotations.into_iter().collect();
             for f in fetched {
                 w.skin_fetched(f);
@@ -1067,6 +1190,11 @@ impl Hooks for Citizens {
     fn server_chat(&self, _: &mut dyn ServerHost, event: &mut ServerChatEvent<'_>) -> Flow {
         let taken = api::with_world(|w| w.shop_chat(event.player, event.raw_text)).unwrap_or(false);
         if taken { Flow::Cancel } else { Flow::Continue }
+    }
+
+    fn merchant_trade_selected(&self, _: &mut dyn ServerHost, event: &mut MerchantTradeSelectedEvent) {
+        let (player, window, index) = (event.player, event.window, event.index);
+        api::with_world(|w| w.merchant_selected(player, window, index));
     }
 
     fn menu_closed(&self, _: &mut dyn ServerHost, event: &mut MenuClosedEvent) {

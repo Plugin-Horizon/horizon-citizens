@@ -5,6 +5,7 @@
 pub mod api;
 pub mod commands;
 pub mod config;
+pub mod entity_set;
 pub mod ids;
 pub mod items;
 pub mod javaser;

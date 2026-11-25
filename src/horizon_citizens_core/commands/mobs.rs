@@ -102,7 +102,7 @@ macro_rules! m {
 }
 
 const MOBS: &[Mob] = &[
-    Mob { kinds: &["ALLAY"], flags: &[f('d', "dancing", true)], noeffect: &["dancing"], ..m!("allay", [], "allay (-d(ancing))") },
+    Mob { kinds: &["ALLAY"], flags: &[f('d', "dancing", true)], ..m!("allay", [], "allay (-d(ancing))") },
     Mob {
         kinds: &["AREA_EFFECT_CLOUD"],
         opts: &[o("color", V::Any), o("duration", V::Int(0, IMAX)), o("radius", V::Num(NUM0.0, NUM0.1)), o("radius_per_tick", V::Num(NUM.0, NUM.1)), o("particle", V::Any)],
@@ -197,7 +197,7 @@ const MOBS: &[Mob] = &[
     Mob {
         kinds: &["ENDER_DRAGON"],
         opts: &[o("phase", V::Any), o("destroywalls", V::Bool)],
-        live: true, noeffect: &["destroywalls"], ..m!("enderdragon", [], "enderdragon --phase [phase] --destroywalls [true|false]")
+        live: true, ..m!("enderdragon", [], "enderdragon --phase [phase] --destroywalls [true|false]")
     },
     Mob { kinds: &["ENDERMAN"], flags: &[f('a', "angry", true)], noeffect: &["angry"], ..m!("enderman", [], "enderman -a(ngry)") },
     Mob {
@@ -215,7 +215,7 @@ const MOBS: &[Mob] = &[
             o("pouncing", V::Bool),
             o("faceplanted", V::Bool),
         ],
-        live: true, noeffect: &["interested", "pouncing", "faceplanted"], ..m!("fox", [], "fox --type type --sleeping [true|false] --sitting [true|false] --crouching [true|false] --interested [true|false] --pouncing [true|false] --faceplanted [true|false]")
+        live: true, ..m!("fox", [], "fox --type type --sleeping [true|false] --sitting [true|false] --crouching [true|false] --interested [true|false] --pouncing [true|false] --faceplanted [true|false]")
     },
     Mob { kinds: &["FROG"], opts: &[o("variant", V::Any)], live: true, ..m!("frog", [], "frog (--variant variant)") },
     Mob {
@@ -295,7 +295,7 @@ const MOBS: &[Mob] = &[
         kinds: &["PANDA"],
         flags: &[f('e', "eating", true), f('s', "sitting", true), f('n', "sneezing", true), f('r', "rolling", true)],
         opts: &[o("gene", V::Any), o("hiddengene", V::Any)],
-        live: true, noeffect: &["eating", "sitting", "sneezing", "rolling"], ..m!("panda", [], "panda --gene (main gene) --hiddengene (hidden gene) -e(ating) -s(itting) -n (sneezing) -r(olling)")
+        live: true, noeffect: &["eating"], ..m!("panda", [], "panda --gene (main gene) --hiddengene (hidden gene) -e(ating) -s(itting) -n (sneezing) -r(olling)")
     },
     Mob { kinds: &["PARROT"], opts: &[o("variant", V::Any)], live: true, ..m!("parrot", [], "parrot (--variant variant)") },
     Mob {
@@ -335,7 +335,7 @@ const MOBS: &[Mob] = &[
         ],
         ..m!("playerfilter", [], "playerfilter -a(llowlist) -e(mpty) -d(enylist) --add [uuid] --remove [uuid] --addpermission [permission] --removepermission [permission] --addgroup [group] --removegroup [group] -c(lear) --applywithin [blocks range]")
     },
-    Mob { kinds: &["POLAR_BEAR"], flags: &[f('r', "rearing", true)], noeffect: &["rearing"], ..m!("polarbear", [], "polarbear (-r)") },
+    Mob { kinds: &["POLAR_BEAR"], flags: &[f('r', "rearing", true)], ..m!("polarbear", [], "polarbear (-r)") },
     Mob {
         flags: &[f('t', "temporary", true)],
         opts: &[o("name", V::Any), o("type", V::Any), o("duration", V::Int(-1, IMAX)), o("amplifier", V::Int(0, 255)), o("icon", V::Bool)],
@@ -386,7 +386,7 @@ const MOBS: &[Mob] = &[
         live: true, ..m!("tropicalfish", [], "tropicalfish (--body color) (--pattern pattern) (--patterncolor color)")
     },
     Mob { flags: &[f('o', "offhand", true)], ..m!("useitem", [], "useitem (-o(ffhand))") },
-    Mob { kinds: &["VEX"], opts: &[o("charging", V::Bool)], noeffect: &["charging"], ..m!("vex", [], "vex (--charging [charging])") },
+    Mob { kinds: &["VEX"], opts: &[o("charging", V::Bool)], ..m!("vex", [], "vex (--charging [charging])") },
     Mob {
         kinds: &["VILLAGER", "ZOMBIE_VILLAGER"],
         flags: &[f('s', "shake_head", true)],
@@ -782,8 +782,27 @@ fn generic(w: &mut World, id: i32, m: &'static Mob, parsed: Parsed) -> Res {
     for (key, _, shown) in &sets {
         out.extend(ok(w, M_SET, &[&npc_name, &format!("{name} {key}"), shown]));
     }
+    // What only the host calls of `entity_set` can set reaches the entity at once, no respawn.
+    if sets.iter().all(|(k, _, _)| hosted(name, k)) {
+        w.mark_dirty();
+        w.apply_settings(id);
+        return Ok(out);
+    }
     let partial = sets.iter().any(|(k, _, _)| m.noeffect.contains(k));
     Ok(finish(w, id, m.live, partial, out))
+}
+
+/// The saved keys that are set through the host calls of `entity_set`, not the summon data.
+fn hosted(name: &str, key: &str) -> bool {
+    matches!(
+        (name, key),
+        ("allay", "dancing")
+            | ("fox", "interested" | "pouncing" | "faceplanted")
+            | ("panda", "sneezing" | "rolling" | "sitting")
+            | ("polarbear", "rearing")
+            | ("vex", "charging")
+            | ("enderdragon", "destroywalls")
+    )
 }
 
 fn node_text(n: &Node) -> String {
@@ -1591,6 +1610,7 @@ fn mob_nbt(npc: &NpcData, kind: &str, out: &mut Vec<String>) {
 mod tests {
     use super::*;
     use crate::horizon_citizens_core::config::Config;
+    use crate::horizon_citizens_core::entity_set::{EntitySet, Synched};
 
     fn setup(kind: &str) -> (World, Sender) {
         let mut cfg = Config::default();
@@ -1902,10 +1922,65 @@ mod tests {
 
     #[test]
     fn synched_only_states_say_so() {
-        let (mut w, s) = setup("allay");
-        let r = cmd(&mut w, &s, "npc allay -d");
+        // The wolf's interested state has no host call.
+        let (mut w, s) = setup("wolf");
+        let r = cmd(&mut w, &s, "npc wolf -i");
         assert!(r.last().unwrap().contains("does not act on it"), "{r:?}");
-        assert!(nbt(&w, "minecraft:allay").is_empty());
+        let (mut w, s) = setup("panda");
+        let r = cmd(&mut w, &s, "npc panda -e");
+        assert!(r.last().unwrap().contains("does not act on it"), "{r:?}");
+    }
+
+    fn entity_sets(w: &mut World, entity: u32) -> Vec<EntitySet> {
+        w.take_ops().into_iter().filter_map(|o| if let Op::Entity { entity: e, set } = o { (e == entity).then_some(set) } else { None }).collect()
+    }
+
+    fn join(w: &mut World, entity: u32) {
+        let uuid = w.saves.get(0).unwrap().uuid();
+        assert!(!w.on_entity_join("minecraft:overworld", entity, uuid, true));
+        w.take_ops();
+    }
+
+    #[test]
+    fn synched_states_are_set_on_the_entity() {
+        let cases: [(&str, &str, EntitySet); 8] = [
+            ("allay", "npc allay -d", EntitySet::Synched(Synched::AllayDancing, true)),
+            ("fox", "npc fox --interested true", EntitySet::Synched(Synched::FoxInterested, true)),
+            ("fox", "npc fox --pouncing true", EntitySet::Synched(Synched::FoxPouncing, true)),
+            ("fox", "npc fox --faceplanted false", EntitySet::Synched(Synched::FoxFaceplanted, false)),
+            ("panda", "npc panda -n", EntitySet::Synched(Synched::PandaSneezing, true)),
+            ("panda", "npc panda -r", EntitySet::Synched(Synched::PandaRolling, true)),
+            ("polar_bear", "npc polarbear -r", EntitySet::Synched(Synched::PolarBearStanding, true)),
+            ("vex", "npc vex --charging true", EntitySet::Synched(Synched::VexCharging, true)),
+        ];
+        for (kind, line, want) in cases {
+            let (mut w, s) = setup(kind);
+            join(&mut w, 31);
+            let r = cmd(&mut w, &s, line);
+            assert!(!r.iter().any(|l| l.contains("does not act")), "{line}: {r:?}");
+            let got = entity_sets(&mut w, 31);
+            assert!(got.contains(&want), "{line}: {got:?}");
+        }
+    }
+
+    #[test]
+    fn a_dragon_keeps_or_breaks_walls_on_the_entity() {
+        let (mut w, s) = setup("ender_dragon");
+        join(&mut w, 32);
+        let r = cmd(&mut w, &s, "npc enderdragon --destroywalls false");
+        assert!(!r.iter().any(|l| l.contains("does not act")), "{r:?}");
+        assert!(entity_sets(&mut w, 32).contains(&EntitySet::DestroyBlocks(false)));
+        // The setting is sent again when the entity comes back.
+        let (mut w, s) = setup("ender_dragon");
+        cmd(&mut w, &s, "npc enderdragon --destroywalls true");
+        w.take_ops();
+        join_keep(&mut w, 33);
+        assert!(entity_sets(&mut w, 33).contains(&EntitySet::DestroyBlocks(true)));
+    }
+
+    fn join_keep(w: &mut World, entity: u32) {
+        let uuid = w.saves.get(0).unwrap().uuid();
+        assert!(!w.on_entity_join("minecraft:overworld", entity, uuid, true));
     }
 
     #[test]

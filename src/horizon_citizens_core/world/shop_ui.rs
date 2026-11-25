@@ -7,7 +7,7 @@
 //! own stacks here ([`MenuAction::Read`]); moving a stack out of or into the storage is [`MenuAction::Take`]
 //! and [`MenuAction::Deposit`], as for `/npc inventory`.
 
-use super::{MenuAction, Op, Sender, World};
+use super::{MenuAction, Op, Sender, Trade, World};
 use crate::horizon_citizens_core::commands;
 use crate::horizon_citizens_core::npc::StackData;
 use crate::horizon_citizens_core::shop::{self, Action, Buyer, Effect, Kind, Lookup, Outcome, Shop, ShopItem, ShopType, Storage};
@@ -470,7 +470,10 @@ impl World {
             self.tell_err(player, "Empty shop");
             return;
         }
-        // A trader shop would open a merchant screen (no host call for it): it shows as the chest.
+        if sh.shop_type == shop::ShopType::Trader {
+            self.open_trader(player, &shop);
+            return;
+        }
         let s = Session {
             player,
             sender: None,
@@ -484,6 +487,65 @@ impl World {
             dead: false,
         };
         self.start_session(s);
+    }
+
+    /// `NPCTraderShopViewer`: a merchant screen with one trade per shop item that has an item cost. The
+    /// payments are the first two stacks of the item actions of the cost, the result is the display item.
+    /// The game's own trade rules take the payments and give the result (the original cancels the result
+    /// click and runs the purchase itself: limits, commands and the other actions do not run here).
+    fn open_trader(&mut self, player: u128, target: &Target) {
+        let Some(sh) = self.shop_ref(target) else { return };
+        let b = self.buyer_of(player);
+        let snap = self.shop_snap();
+        let mut trades = Vec::new();
+        for pg in &sh.pages {
+            for it in pg.items.values() {
+                let Some(result) = it.display_item(Some(&b), &self.cfg.shops, &snap) else { continue };
+                let mut costs: Vec<StackData> = Vec::new();
+                for a in &it.cost {
+                    if let shop::Action::Item { items, .. } = a {
+                        for st in items {
+                            if costs.len() < 2 {
+                                costs.push(st.clone());
+                            }
+                        }
+                    }
+                }
+                if !costs.is_empty() {
+                    trades.push(Trade { costs, result });
+                }
+            }
+        }
+        let title = if sh.title().is_empty() { "Shop".to_owned() } else { shop::player_placeholders(&sh.title(), &b) };
+        let title = commands::tags(&title, "&0");
+        self.merchants.remove(&player);
+        self.ops.push(Op::OpenMerchant { player, title, trades });
+    }
+
+    /// The merchant screen opened (`None`: a mod cancelled it).
+    pub fn merchant_opened(&mut self, player: u128, window: Option<i32>) {
+        match window {
+            Some(_) => {
+                self.merchants.insert(player, (window, None));
+            }
+            None => {
+                self.merchants.remove(&player);
+            }
+        }
+    }
+
+    /// `merchant_trade_selected`: the player picked trade `index` in the screen `window`.
+    pub fn merchant_selected(&mut self, player: u128, window: i32, index: i32) {
+        if let Some(m) = self.merchants.get_mut(&player)
+            && m.0 == Some(window)
+        {
+            m.1 = usize::try_from(index).ok();
+        }
+    }
+
+    /// The trade a player has selected in the trader screen they have open.
+    pub fn merchant_trade(&self, player: u128) -> Option<usize> {
+        self.merchants.get(&player).and_then(|m| m.1)
     }
 
     /// `NPCShop.displayEditor(trait, player)`.
@@ -1576,6 +1638,44 @@ mod tests {
         assert_eq!(levels, Some(2), "5 levels minus the cost of 3");
         assert_eq!(slots.len(), 1);
         assert_eq!((slots[0].0, slots[0].1.as_ref().map(|s| s.count)), (0, Some(2)));
+    }
+
+    #[test]
+    fn a_trader_shop_opens_a_merchant_screen_with_the_item_costs() {
+        let mut w = world();
+        player(&mut w, 5, vec![]);
+        let mut sh = Shop::new("smith");
+        sh.shop_type = ShopType::Trader;
+        sh.title = Some("Smith".into());
+        let mut sword = ShopItem::new(&w.cfg.shops);
+        sword.display = Some(StackData::new("minecraft:iron_sword", 1));
+        sword.cost = vec![Action::Item { items: vec![StackData::new("minecraft:emerald", 5), StackData::new("minecraft:stick", 2), StackData::new("minecraft:dirt", 1)], meta_filter: vec![], require_undamaged: true }];
+        sh.page_mut(0).items.insert(0, sword);
+        // Paid in experience only: no trade (a merchant screen takes item payments).
+        let mut xp = ShopItem::new(&w.cfg.shops);
+        xp.display = Some(StackData::new("minecraft:apple", 1));
+        xp.cost = vec![Action::Experience { exp: 3 }];
+        sh.page_mut(0).items.insert(1, xp);
+        w.shops.global.insert("smith".into(), sh);
+        let t = Target::Global("smith".into());
+        w.shop_display(0xA1, t.clone(), Src::Shop(t));
+        let ops = w.take_ops();
+        assert!(!ops.iter().any(|o| matches!(o, Op::OpenMenu { .. })), "no chest: {ops:?}");
+        let Some(Op::OpenMerchant { player, title, trades }) = ops.into_iter().find(|o| matches!(o, Op::OpenMerchant { .. })) else { panic!("no merchant screen") };
+        assert_eq!((player, title.as_str()), (0xA1, "Smith"));
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].result.id, "minecraft:iron_sword");
+        let costs: Vec<(&str, i64)> = trades[0].costs.iter().map(|c| (c.id.as_str(), c.count)).collect();
+        assert_eq!(costs, [("minecraft:emerald", 5), ("minecraft:stick", 2)], "two payments at most");
+        // The screen's id and the player's selection are kept.
+        assert_eq!(w.merchant_trade(0xA1), None);
+        w.merchant_opened(0xA1, Some(9));
+        w.merchant_selected(0xA1, 8, 0);
+        assert_eq!(w.merchant_trade(0xA1), None, "another window");
+        w.merchant_selected(0xA1, 9, 0);
+        assert_eq!(w.merchant_trade(0xA1), Some(0));
+        w.merchant_opened(0xA1, None);
+        assert_eq!(w.merchant_trade(0xA1), None);
     }
 
     #[test]

@@ -7,6 +7,7 @@
 //! [`World::take_events`].
 
 use crate::horizon_citizens_core::config::Config;
+use crate::horizon_citizens_core::entity_set::{self, EntitySet};
 use crate::horizon_citizens_core::tree::TreeExt;
 use crate::horizon_citizens_core::yaml::Node;
 use crate::horizon_citizens_core::look::{self, PlayerView, Rng};
@@ -107,6 +108,31 @@ pub enum Op {
     ShopApply { player: u128, levels: Option<i32>, slots: Vec<(u32, Option<StackData>)> },
     /// Replace everything an open menu shows (`menu_set_items`).
     SetMenuItems { player: u128, window: i32, items: Vec<Option<StackData>> },
+    /// A host call for an NPC's entity (disguise, pose, targetable, ranges, navigation ...).
+    Entity { entity: u32, set: EntitySet },
+    /// `/npc spectate`: the player's view follows this entity (`None`: back at themselves).
+    Camera { player: u128, entity: Option<u32> },
+    /// A trader shop: a merchant screen (`player_open_merchant`) with these trades, in order. The glue
+    /// answers with [`World::merchant_opened`].
+    OpenMerchant { player: u128, title: String, trades: Vec<Trade> },
+}
+
+/// One trade of a trader shop: up to two payments and the stack received (`MerchantRecipe`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Trade {
+    pub costs: Vec<StackData>,
+    pub result: StackData,
+}
+
+/// What the host told about a `NoAI` NPC that follows paths itself.
+#[derive(Clone, Debug, Default)]
+struct RealNav {
+    /// Where its entity stands.
+    pos: Option<[f64; 3]>,
+    /// `mob_is_done`: no path, or the path finished.
+    done: bool,
+    /// The point a path was last asked for, and the tick.
+    goal: Option<([f64; 3], u64)>,
 }
 
 /// Which NPC data a menu edits.
@@ -289,6 +315,11 @@ pub struct World {
     live: BTreeMap<i32, Live>,
     by_entity: HashMap<u32, i32>,
     walks: BTreeMap<i32, Walk>,
+    /// NPCs whose entity takes paths (`mob_set_navigation_ticks` accepted): they walk with the game's
+    /// pathfinding instead of straight lines.
+    real: BTreeMap<i32, RealNav>,
+    /// The trade each open merchant screen was selected on: player -> (window, trade index).
+    merchants: HashMap<u128, (Option<i32>, Option<usize>)>,
     /// NPCs that died and wait for a respawn through the API.
     dead: BTreeSet<i32>,
     ops: Vec<Op>,
@@ -380,6 +411,8 @@ impl World {
             live: BTreeMap::new(),
             by_entity: HashMap::new(),
             walks: BTreeMap::new(),
+            real: BTreeMap::new(),
+            merchants: HashMap::new(),
             dead: BTreeSet::new(),
             ops: Vec::new(),
             events: Vec::new(),
@@ -635,6 +668,7 @@ impl World {
             return;
         };
         self.walks.remove(&id);
+        self.real.remove(&id);
         match live.entity {
             Some(e) => {
                 self.by_entity.remove(&e);
@@ -714,12 +748,64 @@ impl World {
             self.ensure_team(&color);
             self.ops.push(Op::Console(spawn::team_join(&color, u)));
         }
+        self.push_settings(id, entity);
         self.events.push(NpcEvent::Spawned {
             npc: id,
             entity,
             dimension: dimension.to_owned(),
         });
         false
+    }
+
+    /// The settings of an NPC's entity that are set through host calls (see `entity_set`), and the
+    /// request to let a `NoAI` mob follow paths (real pathfinding).
+    fn push_settings(&mut self, id: i32, entity: u32) {
+        let Some(npc) = self.saves.get(id) else { return };
+        let kind = spawn::entity_kind(&npc.kind());
+        let mut sets = entity_set::settings(npc, &kind);
+        if !npc.is_player() {
+            sets.push(EntitySet::NavigationTicks(true));
+        }
+        self.ops.extend(sets.into_iter().map(|set| Op::Entity { entity, set }));
+    }
+
+    /// An NPC's saved settings changed: send them to its entity again.
+    pub fn apply_settings(&mut self, id: i32) {
+        if let Some(entity) = self.entity_of(id) {
+            self.push_settings(id, entity);
+        }
+    }
+
+    /// A host call for the NPC's entity, now (`/npc warden dig`); false when it is not in the world.
+    pub fn entity_op(&mut self, id: i32, set: EntitySet) -> bool {
+        let Some(entity) = self.entity_of(id) else { return false };
+        self.ops.push(Op::Entity { entity, set });
+        true
+    }
+
+    /// The host let the entity follow paths: from now on its walks use the game's pathfinding.
+    pub fn nav_ready(&mut self, entity: u32) {
+        if let Some(id) = self.by_entity.get(&entity).copied() {
+            self.real.insert(id, RealNav::default());
+        }
+    }
+
+    /// The NPCs that follow paths and their entities (the glue reads where they stand every tick).
+    pub fn real_entities(&self) -> Vec<(i32, u32)> {
+        self.real.keys().filter_map(|id| self.entity_of(*id).map(|e| (*id, e))).collect()
+    }
+
+    /// Where a path-following NPC's entity stands, and whether its path is finished.
+    pub fn nav_report(&mut self, id: i32, pos: [f64; 3], done: bool) {
+        if let Some(r) = self.real.get_mut(&id) {
+            r.pos = Some(pos);
+            r.done = done;
+        }
+    }
+
+    /// Whether the NPC walks with the game's pathfinding (false: straight lines).
+    pub fn has_real_pathing(&self, id: i32) -> bool {
+        self.real.contains_key(&id)
     }
 
     /// An entity left a level: an NPC's chunk unloaded, it died, or the mod removed it.
@@ -736,6 +822,7 @@ impl World {
         let died = live.hurt.is_some_and(|t| self.tick.saturating_sub(t) <= 2);
         let live = self.live.remove(&id).unwrap_or_default();
         self.walks.remove(&id);
+        self.real.remove(&id);
         if died {
             self.play_sound(id, "death");
             for u in live.holograms {
@@ -1124,7 +1211,18 @@ impl World {
         }
     }
     pub fn cancel_navigation(&mut self, id: i32) {
-        self.walks.remove(&id);
+        if self.walks.remove(&id).is_some() {
+            self.stop_path(id);
+        }
+    }
+    /// Takes the path the game is following away (real pathfinding only).
+    fn stop_path(&mut self, id: i32) {
+        if let Some(r) = self.real.get_mut(&id) {
+            r.goal = None;
+            if let Some(entity) = self.live.get(&id).and_then(|l| l.entity) {
+                self.ops.push(Op::Entity { entity, set: EntitySet::StopNavigation });
+            }
+        }
     }
     pub fn is_navigating(&self, id: i32) -> bool {
         self.walks.contains_key(&id)
@@ -1689,6 +1787,8 @@ impl World {
         }
         let mut done = Vec::new();
         let mut moves = Vec::new();
+        let mut real_pos: Vec<(i32, [f64; 3])> = Vec::new();
+        let mut paths: Vec<(i32, u32, [f64; 3], f64)> = Vec::new();
         for (id, walk) in &self.walks {
             let Some(live) = self.live.get(id) else {
                 done.push((*id, None));
@@ -1697,6 +1797,30 @@ impl World {
             let Some(at) = &live.at else {
                 continue;
             };
+            if let (Some(real), Some(entity)) = (self.real.get(id), live.entity) {
+                // The game's own pathfinding drives the entity: ask for a path, read where it is.
+                let pos = real.pos.unwrap_or([at.x, at.y, at.z]);
+                let dx = walk.target[0] - pos[0];
+                let dz = walk.target[2] - pos[2];
+                let near = (dx * dx + dz * dz).sqrt() <= 1.0 && (walk.target[1] - pos[1]).abs() <= 2.0;
+                let need = match real.goal {
+                    None => true,
+                    Some((g, t)) => {
+                        let moved = ((g[0] - walk.target[0]).powi(2) + (g[1] - walk.target[1]).powi(2) + (g[2] - walk.target[2]).powi(2)).sqrt();
+                        moved > 0.5 && (!walk.follow || self.tick.saturating_sub(t) >= 10)
+                    }
+                };
+                real_pos.push((*id, pos));
+                if near {
+                    done.push((*id, walk.waypoint));
+                } else if need {
+                    paths.push((*id, entity, walk.target, (walk.speed / 0.2).clamp(0.05, 5.0)));
+                } else if real.done && real.goal.is_some_and(|(_, t)| self.tick.saturating_sub(t) >= 3) {
+                    // The path ended (or the game found none): the walk is over.
+                    done.push((*id, walk.waypoint));
+                }
+                continue;
+            }
             let d = [walk.target[0] - at.x, walk.target[1] - at.y, walk.target[2] - at.z];
             let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
             let mut next = at.clone();
@@ -1717,6 +1841,21 @@ impl World {
                 next.pitch = 0.0;
             }
             moves.push((*id, live.dimension.clone(), next));
+        }
+        for (id, pos) in real_pos {
+            if let Some(l) = self.live.get_mut(&id)
+                && let Some(at) = l.at.as_mut()
+            {
+                at.x = pos[0];
+                at.y = pos[1];
+                at.z = pos[2];
+            }
+        }
+        for (id, entity, target, speed) in paths {
+            if let Some(r) = self.real.get_mut(&id) {
+                r.goal = Some((target, self.tick));
+            }
+            self.ops.push(Op::Entity { entity, set: EntitySet::MoveTo { target, speed } });
         }
         for (id, dimension, loc) in moves {
             let Some(uuid) = self.saves.get(id).and_then(NpcData::uuid) else {
@@ -1744,6 +1883,7 @@ impl World {
         for (id, waypoint) in done {
             let following = self.walks.get(&id).is_some_and(|w| w.follow);
             self.walks.remove(&id);
+            self.stop_path(id);
             if following {
                 continue;
             }
@@ -2365,6 +2505,87 @@ mod tests {
         w.tick(&[player(-50.0, 0.0)]);
         w.tick(&[player(-50.0, 0.0)]);
         assert!(!consoles(&mut w).iter().any(|c| c.contains(" rotate ")));
+    }
+
+    fn mob_entity(w: &mut World, name: &str, entity: u32) -> i32 {
+        let id = w.create(name, "ZOMBIE", loc(0.0, 0.0), None);
+        let uuid = w.saves.get(id).unwrap().uuid();
+        assert!(!w.on_entity_join("minecraft:overworld", entity, uuid, true));
+        id
+    }
+
+    fn entity_ops(w: &mut World) -> Vec<EntitySet> {
+        w.take_ops().into_iter().filter_map(|o| if let Op::Entity { set, .. } = o { Some(set) } else { None }).collect()
+    }
+
+    #[test]
+    fn a_mob_npc_asks_to_follow_paths_and_a_mannequin_does_not() {
+        let mut w = world();
+        mob_entity(&mut w, "Zed", 10);
+        assert!(entity_ops(&mut w).contains(&EntitySet::NavigationTicks(true)));
+        spawned(&mut w, "Guide", 11);
+        assert!(!entity_ops(&mut w).contains(&EntitySet::NavigationTicks(true)));
+    }
+
+    #[test]
+    fn real_pathing_asks_for_a_path_and_reads_the_position_back() {
+        let mut w = world();
+        let id = mob_entity(&mut w, "Zed", 10);
+        w.take_ops();
+        // Until the game takes the switch, the walk is the straight line.
+        assert!(!w.has_real_pathing(id));
+        w.nav_ready(10);
+        assert!(w.has_real_pathing(id));
+        assert_eq!(w.real_entities(), vec![(id, 10)]);
+        assert!(w.navigate_to(id, [10.0, 64.0, 0.0], 0.2));
+        w.take_events();
+        w.tick(&[]);
+        let ops = w.take_ops();
+        assert!(!ops.iter().any(|o| matches!(o, Op::Console(c) if c.contains(" tp "))), "the game moves it: {ops:?}");
+        let path: Vec<_> = ops
+            .iter()
+            .filter_map(|o| if let Op::Entity { set: EntitySet::MoveTo { target, speed }, .. } = o { Some((*target, *speed)) } else { None })
+            .collect();
+        assert_eq!(path, vec![([10.0, 64.0, 0.0], 1.0)]);
+        // On its way: the path is kept, nothing is asked again, the NPC's position follows the entity.
+        w.nav_report(id, [4.0, 64.0, 0.0], false);
+        w.tick(&[]);
+        assert!(entity_ops(&mut w).is_empty());
+        assert_eq!(w.current_location(id).map(|l| l.x), Some(4.0));
+        assert!(w.is_navigating(id));
+        // Arrived: the walk ends, the path stops and the API hears it.
+        w.nav_report(id, [9.5, 64.0, 0.0], true);
+        w.tick(&[]);
+        assert!(entity_ops(&mut w).contains(&EntitySet::StopNavigation));
+        assert!(w.take_events().contains(&NpcEvent::NavigationComplete { npc: id }));
+        assert!(!w.is_navigating(id));
+    }
+
+    #[test]
+    fn a_path_that_ends_short_ends_the_walk() {
+        let mut w = world();
+        let id = mob_entity(&mut w, "Zed", 10);
+        w.nav_ready(10);
+        assert!(w.navigate_to(id, [30.0, 64.0, 0.0], 0.2));
+        w.tick(&[]);
+        w.take_ops();
+        w.take_events();
+        // The game found no way (its path is done far from the goal): after a few ticks the walk is over.
+        for _ in 0..4 {
+            w.nav_report(id, [2.0, 64.0, 0.0], true);
+            w.tick(&[]);
+        }
+        assert!(!w.is_navigating(id));
+        assert!(w.take_events().contains(&NpcEvent::NavigationComplete { npc: id }));
+    }
+
+    #[test]
+    fn real_pathing_ends_with_the_entity() {
+        let mut w = world();
+        let id = mob_entity(&mut w, "Zed", 10);
+        w.nav_ready(10);
+        w.on_entity_leave(10);
+        assert!(!w.has_real_pathing(id));
     }
 
     #[test]

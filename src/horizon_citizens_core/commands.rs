@@ -324,6 +324,8 @@ const CMDS: &[Cmd] = &[
     cmd("jump", &[], "jump", 1, Some(1), "citizens.npc.jump"),
     cmd("copier", &[], "copier", 1, Some(1), "citizens.npc.edit.copier"),
     cmd("warden", &[], "warden dig|emerge|roar|anger [entity uuid/player name] [anger]", 1, Some(4), "citizens.npc.warden"),
+    cmd("disguise", &[], "disguise --type [type]", 1, Some(2), "citizens.npc.disguise"),
+    cmd("spectate", &[], "spectate (-r(eset))", 1, Some(1), "citizens.npc.spectate"),
     cmd("inventory", &[], "inventory (player name/uuid)", 1, Some(2), "citizens.npc.inventory"),
     cmd("drops", &[], "drops", 1, Some(1), "citizens.npc.drops"),
     cmd("shop", &[], "shop (edit|show|delete|copyfrom) (name) (new_name)", 1, Some(4), "citizens.npc.shop"),
@@ -345,7 +347,7 @@ const CMDS: &[Cmd] = &[
 ];
 
 /// Citizens modifiers this port does not have (they answer "not supported", not "Too many arguments").
-const CITIZENS_ONLY: &[&str] = &["behavior", "cload", "pushable", "configgui", "disguise", "eval", "fish", "nophysics", "spectate", "target", "velocity", "vel", "donkey", "mule"];
+const CITIZENS_ONLY: &[&str] = &["behavior", "cload", "pushable", "configgui", "eval", "fish", "nophysics", "target", "velocity", "vel", "donkey", "mule"];
 
 fn find_cmd(sub: &str) -> Option<&'static Cmd> {
     let sub = sub.to_ascii_lowercase();
@@ -546,6 +548,8 @@ const TAILS: &[(&str, &[&str])] = &[
     ("jump", &[""]),
     ("copier", &[""]),
     ("warden", &["anger", "dig", "emerge", "roar"]),
+    ("disguise", &["--type"]),
+    ("spectate", &["", "-r"]),
     ("inventory", &[""]),
     ("drops", &[""]),
     (
@@ -722,6 +726,8 @@ pub const NODES: &[&str] = &[
     "citizens.npc.jump",
     "citizens.npc.edit.copier",
     "citizens.npc.warden",
+    "citizens.npc.disguise",
+    "citizens.npc.spectate",
     "citizens.npc.inventory",
     "citizens.npc.drops",
     "citizens.npc.shop",
@@ -829,6 +835,8 @@ const PARENT_EDGES: &[(&str, &str)] = &[
     ("citizens.npc.*", "citizens.npc.mount"),
     ("citizens.npc.*", "citizens.npc.jump"),
     ("citizens.npc.*", "citizens.npc.warden"),
+    ("citizens.npc.*", "citizens.npc.disguise"),
+    ("citizens.npc.*", "citizens.npc.spectate"),
     ("citizens.npc.*", "citizens.npc.shop"),
     ("citizens.*", "citizens.npc.shop"),
     ("citizens.npc.*", "citizens.npc.shopitem"),
@@ -964,6 +972,8 @@ const PARENT_EDGES: &[(&str, &str)] = &[
     ("citizens.*", "citizens.npc.mount"),
     ("citizens.*", "citizens.npc.jump"),
     ("citizens.*", "citizens.npc.warden"),
+    ("citizens.*", "citizens.npc.disguise"),
+    ("citizens.*", "citizens.npc.spectate"),
     ("citizens.*", "citizens.npc.inventory"),
     ("citizens.*", "citizens.npc.drops"),
     ("citizens.*", "citizens.npc.passive"),
@@ -1594,6 +1604,8 @@ fn npc(w: &mut World, sender: &Sender, rest: &str) -> Res {
         "jump" => jump(w, sender),
         "copier" => copier(w, sender),
         "warden" => warden(w, sender, &args),
+        "disguise" => disguise(w, sender, &args),
+        "spectate" => spectate(w, sender, &args),
         "inventory" => inventory(w, sender, &args),
         "drops" => drops(w, sender),
         "shop" => shop_cmd(w, sender, &args),
@@ -3948,9 +3960,55 @@ fn warden(w: &mut World, sender: &Sender, args: &Args) -> Res {
             w.warden_anger(id, uuid, n);
             Ok(ok(w, M_WARDEN_ANGER, &[who, &n.to_string()]))
         }
-        "dig" | "emerge" | "roar" => Ok(ok(w, M_WARDEN_POSE, &[&name, &sub])),
+        "dig" | "emerge" | "roar" => {
+            let pose = match sub.as_str() {
+                "dig" => crate::horizon_citizens_core::entity_set::Pose::Digging,
+                "emerge" => crate::horizon_citizens_core::entity_set::Pose::Emerging,
+                _ => crate::horizon_citizens_core::entity_set::Pose::Roaring,
+            };
+            w.entity_op(id, crate::horizon_citizens_core::entity_set::EntitySet::Pose(pose));
+            Ok(ok(w, M_WARDEN_POSE, &[&name, &sub]))
+        }
         _ => Err(usage_error(w, None, find_cmd("warden").ok_or_else(Vec::new)?)),
     }
+}
+
+const M_DISGUISE_SET: &str = "Set disguise type to [[{0}]].";
+
+/// `/npc disguise --type [type]` (`DisguiseTrait.disguiseAsType`): the NPC is shown to every client as that
+/// entity type; the entity itself stays what it is. Without a type nothing happens, as in the original.
+fn disguise(w: &mut World, sender: &Sender, args: &Args) -> Res {
+    let id = target(w, sender)?;
+    let Some(raw) = args.value("type") else { return Ok(Vec::new()) };
+    let upper = raw.to_ascii_uppercase();
+    // A player needs a tab-list entry of its own: the game cannot show an entity as one.
+    if upper == "PLAYER" || !valid_type(&upper) {
+        return Err(err(w, M_INVALID_ENTITY_TYPE, &[raw]));
+    }
+    {
+        let npc = npc_mut(w, id)?;
+        npc.map.put(&["traits", "disguise", "type"], Node::str(&upper));
+        npc.add_trait_name("disguise");
+    }
+    w.mark_dirty();
+    w.apply_settings(id);
+    Ok(ok(w, M_DISGUISE_SET, &[&upper]))
+}
+
+/// `/npc spectate (-r)` (`NMS.sendCameraPacket`): the player's view follows the NPC's entity; `-r` gives it back.
+fn spectate(w: &mut World, sender: &Sender, args: &Args) -> Res {
+    let Some(player) = sender.uuid else { return Err(err(w, M_MUST_BE_INGAME, &[])) };
+    let id = target(w, sender)?;
+    let entity = if args.has('r') {
+        None
+    } else {
+        match w.entity_of(id) {
+            Some(e) => Some(e),
+            None => return Err(err(w, M_MOUNT_MUST_SPAWN, &[&name_at(w, id)])),
+        }
+    };
+    w.push_op(crate::horizon_citizens_core::world::Op::Camera { player, entity });
+    Ok(Vec::new())
 }
 
 /// `/npc jump`: the NPC jumps on its next tick (`NMS.setShouldJump`).
@@ -4989,6 +5047,59 @@ mod tests {
         assert!(run_ok(&mut w, &s, "npc warden roar")[0].contains("pose set to"));
         run_ok(&mut w, &s, "npc create Bob");
         assert!(run_ok(&mut w, &s, "npc warden roar")[0].contains("cannot be the mob type"));
+    }
+
+    fn join_entity(w: &mut World, id: i32, entity: u32) {
+        let uuid = w.saves.get(id).unwrap().uuid();
+        assert!(!w.on_entity_join("minecraft:overworld", entity, uuid, true));
+        w.take_ops();
+    }
+
+    #[test]
+    fn warden_poses_reach_the_entity() {
+        use crate::horizon_citizens_core::entity_set::{EntitySet, Pose};
+        let mut w = world();
+        let s = sender(2);
+        run_ok(&mut w, &s, "npc create Deep --type warden");
+        join_entity(&mut w, 0, 41);
+        for (sub, pose) in [("dig", Pose::Digging), ("emerge", Pose::Emerging), ("roar", Pose::Roaring)] {
+            run_ok(&mut w, &s, &format!("npc warden {sub}"));
+            let ops = w.take_ops();
+            assert!(ops.contains(&crate::horizon_citizens_core::world::Op::Entity { entity: 41, set: EntitySet::Pose(pose) }), "{sub}: {ops:?}");
+        }
+    }
+
+    #[test]
+    fn disguise_saves_the_type_and_shows_it() {
+        use crate::horizon_citizens_core::entity_set::EntitySet;
+        let mut w = world();
+        let s = sender(2);
+        run_ok(&mut w, &s, "npc create Bob");
+        join_entity(&mut w, 0, 42);
+        assert!(run_ok(&mut w, &s, "npc disguise").is_empty());
+        let r = run_ok(&mut w, &s, "npc disguise --type zombie");
+        assert!(r[0].contains("Set disguise type to") && r[0].contains("ZOMBIE"), "{r:?}");
+        assert_eq!(w.saves.get(0).unwrap().map.at(&["traits", "disguise", "type"]).and_then(Node::text).as_deref(), Some("ZOMBIE"));
+        let ops = w.take_ops();
+        assert!(ops.contains(&crate::horizon_citizens_core::world::Op::Entity { entity: 42, set: EntitySet::Disguise(Some("minecraft:zombie".into())) }), "{ops:?}");
+        let r = run_ok(&mut w, &s, "npc disguise --type player");
+        assert!(r[0].contains("is not a valid type"), "{r:?}");
+        let r = run_ok(&mut w, &s, "npc disguise --type nonsense");
+        assert!(r[0].contains("is not a valid type"), "{r:?}");
+    }
+
+    #[test]
+    fn spectate_follows_the_npc_and_resets() {
+        use crate::horizon_citizens_core::world::Op;
+        let mut w = world();
+        let s = sender(2);
+        run_ok(&mut w, &s, "npc create Bob");
+        join_entity(&mut w, 0, 43);
+        let player = s.uuid.unwrap();
+        run_ok(&mut w, &s, "npc spectate");
+        assert!(w.take_ops().contains(&Op::Camera { player, entity: Some(43) }));
+        run_ok(&mut w, &s, "npc spectate -r");
+        assert!(w.take_ops().contains(&Op::Camera { player, entity: None }));
     }
 
     #[test]
