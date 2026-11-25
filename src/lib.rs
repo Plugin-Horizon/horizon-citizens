@@ -14,7 +14,7 @@ use mod_api::{
     LivingIncomingDamageEvent, NodeDefault, PermissionGatherNodesEvent, PermissionLevel, PermissionNode,
     PermissionValueType, PlayerCommandEvent, PlayerCommandsSentEvent, PlayerRef, RegisterCommandsEvent, RegisterNodeCommandsEvent,
     RegisterConfigsEvent, RemovalReason, RunModCommandEvent, ServerHost, ServerStoppingEvent,
-    ServerTickEvent, ServerTickPhase, Text, ItemStack, MenuClickedEvent, MenuClosedEvent, MenuReplace,
+    ServerTickEvent, ServerTickPhase, Text, ItemStack, MenuClickedEvent, MenuClosedEvent, MenuReplace, ServerChatEvent,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -268,6 +268,70 @@ fn charge(host: &mut dyn ServerHost, uuid: u128, levels: i32, slots: &[(u32, u32
     }
 }
 
+/// What a shop interaction needs to know about a player: name, world, level, the 36 main-inventory stacks, and which of
+/// the wanted permission nodes they hold (an operator holds every node).
+fn shop_state(host: &mut dyn ServerHost, p: PlayerRef, wanted: &[String], cfg: &core::config::Config) -> Option<core::world::ShopPlayer> {
+    let info = player_info(&*host, p)?;
+    let mut inv: Vec<Option<core::npc::StackData>> = vec![None; 36];
+    for (slot, st) in p.inventory_slots(&*host).unwrap_or_default() {
+        if let Some(cell) = inv.get_mut(slot as usize) {
+            *cell = Some(stack_data_of(&*host, &st));
+        }
+    }
+    let perms: std::collections::BTreeSet<String> = wanted.iter().filter(|n| holds(host, p, n)).cloned().collect();
+    Some(core::world::ShopPlayer {
+        name: info.view.name,
+        world: cfg.worlds.world_name(&info.view.dimension),
+        levels: p.experience(&*host).map_or(0, |x| x.level),
+        inv,
+        perms,
+        op: info.view.permission >= cfg.command_level,
+    })
+}
+
+/// Reads the player for the shop code (before a shop command, a click on a shop menu, a right click on a shop NPC).
+fn prime_shop(host: &mut dyn ServerHost, uuid: u128, cfg: &core::config::Config) {
+    let Some(p) = host.player(uuid) else { return };
+    let wanted = api::with_world(|w| w.shop_wanted_nodes()).unwrap_or_default();
+    if let Some(state) = shop_state(host, p, &wanted, cfg) {
+        api::with_world(|w| {
+            w.shop_player.insert(uuid, state);
+        });
+    }
+}
+
+/// Applies a purchase to the player: the level, and each changed slot. A stack that only changed in count keeps
+/// its other components (the port reads just name, lore, enchantments and damage).
+fn shop_apply(host: &mut dyn ServerHost, uuid: u128, levels: Option<i32>, slots: &[(u32, Option<core::npc::StackData>)]) {
+    let Some(p) = host.player(uuid) else { return };
+    if let Some(l) = levels {
+        let _ = p.set_experience_levels(host, l.max(0));
+    }
+    let held = p.inventory_slots(&*host).unwrap_or_default();
+    for (slot, new) in slots {
+        let stack = match new {
+            None => None,
+            Some(n) => {
+                let same = held.iter().find(|(i, _)| i == slot).and_then(|(_, st)| {
+                    let old = stack_data_of(&*host, st);
+                    (old.id == n.id && old.meta.display_name == n.meta.display_name && old.meta.lore == n.meta.lore).then(|| st.clone())
+                });
+                match same {
+                    Some(mut st) => {
+                        if st.set_count(n.count.clamp(1, 99) as u32).is_ok() {
+                            Some(st)
+                        } else {
+                            item_stack_of(&*host, n)
+                        }
+                    }
+                    None => item_stack_of(&*host, n),
+                }
+            }
+        };
+        let _ = p.set_inventory_slot(host, *slot, stack);
+    }
+}
+
 fn sender_of(info: &PlayerInfo, cfg: &core::config::Config) -> core::world::Sender {
     core::world::Sender {
         uuid: Some(info.view.uuid),
@@ -518,13 +582,16 @@ impl Citizens {
                     }
                 }
                 core::world::Op::Charge { player, levels, slots } => charge(host, player, levels, &slots),
-                core::world::Op::OpenMenu { player, title, rows, items } => {
+                core::world::Op::OpenMenu { player, title, rows, items, in_place } => {
                     let stacks: Vec<Option<ItemStack>> =
                         items.iter().map(|i| i.as_ref().and_then(|s| item_stack_of(&*host, s))).collect();
                     let title = plain(&*host, &title);
-                    let window = host.open_menu(player, rows, title, stacks, MenuReplace::CloseFirst).ok().flatten();
+                    let replace = if in_place { MenuReplace::InPlace } else { MenuReplace::CloseFirst };
+                    let window = host.open_menu(player, rows, title, stacks, replace).ok().flatten();
                     api::with_world(|w| w.menu_opened(player, window));
                 }
+                core::world::Op::CloseMenu { player } => host.close_menu(player),
+                core::world::Op::ShopApply { player, levels, slots } => shop_apply(host, player, levels, &slots),
                 core::world::Op::SetMenuItems { player, window, items } => {
                     let stacks: Vec<Option<ItemStack>> =
                         items.iter().map(|i| i.as_ref().and_then(|s| item_stack_of(&*host, s))).collect();
@@ -741,6 +808,18 @@ impl Hooks for Citizens {
         };
         let profiles = owner_profiles(&*host, &line);
         let path = saves_path(&*host, &cfg);
+        // The shop commands read the sender (and a named player) before they open a menu.
+        if matches!(line.split_whitespace().nth(1), Some("shop" | "showshop" | "shopitem")) {
+            let mut who: Vec<u128> = sender.uuid.into_iter().collect();
+            for word in line.split_whitespace().skip(2) {
+                if let Some(p) = host.players().player_by_name(word) {
+                    who.push(p.uuid());
+                }
+            }
+            for uuid in who {
+                prime_shop(host, uuid, &cfg);
+            }
+        }
         let lines = api::with_world(|w| {
             w.profiles.extend(profiles);
             core::commands::run(w, &sender, &line, || match &path {
@@ -794,6 +873,10 @@ impl Hooks for Citizens {
         let wanted = api::with_world(|w| w.command_perms(entity)).unwrap_or_default();
         let granted: std::collections::BTreeSet<String> = wanted.into_iter().filter(|n| holds(host, player, n)).collect();
         let cost = cost_state(&*host, player);
+        if api::with_world(|w| w.has_shops()).unwrap_or(false) {
+            let cfg = lock(&self.state).cfg.clone();
+            prime_shop(host, player.uuid(), &cfg);
+        }
         let claimed = api::with_world(|w| {
             w.held_perms = granted;
             w.player_cost = Some(cost);
@@ -927,6 +1010,10 @@ impl Hooks for Citizens {
 
     fn menu_clicked(&self, host: &mut dyn ServerHost, event: &mut MenuClickedEvent) {
         let (uuid, window) = (event.uuid, event.window);
+        if api::with_world(|w| w.shop_session_open(uuid)).unwrap_or(false) {
+            let cfg = lock(&self.state).cfg.clone();
+            prime_shop(host, uuid, &cfg);
+        }
         let Some(action) = api::with_world(|w| w.menu_click(uuid, window, event.slot, event.button, event.mode == 1)) else {
             return;
         };
@@ -936,6 +1023,13 @@ impl Hooks for Citizens {
             core::world::MenuAction::Take(stack) => {
                 if let Some(s) = item_stack_of(&*host, &stack) {
                     let _ = p.give_stack(host, s);
+                }
+            }
+            core::world::MenuAction::Read { inv_slot } => {
+                let held = p.inventory_slots(&*host).unwrap_or_default();
+                if let Some((_, st)) = held.iter().find(|(i, _)| *i == inv_slot) {
+                    let data = stack_data_of(&*host, st);
+                    api::with_world(|w| w.menu_read(uuid, data));
                 }
             }
             core::world::MenuAction::Deposit { inv_slot } => {
@@ -966,6 +1060,13 @@ impl Hooks for Citizens {
         } else {
             Flow::Continue
         }
+    }
+
+    /// A shop editor's text prompt takes the player's next chat line (kept out of public chat). What it asks
+    /// the game for runs with the next tick.
+    fn server_chat(&self, _: &mut dyn ServerHost, event: &mut ServerChatEvent<'_>) -> Flow {
+        let taken = api::with_world(|w| w.shop_chat(event.player, event.raw_text)).unwrap_or(false);
+        if taken { Flow::Cancel } else { Flow::Continue }
     }
 
     fn menu_closed(&self, _: &mut dyn ServerHost, event: &mut MenuClosedEvent) {

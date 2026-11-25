@@ -81,7 +81,7 @@ This is a native trait mod: `horizon-mod.toml`, a `Cargo.toml` that depends on `
   `command-level` pass without it). Right-clicking an NPC with a stick selects it. They also work
   on the server console.
 
-Not done: the equipment and NPC editors (GUIs), other traits (follow, poses, talk-close, shops,
+Not done: the NPC editors (GUIs), other traits (follow, poses, talk-close,
 ...), pathfinding, the mob-specific `/npc` modifiers (`/npc wolf`, `/npc horse`, ...) and
 the actions (`jump`, `mount`, `speak`, `undo`, ...), the chat-based text editor, path recording.
 
@@ -136,7 +136,8 @@ What does not work yet on arismoko/horizon (each is marked `TODO(arismoko-api: .
 
 - The server folder is taken from the working directory (dedicated servers only).
 - `/npc`, `/citizens` and `/trait` sub-commands carry their own `citizens.*` nodes; the bare root commands carry none.
-- Needs engine (see ENGINE_NEEDS): `spectate` (camera), `warden dig/emerge/roar` (pose), `disguise`, the chat-based editors and `configgui` (text input). Not ported, unused on the rec servers: shops, behavior trees, `eval`.
+- Needs engine (see ENGINE_NEEDS): `spectate` (camera), `warden dig/emerge/roar` (pose), `disguise`, the chat-based editors and `configgui` (text input). Not ported, unused on the rec servers: behavior trees, `eval`.
+- Shops (`/npc shop`, `/npc showshop`, `/npc shopitem`, the `shop` trait): stored in `shops.yml` beside `saves.yml` in Citizens' format; the viewer, the settings/contents/page/item/action editors and the storage viewer are chest menus. Where Citizens uses the cursor you click one of your own stacks (display item, item action stacks), and its anvil text input is the player's next chat line (`null` clears). Not available: the `money` action (no economy; a stored one never pays unless its amount is 0), the trader type's merchant screen (ENGINE_NEEDS `player_open_merchant`; it shows as the chest), JavaScript expressions (`js` + backticks) and PlaceholderAPI inside `papi()` (only the player placeholders `<player>`, `<p>`, `%player%`, `<player_uuid>`, `<world>`), item-action component filters for components the port does not map, `NPCShopPurchaseEvent` for other mods, and the shop permission action reaches LuckPerms through `lp user <uuid> permission set|unset` on the console. Quirks of the original kept on purpose: `/npc shopitem <shop> reset_purchases <number>` always answers "page not found", two editor buttons are hidden by later ones in the same slot, `giveItems` can drop later repeats of a shift-click purchase.
 - `/npc inventory` and `/npc drops` edit by clicks (take, deposit, drops chance), not by dragging; both traits use the CitizensAPI save layout; the commandtrait `cost` (money) is skipped (no economy); the `npc` flag runs as the console's `execute as` (see ENGINE_NEEDS `npc_run_command_as_entity`).
 - The `team add citizens_<colour>` console commands used for glow colours fail on arismoko's console (logged, glow colour falls back).
 
@@ -163,8 +164,7 @@ type and the values, save under `traits.<modifier>.<key>` and complete in chat. 
 `phantom`, `pufferfish`, `textdisplay`, `villager`; `speak` reaches players in range (5 blocks without `--range`),
 `panimate` plays the arm swings, `undo` takes back the last create or remove. Every other setting is saved and the
 reply says Horizon does not act on it yet. Still answered "not supported": `behavior`, `configgui`, `copier`,
-`disguise`, `drops`, `eval`, `inventory`, `jump`, `mount`, `shop`, `showshop`, `spectate`, `target`, `warden`
-(GUIs, editors, other plugins, or no host API). Pathfinding stays a straight line: see HMOD_PORT.md.
+`disguise`, `eval`, `spectate`, `target` (GUIs, editors, other plugins, or no host API). Pathfinding stays a straight line: see HMOD_PORT.md.
 
 ## Licence
 
