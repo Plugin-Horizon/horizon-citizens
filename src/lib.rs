@@ -265,6 +265,22 @@ fn format_money(amount: f64) -> String {
     core::shop::java_double(amount)
 }
 
+/// `PaymentHook`: takes the cost of creating an NPC from the creator's account; the formatted amount, or the
+/// economy's reason for refusing.
+fn create_charge(uuid: u128, cost: f64) -> Result<String, String> {
+    #[cfg(feature = "vault")]
+    {
+        let Some(m) = vault::Money::from_f64(cost) else { return Err("the cost is not a valid amount".to_owned()) };
+        let r = vault::withdraw("Citizens", uuid, m);
+        if matches!(r.kind, vault::ResponseType::Success) { Ok(vault::format(m)) } else { Err(r.error.to_string()) }
+    }
+    #[cfg(not(feature = "vault"))]
+    {
+        let _ = (uuid, cost);
+        Err("there is no economy".to_owned())
+    }
+}
+
 /// Takes (`delta` below 0) or gives (above 0) money in the economy, as `Citizens`.
 fn money_move(host: &dyn ServerHost, uuid: u128, delta: f64) {
     mod_api::if_installed!(host, vault, {
@@ -1004,6 +1020,9 @@ impl Hooks for Citizens {
                     info.view.permission,
                     cfg.command_level,
                 );
+                if holds(host, *player, "citizens.npc.ignore-cost") {
+                    sender.grants.push("citizens.npc.ignore-cost".to_owned());
+                }
                 sender
             }
             CommandSource::Console { permission } => bodiless_sender("Console", *permission),
@@ -1021,6 +1040,26 @@ impl Hooks for Citizens {
             }
             for uuid in who {
                 prime_shop(host, uuid, &cfg);
+            }
+        }
+        // `/npc command execute <player> <hand>` charges the named player: their balance, levels, stacks and nodes.
+        let words: Vec<&str> = line.split_whitespace().collect();
+        if matches!(words.get(1), Some(&"command" | &"cmd")) && words.get(2).is_some_and(|w| w.eq_ignore_ascii_case("execute")) {
+            let named = words.get(3).and_then(|word| {
+                core::ids::parse_uuid(word)
+                    .and_then(|u| host.player(u))
+                    .or_else(|| host.players().player_by_name(word))
+            });
+            if let Some(p) = named {
+                let uuid = p.uuid();
+                let selected = api::with_world(|w| w.selected(sender.uuid.unwrap_or(u128::MAX))).flatten();
+                let wanted = selected.and_then(|id| api::with_world(|w| w.command_perms_of(id))).unwrap_or_default();
+                let granted: std::collections::BTreeSet<String> = wanted.into_iter().filter(|n| holds(host, p, n)).collect();
+                let cost = cost_state(&*host, p, uuid);
+                api::with_world(|w| {
+                    w.held_perms = granted;
+                    w.player_cost = Some(cost);
+                });
             }
         }
         let lines = api::with_world(|w| {
@@ -1231,6 +1270,7 @@ impl Hooks for Citizens {
         api::with_world(|w| {
             w.economy = economy;
             w.money_fmt = economy.then_some(format_money as fn(f64) -> String);
+            w.create_charge = economy.then_some(create_charge as fn(u128, f64) -> Result<String, String>);
             for (id, st) in stats {
                 w.set_live_stats(id, st);
             }

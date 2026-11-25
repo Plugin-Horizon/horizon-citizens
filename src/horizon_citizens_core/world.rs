@@ -173,6 +173,8 @@ pub enum MenuKind {
     Equipment,
     /// `NPCConfigurator`: one button, edit the name through the chat.
     Config,
+    /// `ItemRequirementGUI` (`/npc command itemcost`): five rows of stacks a click takes from the player.
+    ItemCost,
     /// `SaddleEquipperGUI` (a pig or strider): a hopper with the saddle slot.
     Saddle,
     /// `EndermanEquipperGUI`: a hopper with the carried block's slot.
@@ -239,12 +241,14 @@ struct MenuSession {
     cosmetic_off: [bool; 8],
     /// A hopper menu (five slots) instead of a chest of `rows` rows.
     hopper: bool,
+    /// The item cost menu: the command it edits (`None`: the trait's own cost).
+    cmd_key: Option<String>,
 }
 
 impl MenuSession {
     /// A chest menu of `rows` rows.
     fn chest(npc: i32, kind: MenuKind, rows: u8, slots: Vec<Option<StackData>>, chances: Vec<f64>) -> MenuSession {
-        MenuSession { npc, kind, rows, window: None, slots, chances, cosmetic_off: [false; 8], hopper: false }
+        MenuSession { npc, kind, rows, window: None, slots, chances, cosmetic_off: [false; 8], hopper: false, cmd_key: None }
     }
 
     /// The number of the menu's own slots.
@@ -255,7 +259,7 @@ impl MenuSession {
     /// `DropsTrait.DropsGUI`: items live in rows 0, 2 and 4; rows 1 and 3 hold the chance barriers.
     fn is_item_slot(&self, slot: usize) -> bool {
         match self.kind {
-            MenuKind::Inventory => true,
+            MenuKind::Inventory | MenuKind::ItemCost => true,
             MenuKind::Drops => (slot / 9) % 2 == 0,
             MenuKind::Equipment => (9..9 + EQUIPMENT_MENU.len()).contains(&slot) || ((18..18 + EQUIPMENT_MENU.len()).contains(&slot) && !self.cosmetic_off[slot - 18]),
             MenuKind::Config => false,
@@ -479,6 +483,9 @@ pub struct World {
     pub economy: bool,
     /// `Economy.format`, the glue's, for shop descriptions.
     pub money_fmt: Option<fn(f64) -> String>,
+    /// Takes the cost of creating an NPC from a player's account (the glue sets it with the economy): the formatted amount,
+    /// or the economy's reason it refused.
+    pub create_charge: Option<fn(u128, f64) -> Result<String, String>>,
     /// The behavior trees of the NPCs that have the `behavior` trait.
     behaviors: BTreeMap<i32, behave::BehaviorRun>,
     signals: crate::horizon_citizens_core::behavior::Signals,
@@ -559,6 +566,7 @@ impl World {
             equip_editors: HashMap::new(),
             economy: false,
             money_fmt: None,
+            create_charge: None,
             behaviors: BTreeMap::new(),
             signals: crate::horizon_citizens_core::behavior::Signals::default(),
             live_stats: HashMap::new(),
@@ -1097,20 +1105,88 @@ impl World {
             self.shop_right_click(player.uuid, id);
         }
         let commands: Vec<_> = npc.commands().into_iter().filter(|c| c.hand.matches(hand, player.sneaking)).collect();
-        if npc.has_trait("commandtrait") {
-            // `CommandTrait.dispatch`: the trait's own price is charged first; a click that cannot pay stops here.
-            let em = self.cfg.commands.error_messages.clone();
-            let price = Price { money: npc.trait_cost(), exp: npc.trait_experience_cost(), items: npc.trait_item_cost(), global: true };
-            let mut sent = BTreeSet::new();
-            match self.check_charge(player, &npc, &price, &em, &mut sent) {
-                Some((levels, slots, money)) => self.pay(player.uuid, levels, slots, money),
-                None => return true,
-            }
+        if !self.charge_trait(player, &npc) {
+            return true;
         }
         if !commands.is_empty() {
             self.run_commands(player, hand, &npc, id, commands);
         }
         true
+    }
+
+    /// `CommandTrait.dispatch`: the trait's own price is charged first; a click that cannot pay stops there.
+    fn charge_trait(&mut self, player: &PlayerView, npc: &NpcData) -> bool {
+        if !npc.has_trait("commandtrait") {
+            return true;
+        }
+        let em = self.cfg.commands.error_messages.clone();
+        let price = Price { money: npc.trait_cost(), exp: npc.trait_experience_cost(), items: npc.trait_item_cost(), global: true };
+        let mut sent = BTreeSet::new();
+        match self.check_charge(player, npc, &price, &em, &mut sent) {
+            Some((levels, slots, money)) => {
+                self.pay(player.uuid, levels, slots, money);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `/npc command execute <player> <hand>` (`CommandTrait.dispatch(player, hand)`): the commands of one hand run
+    /// for an online player as if they had clicked. A sneaking player's hand becomes its shift form; only the
+    /// commands of exactly that hand (and `BOTH`) run. Whether the player is online.
+    pub fn dispatch_commands(&mut self, id: i32, who: u128, hand: Hand) -> bool {
+        let Some(player) = self.online.iter().find(|p| p.uuid == who).cloned() else { return false };
+        let Some(npc) = self.saves.get(id).cloned() else { return false };
+        let hand = if player.sneaking {
+            if hand == Hand::Left { Hand::ShiftLeft } else { Hand::ShiftRight }
+        } else {
+            hand
+        };
+        let commands: Vec<_> = npc.commands().into_iter().filter(|c| c.hand == hand || c.hand == Hand::Both).collect();
+        if !self.charge_trait(&player, &npc) {
+            return true;
+        }
+        if !commands.is_empty() {
+            self.run_commands(&player, hand, &npc, id, commands);
+        }
+        true
+    }
+
+    /// The permissions the selected NPC's commands ask, for a player the glue looks them up for (`execute`).
+    pub fn command_perms_of(&self, id: i32) -> Vec<String> {
+        let Some(npc) = self.saves.get(id) else { return Vec::new() };
+        let mut v: Vec<String> = npc.commands().into_iter().flat_map(|c| c.perms).collect();
+        if !v.is_empty() || !npc.commands().is_empty() || npc.has_trait("commandtrait") {
+            v.extend(IGNORE_ERRORS.iter().map(|s| (*s).to_owned()));
+            v.extend(COST_IGNORE.iter().map(|s| (*s).to_owned()));
+        }
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// `/npc command forgetplayer`: what the commands remember of one player (or of all): cooldowns, use counts and
+    /// the place in a sequence, in memory and in the saved sequence of `rememberlastused`.
+    pub fn forget_player(&mut self, id: i32, who: Option<u128>) {
+        self.cmd_last.retain(|k, _| k.1 != id || who.is_some_and(|w| w != k.0));
+        self.cmd_used.retain(|k, _| k.1 != id || who.is_some_and(|w| w != k.0));
+        self.cmd_last_id.retain(|k, _| k.1 != id || k.0 == 0 || who.is_some_and(|w| w != k.0));
+        if let Some(n) = self.saves.get_mut(id) {
+            n.forget_remembered(who.map(crate::horizon_citizens_core::ids::format_uuid).as_deref());
+        }
+        self.mark_dirty();
+    }
+
+    /// `/npc command clearerror <type> (player)`: forgets what causes one error for a player (or for all).
+    /// `kind` is the lower-case name of `CommandTraitError`; the ones that are not remembered clear nothing.
+    pub fn clear_command_errors(&mut self, id: i32, kind: &str, who: Option<u128>) {
+        let keep = |k: &u128| who.is_some_and(|w| w != *k);
+        match kind {
+            "maximum_times_used" => self.cmd_used.retain(|k, _| k.1 != id || keep(&k.0)),
+            "on_cooldown" => self.cmd_last.retain(|k, _| k.1 != id || keep(&k.0)),
+            "on_global_cooldown" => self.cmd_global.retain(|k, _| k.0 != id),
+            _ => {}
+        }
     }
 
     /// `SheepEquipper` and `HorseEquipper`: a right click in the equipment editor. Shears toggle the sheared state,
@@ -1158,20 +1234,14 @@ impl World {
     /// The permissions the commands of the NPC behind `entity` ask (and the `ignoreerrors` nodes), for the
     /// host to look up before a click: see `held_perms`.
     pub fn command_perms(&self, entity: u32) -> Vec<String> {
-        let Some(npc) = self.npc_of_entity(entity).and_then(|id| self.saves.get(id)) else {
-            return Vec::new();
-        };
-        let mut v: Vec<String> = npc.commands().into_iter().flat_map(|c| c.perms).collect();
-        if !v.is_empty() || !npc.commands().is_empty() || npc.has_trait("commandtrait") {
-            v.extend(IGNORE_ERRORS.iter().map(|s| (*s).to_owned()));
-            v.extend(COST_IGNORE.iter().map(|s| (*s).to_owned()));
-        }
-        v.sort();
-        v.dedup();
-        v
+        let Some(id) = self.npc_of_entity(entity) else { return Vec::new() };
+        self.command_perms_of(id)
     }
 
     fn command_error(&mut self, player: &PlayerView, npc: &NpcData, kind: &str, msg: &str, secs: i64, n: i64, sent: &mut BTreeSet<String>) {
+        // `/npc command errormessage` replaces the configured text of one error.
+        let custom = npc.custom_error_message(kind);
+        let msg = custom.as_deref().unwrap_or(msg);
         if npc.hide_command_errors() || !sent.insert(kind.to_owned()) || msg.trim().is_empty() {
             return;
         }
@@ -1272,7 +1342,12 @@ impl World {
             ExecutionMode::Linear => commands,
             ExecutionMode::Sequential | ExecutionMode::Cycle => {
                 let who = if mode == ExecutionMode::Cycle { 0 } else { player.uuid };
-                let mut last = self.cmd_last_id.get(&(who, id)).copied().unwrap_or(-1);
+                let remembered = if mode == ExecutionMode::Sequential && npc.remember_last_used() {
+                    npc.remembered_last_id(&crate::horizon_citizens_core::ids::format_uuid(player.uuid))
+                } else {
+                    None
+                };
+                let mut last = self.cmd_last_id.get(&(who, id)).copied().or(remembered).unwrap_or(-1);
                 let mut picked = None;
                 for c in &commands {
                     if c.id <= last {
@@ -1348,6 +1423,13 @@ impl World {
             if sequential {
                 let who = if mode == ExecutionMode::Cycle { 0 } else { player.uuid };
                 self.cmd_last_id.insert((who, id), c.id);
+                if mode == ExecutionMode::Sequential && npc.remember_last_used() {
+                    let me = crate::horizon_citizens_core::ids::format_uuid(player.uuid);
+                    if let Some(n) = self.saves.get_mut(id) {
+                        n.set_remembered_last_id(&me, c.id);
+                    }
+                    self.mark_dirty();
+                }
             }
             self.pay(player.uuid, charge_levels, charge_slots, charge_money);
             let line = text::fill_placeholders(&c.command, &player.name, &npc.name(), id);
@@ -1373,10 +1455,29 @@ impl World {
             } else {
                 Op::Console(line)
             };
+            // `temporaryPermissions`: the player holds them while the command runs (or for the set duration).
+            let (temp, duration) = npc.temporary_permissions();
+            let mut before = Vec::new();
+            let mut after = Vec::new();
+            if !temp.is_empty() {
+                let who = crate::horizon_citizens_core::ids::format_uuid(player.uuid);
+                let secs = if duration > 0 { (duration + 19) / 20 } else { 60 };
+                for node in &temp {
+                    before.push(Op::Console(format!("lp user {who} permission settemp {node} true {secs}s")));
+                    if duration <= 0 {
+                        after.push(Op::Console(format!("lp user {who} permission unsettemp {node}")));
+                    }
+                }
+            }
             if c.delay > 0 {
-                self.delayed.push((now + c.delay as u64, op));
+                let due = now + c.delay as u64;
+                for o in before.into_iter().chain([op]).chain(after) {
+                    self.delayed.push((due, o));
+                }
             } else {
+                self.ops.extend(before);
                 self.ops.push(op);
+                self.ops.extend(after);
             }
         }
         let _ = hand;
@@ -1612,6 +1713,23 @@ impl World {
         let mut session = MenuSession::chest(npc, MenuKind::Equipment, 3, slots, vec![1.0; 27]);
         session.cosmetic_off = off;
         self.start_menu(player, "NPC Equipment".into(), session);
+    }
+
+    /// `/npc command itemcost (id)`: the stacks of the trait's (or one command's) item cost in a chest; what is in it when
+    /// the menu closes is the new cost.
+    pub fn open_item_cost(&mut self, player: u128, npc: i32, key: Option<String>) {
+        let Some(data) = self.saves.get(npc) else { return };
+        let stacks = match &key {
+            None => data.trait_item_stacks(),
+            Some(k) => data.command_item_stacks(k),
+        };
+        let mut slots = vec![None; 45];
+        for (cell, st) in slots.iter_mut().zip(stacks) {
+            *cell = Some(st);
+        }
+        let mut session = MenuSession::chest(npc, MenuKind::ItemCost, 5, slots, vec![1.0; 45]);
+        session.cmd_key = key;
+        self.start_menu(player, "Drag items for requirements".into(), session);
     }
 
     /// `SaddleEquipperGUI`: a hopper with the saddle slot of a pig or strider.
@@ -1877,6 +1995,15 @@ impl World {
                 self.mark_dirty();
                 self.respawn(id);
                 return;
+            }
+            MenuKind::ItemCost => {
+                let stacks: Vec<StackData> = m.slots.into_iter().flatten().collect();
+                match &m.cmd_key {
+                    None => npc.set_trait_item_stacks(&stacks),
+                    Some(k) => {
+                        npc.set_command_item_stacks(k, &stacks);
+                    }
+                }
             }
             MenuKind::Config | MenuKind::Saddle | MenuKind::Enderman => {}
             MenuKind::Drops => npc.set_drops(
@@ -3269,10 +3396,13 @@ mod tests {
         let colour = w.saves.get(id).unwrap().map.at(&["traits", "sheeptrait", "color"]).and_then(Node::text);
         assert_eq!(colour.as_deref(), Some("RED"));
         assert!(consoles(&mut w).iter().any(|c| c.starts_with("clear Alex minecraft:red_dye")));
-        assert!(w.on_click(13, &p, Hand::Right, Some("minecraft:shears")));
+        // The respawn after the first click made a new entity.
+        w.on_entity_join("minecraft:overworld", 14, uuid, true);
+        assert!(w.on_click(14, &p, Hand::Right, Some("minecraft:shears")));
         let sheared = w.saves.get(id).unwrap().map.at(&["traits", "sheeptrait", "sheared"]).and_then(Node::as_bool);
         assert_eq!(sheared, Some(true));
-        assert!(w.on_click(13, &p, Hand::Right, None));
+        w.on_entity_join("minecraft:overworld", 15, uuid, true);
+        assert!(w.on_click(15, &p, Hand::Right, None));
         let colour = w.saves.get(id).unwrap().map.at(&["traits", "sheeptrait", "color"]).and_then(Node::text);
         assert_eq!(colour.as_deref(), Some("WHITE"));
     }
@@ -3302,5 +3432,127 @@ mod tests {
         // The event carries the shop key, the buyer and the item's place.
         let e = NpcEvent::ShopPurchase { shop: "bank".into(), player: 1, player_name: "Alex".into(), page: 0, slot: 4 };
         assert_eq!(e.clone(), e);
+    }
+
+    fn say_paid(w: &mut World, id: i32) {
+        w.saves.get_mut(id).unwrap().add_command("say paid", Hand::Right, false, false);
+        w.take_ops();
+    }
+
+    #[test]
+    fn a_custom_error_message_replaces_the_configured_one() {
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        say_paid(&mut w, id);
+        w.saves.get_mut(id).unwrap().set_custom_error_message("on_cooldown", "Slow down");
+        let p = player(1.0, 1.0);
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        w.take_ops();
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        assert_eq!(tells(&w.take_ops()), vec!["Slow down".to_owned()]);
+    }
+
+    #[test]
+    fn execute_runs_the_commands_of_one_hand_for_a_player() {
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        say_paid(&mut w, id);
+        assert!(!w.dispatch_commands(id, 0xA1, Hand::Right), "not online");
+        w.online = vec![player(1.0, 1.0)];
+        assert!(w.dispatch_commands(id, 0xA1, Hand::Left));
+        assert!(consoles(&mut w).is_empty(), "the command is for the right hand");
+        assert!(w.dispatch_commands(id, 0xA1, Hand::Right));
+        assert!(consoles(&mut w).contains(&"say paid".to_owned()));
+    }
+
+    #[test]
+    fn forgetting_a_player_clears_the_cooldown_and_the_clear_error_command_too() {
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        say_paid(&mut w, id);
+        let p = player(1.0, 1.0);
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        w.take_ops();
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        assert_eq!(tells(&w.take_ops()).len(), 1, "on cooldown");
+        w.clear_command_errors(id, "on_cooldown", Some(0xA1));
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        assert!(consoles(&mut w).contains(&"say paid".to_owned()));
+        w.forget_player(id, None);
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        assert!(consoles(&mut w).contains(&"say paid".to_owned()));
+    }
+
+    #[test]
+    fn temporary_permissions_surround_the_command() {
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        say_paid(&mut w, id);
+        w.saves.get_mut(id).unwrap().set_temporary_permissions(&["kit.use".to_owned()], 0);
+        assert!(w.on_click(10, &player(1.0, 1.0), Hand::Right, None));
+        let c = consoles(&mut w);
+        assert_eq!(c.len(), 3, "{c:?}");
+        assert!(c[0].contains("permission settemp kit.use true"));
+        assert_eq!(c[1], "say paid");
+        assert!(c[2].contains("permission unsettemp kit.use"));
+    }
+
+    #[test]
+    fn the_item_cost_menu_saves_what_is_in_it() {
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        say_paid(&mut w, id);
+        w.open_item_cost(0xA1, id, None);
+        w.take_ops();
+        w.menu_opened(0xA1, Some(5));
+        assert!(w.menu_deposit(0xA1, StackData::new("minecraft:diamond", 3)));
+        w.menu_closed(0xA1, 5);
+        let cost = w.saves.get(id).unwrap().trait_item_cost();
+        assert_eq!((cost[0].id.as_str(), cost[0].amount), ("minecraft:diamond", 3));
+        w.open_item_cost(0xA1, id, Some("0".to_owned()));
+        w.take_ops();
+        w.menu_opened(0xA1, Some(6));
+        assert!(w.menu_deposit(0xA1, StackData::new("minecraft:emerald", 1)));
+        w.menu_closed(0xA1, 6);
+        assert_eq!(w.saves.get(id).unwrap().commands()[0].item_cost.len(), 1);
+    }
+
+    #[test]
+    fn a_remembered_sequence_survives_a_forgotten_memory() {
+        use crate::horizon_citizens_core::npc::ExecutionMode;
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        let n = w.saves.get_mut(id).unwrap();
+        n.add_command("say one", Hand::Right, false, false);
+        n.add_command("say two", Hand::Right, false, false);
+        n.set_execution_mode(ExecutionMode::Sequential);
+        n.set_remember_last_used(true);
+        w.take_ops();
+        let p = player(1.0, 1.0);
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        assert_eq!(consoles(&mut w), vec!["say one".to_owned()]);
+        w.cmd_last_id.clear();
+        w.cmd_last.clear();
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        assert_eq!(consoles(&mut w), vec!["say two".to_owned()]);
+    }
+
+    #[test]
+    fn creating_charges_the_cost_unless_it_is_ignored() {
+        use crate::horizon_citizens_core::commands::run;
+        fn pay(who: u128, cost: f64) -> Result<String, String> {
+            if who == 1 { Ok(format!("{cost}")) } else { Err("not enough money".into()) }
+        }
+        let mut w = world();
+        w.create_charge = Some(pay);
+        let mut s = Sender { uuid: Some(1), name: "Rich".into(), permission: 0, grants: vec!["citizens.npc.create".into(), "citizens.npc.create.player".into()], at: Some(("minecraft:overworld".into(), Location { world: "world".into(), x: 0.0, y: 64.0, z: 0.0, yaw: 0.0, pitch: 0.0, body_yaw: 0.0 })) };
+        let out = run(&mut w, &s, "npc create Bob", || Err("x".into())).join("|");
+        assert!(out.contains("Withdrew") && out.contains("100"), "{out}");
+        s.uuid = Some(2);
+        let out = run(&mut w, &s, "npc create Eve", || Err("x".into())).join("|");
+        assert!(out.contains("not enough money"), "{out}");
+        s.grants.push("citizens.npc.ignore-cost".into());
+        let out = run(&mut w, &s, "npc create Eve", || Err("x".into())).join("|");
+        assert!(!out.contains("not enough money"), "{out}");
     }
 }

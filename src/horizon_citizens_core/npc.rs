@@ -1117,6 +1117,119 @@ impl NpcData {
             .and_then(bool_of)
             .unwrap_or(false)
     }
+    /// `customErrorMessages` of the `commandtrait`: the text `/npc command errormessage` set for one error
+    /// (`kind` is the lower-case name of `CommandTraitError`).
+    pub fn custom_error_message(&self, kind: &str) -> Option<String> {
+        self.map
+            .at(&["traits", "commandtrait", "customErrorMessages", &kind.to_ascii_uppercase()])
+            .and_then(Node::text)
+    }
+
+    pub fn set_custom_error_message(&mut self, kind: &str, msg: &str) {
+        self.map
+            .map_at(&["traits", "commandtrait", "customErrorMessages"])
+            .set(&kind.to_ascii_uppercase(), Node::str(msg));
+        self.add_trait_name("commandtrait");
+    }
+
+    /// `persistSequence` of the `commandtrait` (`/npc command rememberlastused`).
+    pub fn remember_last_used(&self) -> bool {
+        self.map.at(&["traits", "commandtrait", "persistSequence"]).and_then(bool_of).unwrap_or(false)
+    }
+
+    pub fn set_remember_last_used(&mut self, on: bool) {
+        self.map.map_at(&["traits", "commandtrait"]).set("persistSequence", Node::bool(on));
+        if !on {
+            self.forget_remembered(None);
+        }
+        self.add_trait_name("commandtrait");
+    }
+
+    /// The place in a sequence `rememberlastused` kept for one player (`cooldowns.<uuid>.lastUsedId`).
+    pub fn remembered_last_id(&self, uuid: &str) -> Option<i64> {
+        self.map.at(&["traits", "commandtrait", "cooldowns", uuid, "lastUsedId"]).and_then(Node::as_i64).filter(|i| *i >= 0)
+    }
+
+    pub fn set_remembered_last_id(&mut self, uuid: &str, id: i64) {
+        self.map.put(&["traits", "commandtrait", "cooldowns", uuid, "lastUsedId"], Node::int(id));
+    }
+
+    /// Drops the remembered places of one player (`Some(uuid)`) or of everyone.
+    pub fn forget_remembered(&mut self, uuid: Option<&str>) {
+        match uuid {
+            Some(u) => {
+                self.map.drop_path(&["traits", "commandtrait", "cooldowns", u]);
+            }
+            None => {
+                self.map.drop_path(&["traits", "commandtrait", "cooldowns"]);
+            }
+        }
+    }
+
+    /// `temporaryPermissions` and `temporaryPermissionsDuration` (ticks, 0 or below: for the one command only).
+    pub fn temporary_permissions(&self) -> (Vec<String>, i64) {
+        let list = self
+            .map
+            .at(&["traits", "commandtrait", "temporaryPermissions"])
+            .map(|n| n.items().iter().filter_map(Node::text).collect())
+            .unwrap_or_default();
+        let duration = self.map.at(&["traits", "commandtrait", "temporaryPermissionsDuration"]).and_then(Node::as_i64).unwrap_or(0);
+        (list, duration)
+    }
+
+    pub fn set_temporary_permissions(&mut self, perms: &[String], duration: i64) {
+        let t = self.map.map_at(&["traits", "commandtrait"]);
+        t.set("temporaryPermissions", Node::seq(perms.iter().map(|p| Node::str(p)).collect()));
+        t.set("temporaryPermissionsDuration", Node::int(duration));
+        self.add_trait_name("commandtrait");
+    }
+
+    /// The trait's own `itemRequirements` as stacks (`/npc command itemcost`).
+    pub fn trait_item_stacks(&self) -> Vec<StackData> {
+        match self.map.at(&["traits", "commandtrait", "itemRequirements"]) {
+            Some(n) if n.is_seq() => n.items().iter().filter_map(StackData::from_node).collect(),
+            Some(n) if n.is_map() => n.entries().iter().filter_map(|e| StackData::from_node(&e.value)).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn set_trait_item_stacks(&mut self, stacks: &[StackData]) {
+        let t = self.map.map_at(&["traits", "commandtrait"]);
+        if stacks.is_empty() {
+            t.remove("itemRequirements");
+        } else {
+            t.set("itemRequirements", Node::seq(stacks.iter().map(StackData::to_node).collect()));
+        }
+        self.add_trait_name("commandtrait");
+    }
+
+    /// One command's `itemCost` as stacks, by the command's key.
+    pub fn command_item_stacks(&self, key: &str) -> Vec<StackData> {
+        let Some(node) = self.map.at(&["traits", "commandtrait", "commands"]) else { return Vec::new() };
+        let entry = if node.is_map() { node.get(key) } else { key.parse::<usize>().ok().and_then(|i| node.items().get(i)) };
+        entry
+            .and_then(|e| e.get("itemCost"))
+            .map(|c| c.items().iter().filter_map(StackData::from_node).collect())
+            .unwrap_or_default()
+    }
+
+    /// Replaces one command's `itemCost`; whether the command exists.
+    pub fn set_command_item_stacks(&mut self, key: &str, stacks: &[StackData]) -> bool {
+        let t = self.map.map_at(&["traits", "commandtrait"]);
+        let Some(node) = t.get_mut("commands") else { return false };
+        let entry = match node {
+            Node::Seq { items, .. } => key.parse::<usize>().ok().and_then(|i| items.get_mut(i)),
+            m => m.get_mut(key),
+        };
+        let Some(e) = entry.filter(|e| e.is_map()) else { return false };
+        if stacks.is_empty() {
+            e.remove("itemCost");
+        } else {
+            e.set("itemCost", Node::seq(stacks.iter().map(StackData::to_node).collect()));
+        }
+        true
+    }
+
     /// Adds a command and returns its key. Kept in the map form when the NPC has it (or nothing),
     /// in the list form when that is what the file has.
     pub fn add_command(&mut self, command: &str, hand: Hand, player: bool, op: bool) -> String {

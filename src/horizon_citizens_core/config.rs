@@ -32,6 +32,22 @@ pub struct Config {
     pub spawn_radius: f64,
     /// `npc.shops.*`: the shop settings.
     pub shops: crate::horizon_citizens_core::shop::ShopsConfig,
+    pub economy: Economy,
+}
+
+/// What Citizens charges through the economy.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Economy {
+    /// `npc.defaults.npc-cost`: what creating an NPC costs a player without `citizens.npc.ignore-cost`
+    /// (only with an economy; operators of `command-level` pay nothing).
+    pub npc_cost: f64,
+}
+
+impl Default for Economy {
+    fn default() -> Self {
+        Economy { npc_cost: 100.0 }
+    }
 }
 
 impl Default for Config {
@@ -51,6 +67,7 @@ impl Default for Config {
             reload_warning_enabled: true,
             spawn_radius: 96.0,
             shops: Default::default(),
+            economy: Economy::default(),
         }
     }
 }
@@ -378,6 +395,9 @@ impl Config {
         if let Some(v) = text_of("npc.selection.message") {
             cfg.selection.message = v;
         }
+        if let Some(v) = float("npc.defaults.npc-cost").or_else(|| float("npc.default.npc-cost")) {
+            cfg.economy.npc_cost = v.max(0.0);
+        }
         if let Some(v) = text_of("npc.chat.format.no-targets") {
             cfg.talk.format = v;
         }
@@ -528,6 +548,8 @@ pub const CITIZENS_CONFIG_KEYS: &[&str] = &[
     "general.authlib.profile-url",
     "npc.selection.item",
     "npc.selection.message",
+    "npc.defaults.npc-cost",
+    "npc.default.npc-cost",
     "npc.chat.format.no-targets",
     "npc.chat.format.to-target",
     "npc.chat.format.with-target",

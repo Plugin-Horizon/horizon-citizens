@@ -45,6 +45,11 @@ name-lookup-url = "https://api.mojang.com/users/profiles/minecraft/"
 # Degrees a player turns before the skin tracker re-sends an NPC's look.
 rotation-update-degrees = 90.0
 
+# What creating an NPC costs a player through the economy (the vault mod). Operators of command-level and holders of
+# citizens.npc.ignore-cost pay nothing; without an economy nothing is charged.
+[economy]
+npc-cost = 100.0
+
 [commands]
 # Clicks of one player on one NPC closer than this (ticks) run its commands once.
 global-cooldown-ticks = 20

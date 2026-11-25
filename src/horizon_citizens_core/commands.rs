@@ -113,6 +113,20 @@ const M_CMD_COST_SET: &str = "The click cost is now [[{0}]].";
 const M_CMD_EXPCOST_SET: &str = "The click experience cost is now [[{0}]] levels.";
 const M_CMD_HIDE_SET: &str = "Command error messages are now hidden.";
 const M_CMD_HIDE_UNSET: &str = "Command error messages are now shown.";
+const M_CMD_PLAYER_INVALID: &str = "[[{0}]] is not an online player.";
+const M_CMD_INVALID_HAND: &str = "Invalid hand. Valid hands: right, left, both, shift left, shift right.";
+const M_CMD_ALL_FORGOTTEN: &str = "[[{0}]] has forgotten all players.";
+const M_CMD_FORGOTTEN: &str = "Forgot the player [[{0}]].";
+const M_CMD_INVALID_PLAYER: &str = "[[{0}]] is not a known player.";
+const M_CMD_INVALID_ERROR: &str = "Invalid error type. Valid types: {0}";
+const M_CMD_ALL_ERRORS_CLEARED: &str = "Cleared the [[{1}]] errors of [[{0}]] for all players.";
+const M_CMD_ERRORS_CLEARED: &str = "Cleared the [[{0}]] errors for [[{1}]].";
+const M_CMD_ERRORMSG_SET: &str = "The message of the [[{0}]] error is set.";
+const M_CMD_REMEMBER_SET: &str = "Commands will now remember the last one a player used.";
+const M_CMD_REMEMBER_UNSET: &str = "Commands will no longer remember the last one a player used.";
+const M_CMD_PERMS_SET: &str = "Temporary permissions set to [[{0}]] for [[{1}]] ticks.";
+const M_MONEY_WITHDRAWN: &str = "Withdrew [[{0}]] from your account.";
+const M_CREATE_CANCELLED: &str = "Could not create the NPC. Reason: {0}";
 const M_CMD_NONE: &str = "No commands have been added.";
 const M_CMD_LEFT: &str = "Commands to run on [[left click]]:";
 const M_CMD_RIGHT: &str = "Commands to run on [[right click]]:";
@@ -1809,6 +1823,16 @@ fn create(w: &mut World, sender: &Sender, args: &Args) -> Res {
             }
         }
     }
+    // `PaymentHook`: with an economy, creating an NPC costs `npc.defaults.npc-cost` unless the creator may ignore it.
+    if let (Some(charge), Some(who)) = (w.create_charge, sender.uuid)
+        && w.cfg.economy.npc_cost > 0.0
+        && !exact(sender, level, "citizens.npc.ignore-cost")
+    {
+        match charge(who, w.cfg.economy.npc_cost) {
+            Ok(shown) => out.extend(ok(w, M_MONEY_WITHDRAWN, &[&shown])),
+            Err(reason) => return Err(err(w, M_CREATE_CANCELLED, &[&reason])),
+        }
+    }
     let id = w.create_with(&name, &kind, loc, sender.uuid, spawned, |npc| {
         if silent {
             npc.map.put(&["metadata", "silent"], Node::bool(true));
@@ -3415,6 +3439,33 @@ fn parse_i64(w: &World, s: &str) -> Result<i64, Reply> {
     s.parse::<i64>().map_err(|_| err(w, M_INVALID_NUMBER, &[]))
 }
 
+/// The names of `CommandTrait.CommandTraitError`, lower case.
+const ERROR_KINDS: [&str; 8] = [
+    "global_maximum_times_used",
+    "maximum_times_used",
+    "missing_experience",
+    "missing_item",
+    "missing_money",
+    "no_permission",
+    "on_cooldown",
+    "on_global_cooldown",
+];
+
+/// An error type typed as a player writes it (`on cooldown`, `ON_COOLDOWN`).
+fn error_kind(raw: &str) -> Option<&'static str> {
+    let k = raw.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+    ERROR_KINDS.iter().copied().find(|e| *e == k)
+}
+
+fn error_kinds_pretty() -> String {
+    ERROR_KINDS.iter().map(|k| pretty_enum(&k.to_ascii_uppercase())).collect::<Vec<_>>().join(", ")
+}
+
+/// A player by UUID or name, online or known from before.
+fn player_lookup(w: &World, raw: &str) -> Option<u128> {
+    crate::horizon_citizens_core::ids::parse_uuid(raw).or_else(|| w.player_by_name(raw))
+}
+
 fn command(w: &mut World, sender: &Sender, tail: &str) -> Res {
     let id = target(w, sender)?;
     let level = w.cfg.command_level;
@@ -3590,8 +3641,100 @@ fn command(w: &mut World, sender: &Sender, tail: &str) -> Res {
             w.mark_dirty();
             Ok(ok(w, if on { M_CMD_HIDE_SET } else { M_CMD_HIDE_UNSET }, &[]))
         }
-        "execute" | "forgetplayer" | "clearerror" | "permissions" | "perms" | "itemcost" | "errormessage" | "rememberlastused" => {
-            Err(err(w, M_UNSUPPORTED, &[&format!("command {op}")]))
+        "execute" => {
+            let words: Vec<&str> = rest.split_whitespace().collect();
+            if words.len() < 2 {
+                return Err(usage_of(w, "command"));
+            }
+            let who = player_lookup(w, words[0]).filter(|u| w.online.iter().any(|p| p.uuid == *u));
+            let Some(who) = who else { return Err(err(w, M_CMD_PLAYER_INVALID, &[words[0]])) };
+            let Some(hand) = Hand::parse(words[1]) else { return Err(err(w, M_CMD_INVALID_HAND, &[])) };
+            w.dispatch_commands(id, who, hand);
+            Ok(Vec::new())
+        }
+        "forgetplayer" => match rest.split_whitespace().next() {
+            None => {
+                w.forget_player(id, None);
+                Ok(ok(w, M_CMD_ALL_FORGOTTEN, &[&name]))
+            }
+            Some(raw) => {
+                let who = player_lookup(w, raw).ok_or_else(|| err(w, M_CMD_INVALID_PLAYER, &[raw]))?;
+                w.forget_player(id, Some(who));
+                Ok(ok(w, M_CMD_FORGOTTEN, &[&crate::horizon_citizens_core::ids::format_uuid(who)]))
+            }
+        },
+        "clearerror" => {
+            let mut words = rest.split_whitespace();
+            let Some(kind) = words.next().and_then(error_kind) else { return Err(err(w, M_CMD_INVALID_ERROR, &[&error_kinds_pretty()])) };
+            let pretty = pretty_enum(&kind.to_ascii_uppercase());
+            match words.next() {
+                None => {
+                    w.clear_command_errors(id, kind, None);
+                    Ok(ok(w, M_CMD_ALL_ERRORS_CLEARED, &[&name, &pretty]))
+                }
+                Some(raw) => {
+                    let who = player_lookup(w, raw).ok_or_else(|| err(w, M_CMD_INVALID_PLAYER, &[raw]))?;
+                    w.clear_command_errors(id, kind, Some(who));
+                    Ok(ok(w, M_CMD_ERRORS_CLEARED, &[&pretty, &crate::horizon_citizens_core::ids::format_uuid(who)]))
+                }
+            }
+        }
+        "errormessage" => {
+            let (kind, text) = rest.trim().split_once(' ').unwrap_or((rest.trim(), ""));
+            let Some(kind) = error_kind(kind) else { return Err(err(w, M_CMD_INVALID_ERROR, &[&error_kinds_pretty()])) };
+            if text.trim().is_empty() {
+                return Err(usage_of(w, "command"));
+            }
+            let text = text.trim();
+            let text = text.strip_prefix('"').and_then(|t| t.strip_suffix('"')).unwrap_or(text);
+            npc_mut(w, id)?.set_custom_error_message(kind, text);
+            w.mark_dirty();
+            Ok(ok(w, M_CMD_ERRORMSG_SET, &[&pretty_enum(&kind.to_ascii_uppercase())]))
+        }
+        "rememberlastused" | "persistsequence" => {
+            let now = npc_mut(w, id)?.remember_last_used();
+            let on = match rest.split_whitespace().next() {
+                None => !now,
+                Some(v) => v.eq_ignore_ascii_case("true"),
+            };
+            npc_mut(w, id)?.set_remember_last_used(on);
+            w.mark_dirty();
+            Ok(ok(w, if on { M_CMD_REMEMBER_SET } else { M_CMD_REMEMBER_UNSET }, &[]))
+        }
+        "permissions" | "perms" => {
+            if !allowed(sender, level, "citizens.admin") {
+                return Err(err(w, M_NO_PERM, &[]));
+            }
+            let mut words = rest.split_whitespace();
+            let Some(list) = words.next() else { return Err(usage_of(w, "command")) };
+            let perms: Vec<String> = list.split(',').map(str::to_owned).collect();
+            let duration = match words.next() {
+                None => -1,
+                Some(d) => i64::from(
+                    crate::horizon_citizens_core::config::duration_ticks(d)
+                        .or_else(|| d.parse::<u32>().ok())
+                        .ok_or_else(|| err(w, M_INVALID_NUMBER, &[]))?,
+                ),
+            };
+            npc_mut(w, id)?.set_temporary_permissions(&perms, duration);
+            w.mark_dirty();
+            Ok(ok(w, M_CMD_PERMS_SET, &[&perms.join(" "), &duration.to_string()]))
+        }
+        "itemcost" => {
+            let Some(who) = sender.uuid else { return Err(err(w, M_MUST_BE_INGAME, &[])) };
+            let key = match rest.split_whitespace().next() {
+                None => None,
+                Some(raw) => {
+                    let n = parse_i64(w, raw)?;
+                    let found = w.saves.get(id).and_then(|d| d.commands().into_iter().find(|c| c.id == n));
+                    match found {
+                        Some(c) => Some(c.key),
+                        None => return Err(err(w, M_CMD_UNKNOWN_ID, &[raw])),
+                    }
+                }
+            };
+            w.open_item_cost(who, id, key);
+            Ok(Vec::new())
         }
         _ => Err(usage_of(w, "command")),
     }
