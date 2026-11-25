@@ -671,6 +671,10 @@ impl NpcData {
     pub fn lookclose_flag(&self, key: &str, default: bool) -> bool {
         self.map.at(&["traits", "lookclose", key]).and_then(bool_of).unwrap_or(default)
     }
+    /// A text option of `/npc lookclose` (`filter`).
+    pub fn lookclose_text(&self, key: &str) -> Option<String> {
+        self.map.at(&["traits", "lookclose", key]).and_then(Node::as_str).map(str::to_owned).filter(|s| !s.is_empty())
+    }
     /// `randomLookDelay` in ticks (`/npc lookclose --randomlookdelay`).
     pub fn random_look_delay(&self) -> Option<u32> {
         self.map.at(&["traits", "lookclose", "randomLookDelay"]).and_then(Node::as_i64).filter(|d| *d > 0).map(|d| d as u32)
@@ -755,6 +759,14 @@ impl NpcData {
     /// `followtrait.margin` (-1 when unset).
     pub fn follow_margin(&self) -> f64 {
         f64_at(&self.map, &["traits", "followtrait", "margin"]).unwrap_or(-1.0)
+    }
+    /// `followtrait.protect`: attack whoever hurts the followed entity (`follow -p`).
+    pub fn follow_protect(&self) -> bool {
+        self.map.at(&["traits", "followtrait", "protect"]).and_then(bool_of).unwrap_or(false)
+    }
+    pub fn set_follow_protect(&mut self, on: bool) {
+        self.map.put(&["traits", "followtrait", "protect"], Node::bool(on));
+        self.add_trait_name("followtrait");
     }
     pub fn set_follow(&mut self, target: Option<u128>) {
         match target {
@@ -1467,6 +1479,12 @@ impl NpcData {
                 self.map.drop_path(&["traits", "equipment", citizens_slot]);
             }
         }
+    }
+
+    /// A whole stack (with its meta) into an equipment slot (`/npc setequipment <slot> hand`).
+    pub fn set_equipment_stack(&mut self, citizens_slot: &str, stack: &StackData) {
+        self.map.put(&["traits", "equipment", citizens_slot], stack.to_node());
+        self.add_trait_name("equipment");
     }
 
     /// The linear waypoints (`traits.waypoints.linear.points[].location`).

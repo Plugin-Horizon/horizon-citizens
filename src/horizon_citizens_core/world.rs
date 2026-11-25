@@ -371,6 +371,10 @@ struct Live {
     holograms: Vec<u128>,
     look: Option<(f32, f32)>,
     next_random_look: u64,
+    /// The player it looks at now (`LookClose.lookingAt`), kept until it leaves range or is switched.
+    look_target: Option<u128>,
+    /// The tick `randomswitchtargets` may pick another target.
+    next_switch: u64,
     /// Where the NPC stands now (moves with teleports and walking).
     at: Option<Location>,
     /// The last tick it took damage (to tell a death from a chunk unload).
@@ -391,6 +395,8 @@ struct Walk {
     waypoint: Option<usize>,
     /// Set by `followtrait`: the target moves, and arriving is not a finished route.
     follow: bool,
+    /// `pathto --margin`: the walk is over this close to the target (`distanceMargin`); 0 keeps the default.
+    margin: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -437,6 +443,10 @@ pub struct World {
     delayed: Vec<(u64, Op)>,
     /// Command permissions the clicking player holds (the host asked before the click).
     pub held_perms: BTreeSet<String>,
+    /// The stack in the main hand of the player who runs `setequipment` (set by the host before the command).
+    pub hand_item: Option<crate::horizon_citizens_core::npc::StackData>,
+    /// The same stack as SNBT (`debug -i`).
+    pub hand_snbt: Option<String>,
     /// The clicking player's level and inventory (the host reads them before the click).
     pub player_cost: Option<PlayerCost>,
     /// `MountTrait.currentMount`: NPC id -> (its entity, the entity it sits on).
@@ -457,6 +467,15 @@ pub struct World {
     pub chat_edits: HashMap<u128, ChatEdit>,
     /// Where online players look (yaw, pitch), set by the host every tick.
     pub rotations: HashMap<u128, [f32; 2]>,
+    /// `rotate -s`: NPC -> the yaw and pitch it is turning to.
+    smooth: HashMap<i32, (f32, f32)>,
+    /// Entities that hurt a followed one (`follow -p`): where they stand, set by the host.
+    pub foes: HashMap<u128, (String, [f64; 3])>,
+    foe_entity: HashMap<u128, u32>,
+    /// `lookclose -r`: (NPC, player) -> whether the NPC's eyes see the player (`hasLineOfSight`), set by the host.
+    pub sight: HashMap<(i32, u128), bool>,
+    /// The nodes of lookclose `--filter` permission/group clauses each online player holds, set by the host.
+    pub player_perms: HashMap<u128, BTreeSet<String>>,
     /// `Text.cooldowns`: (NPC, player) -> the tick it may talk to that player again.
     talk_cd: HashMap<(i32, u128), u64>,
     /// `WardenTrait.anger`: NPC id -> entity uuid -> anger.
@@ -542,6 +561,8 @@ impl World {
             cmd_last_id: HashMap::new(),
             delayed: Vec::new(),
             held_perms: BTreeSet::new(),
+            hand_item: None,
+            hand_snbt: None,
             player_cost: None,
             mounted: HashMap::new(),
             menus: HashMap::new(),
@@ -554,6 +575,11 @@ impl World {
             path_editors: HashMap::new(),
             chat_edits: HashMap::new(),
             rotations: HashMap::new(),
+            smooth: HashMap::new(),
+            foes: HashMap::new(),
+            foe_entity: HashMap::new(),
+            sight: HashMap::new(),
+            player_perms: HashMap::new(),
             talk_cd: HashMap::new(),
             warden_anger: HashMap::new(),
             teams_made: BTreeSet::new(),
@@ -667,6 +693,61 @@ impl World {
             .filter(|(id, _)| self.saves.get(**id).is_some_and(NpcData::protected))
             .filter_map(|(_, l)| l.entity)
             .collect()
+    }
+    /// `follow -p`: (entity followed, NPC that protects it) for the NPCs out in the world.
+    pub fn protectees(&self) -> Vec<(u32, i32)> {
+        self.saves
+            .npcs
+            .iter()
+            .filter(|n| n.follow_protect() && self.is_out(n.id))
+            .filter_map(|n| {
+                let who = n.follow_target()?;
+                let entity = self
+                    .online
+                    .iter()
+                    .find(|p| p.uuid == who)
+                    .map(|p| p.entity_id as u32)
+                    .or_else(|| self.entity_of(self.saves.by_uuid(who)?.id))?;
+                Some((entity, n.id))
+            })
+            .collect()
+    }
+    /// A followed entity was hurt (`FollowTrait.onEntityDamage`): its protectors go for the damager `foe`
+    /// (uuid, entity, position) and keep after it until it is gone.
+    pub fn protect_hit(&mut self, victim: u32, foe: Option<(u128, u32, [f64; 3])>) {
+        let Some((uuid, entity, pos)) = foe else { return };
+        let protectors: Vec<i32> = self.protectees().into_iter().filter(|(e, _)| *e == victim).map(|(_, n)| n).collect();
+        for id in protectors {
+            if self.saves.get(id).and_then(NpcData::uuid) == Some(uuid) {
+                continue;
+            }
+            self.set_target(id, uuid, true);
+        }
+        let dimension = self.online.iter().find(|p| p.entity_id as u32 == victim).map(|p| p.dimension.clone()).unwrap_or_default();
+        self.foe_entity.insert(uuid, entity);
+        self.foes.insert(uuid, (dimension, pos));
+    }
+    /// The foes the host tracks: (uuid, entity).
+    pub fn foe_entities(&self) -> Vec<(u128, u32)> {
+        self.foe_entity.iter().map(|(u, e)| (*u, *e)).collect()
+    }
+    /// Where a foe stands now, or None when it is gone (the NPCs let it go).
+    pub fn foe_report(&mut self, uuid: u128, pos: Option<[f64; 3]>) {
+        match pos {
+            Some(p) => {
+                if let Some(f) = self.foes.get_mut(&uuid) {
+                    f.1 = p;
+                }
+            }
+            None => {
+                self.foes.remove(&uuid);
+                self.foe_entity.remove(&uuid);
+                let gone: Vec<i32> = self.targets.iter().filter(|(_, t)| t.0 == uuid).map(|(id, _)| *id).collect();
+                for id in gone {
+                    self.clear_target(id);
+                }
+            }
+        }
     }
     pub fn npc_entities(&self) -> Vec<u32> {
         self.by_entity.keys().copied().collect()
@@ -1559,9 +1640,16 @@ impl World {
                 speed: speed.clamp(0.01, 2.0),
                 waypoint: None,
                 follow: false,
+                margin: 0.0,
             },
         );
         true
+    }
+    /// `pathto --margin`: the running walk ends this many blocks from its target.
+    pub fn set_walk_margin(&mut self, id: i32, margin: f64) {
+        if let Some(w) = self.walks.get_mut(&id) {
+            w.margin = margin.max(0.0);
+        }
     }
     /// Drops a walk set by following or wandering (the setting changed).
     pub fn cancel_follow_walk(&mut self, id: i32) {
@@ -1605,6 +1693,42 @@ impl World {
             Some(entity) => Op::Rotate { dimension: live.dimension.clone(), entity, yaw, pitch, fallback },
             None => Op::Console(fallback),
         });
+    }
+
+    /// `rotate -s`: turn to `yaw`/`pitch` over several ticks (RotationTrait's physical session, `rotateToHave`).
+    pub fn rotate_smooth(&mut self, id: i32, yaw: f32, pitch: f32) {
+        self.smooth.insert(id, (yaw, pitch));
+    }
+
+    /// One tick of every smooth rotation: at most `max_yaw_per_tick` (40) and `max_pitch_per_tick` (10) degrees.
+    fn smooth_tick(&mut self) {
+        let ids: Vec<i32> = self.smooth.keys().copied().collect();
+        for id in ids {
+            let Some((ty, tp)) = self.smooth.get(&id).copied() else { continue };
+            let Some(live) = self.live.get(&id).filter(|l| l.entity.is_some()) else {
+                self.smooth.remove(&id);
+                continue;
+            };
+            let (cy, cp) = live.look.or(live.at.as_ref().map(|a| (a.yaw, a.pitch))).unwrap_or((0.0, 0.0));
+            let npc = self.saves.get(id);
+            let limit = |key: &str, d: f64| {
+                npc.and_then(|n| n.map.at(&["traits", "rotationsettings", key]).and_then(Node::as_f64)).unwrap_or(d) as f32
+            };
+            let immediate = npc
+                .and_then(|n| n.map.at(&["traits", "rotationsettings", "mode"]).and_then(Node::as_str).map(|m| m.eq_ignore_ascii_case("immediate")))
+                .unwrap_or(false);
+            let lock_pitch = npc.and_then(|n| n.map.at(&["traits", "rotationsettings", "lock_pitch"]).and_then(Node::as_bool)).unwrap_or(false);
+            let (my, mp) = (limit("max_yaw_per_tick", 40.0), limit("max_pitch_per_tick", 10.0));
+            let step = |from: f32, to: f32, max: f32| {
+                let d = look::wrap(to - from);
+                if immediate || d.abs() <= max { to } else { look::wrap(from + d.signum() * max) }
+            };
+            let (ny, np) = (step(cy, ty, my), if lock_pitch { cp } else { step(cp, tp, mp) });
+            if look::angle_diff(ny, ty) < 0.1 && (np - tp).abs() < 0.1 || lock_pitch && look::angle_diff(ny, ty) < 0.1 {
+                self.smooth.remove(&id);
+            }
+            self.face(id, ny, np);
+        }
     }
 
     /// Turns only the head (`lookclose --headonly`): the body stays where it faces.
@@ -2113,6 +2237,7 @@ impl World {
             }
         }
         self.walk();
+        self.smooth_tick();
         self.behavior_tick();
         self.check_all_mounts();
         self.shop_tick();
@@ -2188,8 +2313,36 @@ impl World {
         }
     }
 
+    /// Nodes the host must look up per player for the `lookclose --filter` of live NPCs.
+    pub fn look_filter_nodes(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .live
+            .iter()
+            .filter(|(_, l)| l.entity.is_some())
+            .filter_map(|(id, _)| self.saves.get(*id)?.lookclose_text("filter"))
+            .flat_map(|f| look::filter_nodes(&f))
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// The out `lookclose -r` NPCs: (id, eye, dimension), for the host's line-of-sight checks.
+    pub fn sight_wanted(&self) -> Vec<(i32, [f64; 3], String)> {
+        self.live
+            .iter()
+            .filter(|(_, l)| l.entity.is_some())
+            .filter(|(id, _)| self.saves.get(**id).is_some_and(|n| n.look_close() && n.lookclose_flag("realisticlooking", false)))
+            .filter_map(|(id, l)| {
+                let at = l.at.as_ref()?;
+                Some((*id, look::eye([at.x, at.y, at.z]), l.dimension.clone()))
+            })
+            .collect()
+    }
+
     fn look_close(&mut self, players: &[PlayerView]) {
         let mut turns = Vec::new();
+        let mut tracked: Vec<(i32, Option<u128>, u64)> = Vec::new();
         for (id, live) in &self.live {
             if live.entity.is_none() {
                 continue;
@@ -2233,7 +2386,36 @@ impl World {
             };
             let pool: Vec<PlayerView> = if others.is_empty() { Vec::new() } else { players.iter().cloned().chain(others).collect() };
             let seen: &[PlayerView] = if pool.is_empty() { players } else { &pool };
-            let want = match look::target(seen, &live.dimension, from, range) {
+            // `getNearbyPlayers`: in range, not a spectator, passing the filter and (realistic) in sight.
+            let filter = npc.lookclose_text("filter");
+            let realistic = npc.lookclose_flag("realisticlooking", false);
+            let near: Vec<&PlayerView> = seen
+                .iter()
+                .filter(|p| p.dimension == live.dimension && p.game_mode != 3)
+                .filter(|p| look::dist2(look::eye(p.pos), from) <= range * range)
+                .filter(|p| filter.as_deref().is_none_or(|f| look::filter_passes(f, p, &self.player_perms)))
+                .filter(|p| !realistic || self.sight.get(&(*id, p.uuid)).copied().unwrap_or(true))
+                .collect();
+            // `findNewTarget`: keep the target while it is valid; `randomswitchtargets` picks another one
+            // every random-look delay; otherwise the nearest.
+            let mut target = live.look_target.filter(|t| near.iter().any(|p| p.uuid == *t));
+            let mut next_switch = live.next_switch;
+            if target.is_some() && npc.lookclose_flag("randomSwitchTargets", false) && self.tick >= live.next_switch {
+                let others: Vec<&&PlayerView> = near.iter().filter(|p| Some(p.uuid) != target).collect();
+                if !others.is_empty() {
+                    let i = ((self.rng.next_f64() * others.len() as f64) as usize).min(others.len() - 1);
+                    target = Some(others[i].uuid);
+                    next_switch = self.tick + u64::from(npc.random_look_delay().unwrap_or(self.cfg.look_close.random_look_delay_ticks));
+                }
+            }
+            if target.is_none() {
+                target = near
+                    .iter()
+                    .min_by(|a, b| look::dist2(look::eye(a.pos), from).total_cmp(&look::dist2(look::eye(b.pos), from)))
+                    .map(|p| p.uuid);
+            }
+            tracked.push((*id, target, next_switch));
+            let want = match target.and_then(|t| near.iter().find(|p| p.uuid == t)) {
                 Some(p) => Some(look::look_at(from, look::eye(p.pos))),
                 None if npc.random_look() && self.tick >= live.next_random_look => {
                     let ((y0, y1), (p0, p1)) = npc.random_ranges();
@@ -2255,13 +2437,20 @@ impl World {
                 turns.push((*id, yaw, pitch));
             }
         }
+        for (id, target, next_switch) in tracked {
+            if let Some(l) = self.live.get_mut(&id) {
+                l.look_target = target;
+                l.next_switch = next_switch;
+            }
+        }
         let default_delay = u64::from(self.cfg.look_close.random_look_delay_ticks);
         for (id, yaw, pitch) in turns {
             let delay = self.saves.get(id).and_then(NpcData::random_look_delay).map_or(default_delay, u64::from);
             if let Some(l) = self.live.get_mut(&id) {
                 l.next_random_look = self.tick + delay;
             }
-            if self.saves.get(id).is_some_and(|n| n.lookclose_flag("headonly", false)) {
+            // `linkedbody`: the body follows the head, so a head-only turn turns everything.
+            if self.saves.get(id).is_some_and(|n| n.lookclose_flag("headonly", false) && !n.lookclose_flag("linkedbody", false)) {
                 self.face_head(id, yaw, pitch);
             } else {
                 self.face(id, yaw, pitch);
@@ -2290,6 +2479,9 @@ impl World {
     pub fn locate(&self, uuid: u128) -> Option<(String, [f64; 3])> {
         if let Some(p) = self.online.iter().find(|p| p.uuid == uuid) {
             return Some((p.dimension.clone(), p.pos));
+        }
+        if let Some((d, p)) = self.foes.get(&uuid) {
+            return Some((d.clone(), *p));
         }
         let id = self.saves.by_uuid(uuid)?.id;
         let l = self.current_location(id)?;
@@ -2355,7 +2547,7 @@ impl World {
             if follow && self.walks.get(&id).is_some_and(|w| !w.follow) {
                 continue;
             }
-            self.walks.insert(id, Walk { target, speed, waypoint: None, follow });
+            self.walks.insert(id, Walk { target, speed, waypoint: None, follow, margin: 0.0 });
         }
     }
 
@@ -2389,6 +2581,7 @@ impl World {
                     speed,
                     waypoint: Some(i),
                     follow: false,
+                    margin: 0.0,
                 },
             );
         }
@@ -2409,7 +2602,7 @@ impl World {
                 let pos = real.pos.unwrap_or([at.x, at.y, at.z]);
                 let dx = walk.target[0] - pos[0];
                 let dz = walk.target[2] - pos[2];
-                let near = (dx * dx + dz * dz).sqrt() <= 1.0 && (walk.target[1] - pos[1]).abs() <= 2.0;
+                let near = (dx * dx + dz * dz).sqrt() <= walk.margin.max(1.0) && (walk.target[1] - pos[1]).abs() <= 2.0;
                 let need = match real.goal {
                     None => true,
                     Some((g, t)) => {
@@ -2431,10 +2624,12 @@ impl World {
             let d = [walk.target[0] - at.x, walk.target[1] - at.y, walk.target[2] - at.z];
             let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
             let mut next = at.clone();
-            if len <= walk.speed {
-                next.x = walk.target[0];
-                next.y = walk.target[1];
-                next.z = walk.target[2];
+            if len <= walk.speed.max(walk.margin) {
+                if len <= walk.speed {
+                    next.x = walk.target[0];
+                    next.y = walk.target[1];
+                    next.z = walk.target[2];
+                }
                 done.push((*id, walk.waypoint));
             } else {
                 next.x += d[0] / len * walk.speed;
@@ -2512,6 +2707,7 @@ impl World {
                         speed,
                         waypoint: Some(i),
                         follow: false,
+                        margin: 0.0,
                     },
                 );
             } else {

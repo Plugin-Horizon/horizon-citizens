@@ -1040,6 +1040,21 @@ impl Hooks for Citizens {
             CommandSource::Console { permission } => bodiless_sender("Console", *permission),
             other => bodiless_sender("Command block", other.permission()),
         };
+        // `setequipment <slot> hand` copies the stack in the sender's hand.
+        if line.split_whitespace().nth(1).is_some_and(|w| w.eq_ignore_ascii_case("setequipment") || w.eq_ignore_ascii_case("debug")) {
+            let stack = match event.source {
+                CommandSource::Player { player, .. } => {
+                    host.living(player.entity()).and_then(|l| l.hand_item(&*host, Hand::Main))
+                }
+                _ => None,
+            };
+            let hand = stack.as_ref().map(|st| stack_data_of(&*host, st));
+            let snbt = stack.as_ref().and_then(|st| host.item_to_snbt(st));
+            api::with_world(|w| {
+                w.hand_item = hand;
+                w.hand_snbt = snbt;
+            });
+        }
         let profiles = owner_profiles(&*host, &line);
         let path = saves_path(&*host, &cfg);
         // The shop commands read the sender (and a named player) before they open a menu.
@@ -1261,6 +1276,43 @@ impl Hooks for Citizens {
                 Some((id, pos, done))
             })
             .collect();
+        // `lookclose -r`: which players each realistic NPC sees; `--filter` clauses: the nodes each player holds.
+        let wanted = api::with_world(|w| (w.sight_wanted(), w.look_filter_nodes())).unwrap_or_default();
+        let mut sight: Vec<((i32, u128), bool)> = Vec::new();
+        let mut held: Vec<(u128, std::collections::BTreeSet<String>)> = Vec::new();
+        if !wanted.0.is_empty() || !wanted.1.is_empty() {
+            for p in host.players().server_players() {
+                let Some(info) = player_info(&*host, p) else { continue };
+                if let Some(level) = p.level(&*host) {
+                    for (id, eye, dim) in &wanted.0 {
+                        if *dim == info.view.dimension {
+                            let to = core::look::eye(info.view.pos);
+                            sight.push(((*id, info.view.uuid), level.line_of_sight(&*host, *eye, to).unwrap_or(true)));
+                        }
+                    }
+                }
+                let nodes: std::collections::BTreeSet<String> =
+                    wanted.1.iter().filter(|n| holds(host, p, n)).cloned().collect();
+                held.push((info.view.uuid, nodes));
+            }
+        }
+        // `follow -p`: who hurt a followed entity, and where the foes being chased stand.
+        let hits: Vec<(u32, Option<(u128, u32, [f64; 3])>)> = api::take_protect_hits()
+            .into_iter()
+            .map(|(victim, causing)| {
+                let foe = u32::try_from(causing).ok().and_then(|c| {
+                    let e = host.entity(c)?;
+                    let u = e.uuid(host)?;
+                    Some((u, c, e.position(&*host)?))
+                });
+                (victim, foe)
+            })
+            .collect();
+        let foes: Vec<(u128, Option<[f64; 3]>)> = api::with_world(|w| w.foe_entities())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(u, e)| (u, host.entity(e).and_then(|x| x.position(&*host))))
+            .collect();
         PAPI_ON.store(papi_installed(&*host), std::sync::atomic::Ordering::Relaxed);
         let economy = economy_on(&*host);
         // Health and motion of the NPCs that run a behavior tree (their expression scope).
@@ -1290,6 +1342,14 @@ impl Hooks for Citizens {
                 w.nav_report(id, pos, done);
             }
             w.rotations = rotations.into_iter().collect();
+            w.sight = sight.into_iter().collect();
+            for (victim, foe) in hits {
+                w.protect_hit(victim, foe);
+            }
+            for (u, pos) in foes {
+                w.foe_report(u, pos);
+            }
+            w.player_perms = held.into_iter().collect();
             for f in fetched {
                 w.skin_fetched(f);
             }

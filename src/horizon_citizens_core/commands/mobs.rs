@@ -360,13 +360,14 @@ const MOBS: &[Mob] = &[
         opts: &[
             o("link_body", V::Bool),
             o("head_only", V::Bool),
+            o("lock_pitch", V::Bool),
             o("max_pitch_per_tick", V::Num(NUM0.0, NUM0.1)),
             o("max_yaw_per_tick", V::Num(NUM0.0, NUM0.1)),
             o("pitch_range", V::Any),
             o("yaw_range", V::Any),
         ],
         pos: &[o("mode", V::Words(&["linear", "immediate"]))],
-        ..m!("rotationsettings", [], "rotationsettings [linear|immediate] (--link_body) (--head_only) (--max_pitch_per_tick) (--max_yaw_per_tick) (--pitch_range) (--yaw_range)")
+        ..m!("rotationsettings", [], "rotationsettings [linear|immediate] (--link_body) (--head_only) (--lock_pitch) (--max_pitch_per_tick) (--max_yaw_per_tick) (--pitch_range) (--yaw_range)")
     },
     Mob {
         kinds: &["SHULKER"],

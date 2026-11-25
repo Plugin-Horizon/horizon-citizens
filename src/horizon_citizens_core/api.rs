@@ -49,9 +49,13 @@ static DAMAGE_FILTERS: RwLock<Vec<DamageFilter>> = RwLock::new(Vec::new());
 struct Snapshot {
     npcs: HashMap<u32, i32>,
     protected: HashSet<u32>,
+    /// Entities some NPC follows with `-p`.
+    protectees: HashSet<u32>,
 }
 static SNAPSHOT: RwLock<Option<Snapshot>> = RwLock::new(None);
 /// Damage seen by the hook, handed to the world at the next tick: (entity, amount, type, causing).
+/// Hits on followed entities (`follow -p`): (victim entity, causing entity).
+static PROTECT_SEEN: Mutex<Vec<(u32, i32)>> = Mutex::new(Vec::new());
 static DAMAGE_SEEN: Mutex<Vec<(u32, f32, String, i32)>> = Mutex::new(Vec::new());
 
 fn world_lock() -> MutexGuard<'static, Option<World>> {
@@ -86,6 +90,7 @@ pub fn refresh_snapshot() {
             .filter_map(|e| Some((e, w.npc_of_entity(e)?)))
             .collect(),
         protected: w.protected_entities().into_iter().collect(),
+        protectees: w.protectees().into_iter().map(|(e, _)| e).collect(),
     });
     *SNAPSHOT.write().unwrap_or_else(|e| e.into_inner()) = snap;
 }
@@ -101,6 +106,9 @@ pub fn on_damage(entity: i32, damage_type: &str, causing: i32, direct: i32, amou
         let Some(snap) = snap.as_ref() else {
             return DamageDecision::Pass;
         };
+        if causing > 0 && snap.protectees.contains(&entity) {
+            PROTECT_SEEN.lock().unwrap_or_else(|e| e.into_inner()).push((entity, causing));
+        }
         let Some(npc) = snap.npcs.get(&entity).copied() else {
             return DamageDecision::Pass;
         };
@@ -148,6 +156,11 @@ pub fn flush_damage(w: &mut World) {
     for (entity, amount, kind, causing) in seen {
         w.on_damaged(entity, amount, &kind, causing);
     }
+}
+
+/// The hits on followed entities since the last call: (victim entity, causing entity).
+pub fn take_protect_hits() -> Vec<(u32, i32)> {
+    std::mem::take(&mut *PROTECT_SEEN.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// Takes the queued game work and events (under the lock), for the glue to run outside it.

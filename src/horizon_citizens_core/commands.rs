@@ -14,7 +14,7 @@ mod templates;
 
 use crate::horizon_citizens_core::tree::TreeExt;
 use crate::horizon_citizens_core::yaml::Node;
-use crate::horizon_citizens_core::npc::{CommandSpec, Hand, Location, Nameplate, NpcData, Skin};
+use crate::horizon_citizens_core::npc::{CommandSpec, Cosmetic, Hand, Location, Nameplate, NpcData, Skin, StackData};
 use crate::horizon_citizens_core::saves::Saves;
 use crate::horizon_citizens_core::text;
 use crate::horizon_citizens_core::world::{ChatEdit, Src, Target, DespawnReason, Sender, World};
@@ -2886,9 +2886,7 @@ fn follow(w: &mut World, sender: &Sender, args: &Args) -> Res {
         w.cancel_follow_walk(id);
         return Ok(ok(w, M_FOLLOW_MARGIN, &[&name, &jnum(m)]));
     }
-    if args.has('p') {
-        return Err(err(w, M_UNSUPPORTED, &["-p"]));
-    }
+    let protect = args.has('p');
     let level = w.cfg.command_level;
     let others = allowed(sender, level, "citizens.npc.follow.others");
     let who = args.words.first().cloned().unwrap_or_else(|| sender.name.clone());
@@ -2915,6 +2913,7 @@ fn follow(w: &mut World, sender: &Sender, args: &Args) -> Res {
         },
         None => return Err(err(w, M_NPC_NOT_FOUND, &[])),
     };
+    npc_mut(w, id)?.set_follow_protect(protect);
     npc_mut(w, id)?.set_follow(if following { Some(uuid) } else { None });
     w.mark_dirty();
     w.cancel_follow_walk(id);
@@ -2932,9 +2931,10 @@ fn speed(w: &mut World, sender: &Sender, args: &Args) -> Res {
 
 fn pathto(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let id = target(w, sender)?;
-    if args.has_value("margin") {
-        return Err(err(w, M_UNSUPPORTED, &["--margin"]));
-    }
+    let margin = match args.value("margin") {
+        Some(m) => Some(m.parse::<f64>().map_err(|_| err(w, M_INVALID_NUMBER, &[]))?),
+        None => None,
+    };
     let mut to = w.current_location(id).ok_or_else(|| err(w, M_NPC_NOT_FOUND, &[]))?;
     if args.words.len() == 1 {
         match args.words[0].to_ascii_lowercase().as_str() {
@@ -2951,6 +2951,9 @@ fn pathto(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let speed = 0.2 * w.saves.get(id).map_or(1.0, NpcData::speed_modifier);
     // Straight line: Citizens' `-s` mode. Its pathfinder needs a mob with AI.
     w.navigate_to(id, [to.x, to.y, to.z], speed);
+    if let Some(m) = margin {
+        w.set_walk_margin(id, m);
+    }
     Ok(Vec::new())
 }
 
@@ -2964,9 +2967,6 @@ fn parse_xyz(s: &str) -> Option<[f64; 3]> {
 
 fn rotate(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let id = target(w, sender)?;
-    if args.has('s') {
-        return Err(err(w, M_UNSUPPORTED, &["rotate -s"]));
-    }
     let num = |w: &World, k: &str| -> Result<Option<f32>, Reply> {
         match args.value(k) {
             Some(v) => v.parse::<f32>().map(Some).map_err(|_| err(w, M_INVALID_NUMBER, &[])),
@@ -2975,6 +2975,11 @@ fn rotate(w: &mut World, sender: &Sender, args: &Args) -> Res {
     };
     let (yaw, head, pitch) = (num(w, "body")?, num(w, "head")?, num(w, "pitch")?);
     let at = w.current_location(id).ok_or_else(|| err(w, M_NPC_NOT_FOUND, &[]))?;
+    if args.has('s') {
+        // RotationTrait's physical session: rotateToHave(yaw, pitch); the yaw defaults to the head's.
+        w.rotate_smooth(id, yaw.or(head).unwrap_or(at.yaw), pitch.unwrap_or(at.pitch));
+        return Ok(Vec::new());
+    }
     let mut towards: Option<[f64; 3]> = match args.value("towards") {
         Some(t) => Some(parse_xyz(t).ok_or_else(|| err(w, M_INVALID_LOCATION, &[]))?),
         None => None,
@@ -4517,34 +4522,58 @@ fn equip(w: &mut World, sender: &Sender, args: &Args) -> Res {
 /// `/npc setequipment [slot] [item]`, with Bukkit's slot names.
 fn setequipment(w: &mut World, sender: &Sender, args: &Args, c: &Cmd) -> Res {
     let id = target(w, sender)?;
-    if args.has('c') {
-        return Err(err(w, M_UNSUPPORTED, &["-c"]));
-    }
+    let cosmetic = args.has('c');
     let slot_arg = args.words.first().cloned().unwrap_or_default().to_ascii_uppercase();
     let slot = match slot_arg.as_str() {
         "HAND" => "hand",
         "OFF_HAND" => "off_hand",
-        "HEAD" => "helmet",
-        "CHEST" => "chestplate",
-        "LEGS" => "leggings",
-        "FEET" => "boots",
+        "HEAD" | "HELMET" => "helmet",
+        "CHEST" | "CHESTPLATE" => "chestplate",
+        "LEGS" | "LEGGINGS" => "leggings",
+        "FEET" | "BOOTS" => "boots",
+        "BODY" => "body",
+        "SADDLE" => "saddle",
         _ => return Err(usage_error(w, None, c)),
     };
-    let item = match args.words.get(1) {
+    // `hand`: a copy of the stack in the sender's hand (a player only).
+    let stack = match args.words.get(1) {
         None => None,
         Some(i) if i.eq_ignore_ascii_case("hand") => {
-            return Err(err(w, M_UNSUPPORTED, &["Taking the item in your hand"]));
+            if sender.uuid.is_none() {
+                return Err(err(w, M_MUST_BE_INGAME, &[]));
+            }
+            w.hand_item.clone()
         }
-        Some(i) => Some(item_id(i).ok_or_else(|| err(w, "Unknown item {0}.", &[i]))?),
+        Some(i) => Some(StackData::new(&format!("minecraft:{}", item_id(i).ok_or_else(|| err(w, "Unknown item {0}.", &[i]))?.trim_start_matches("minecraft:")), 1)),
     };
-    npc_mut(w, id)?.set_equipment(slot, item.as_deref().map(|i| (i, 1)));
+    let air = stack.as_ref().is_some_and(|s| s.id.trim_start_matches("minecraft:") == "air");
+    let stack = stack.filter(|_| !air);
+    if cosmetic {
+        let value = match (&stack, air) {
+            (Some(s), _) => Cosmetic::Item(s.clone()),
+            (None, true) => Cosmetic::Empty,
+            (None, false) => Cosmetic::Off,
+        };
+        npc_mut(w, id)?.set_cosmetic(slot, &value);
+    } else {
+        match &stack {
+            Some(s) if s.meta == Default::default() => npc_mut(w, id)?.set_equipment(slot, Some((&s.id, s.count))),
+            Some(s) => npc_mut(w, id)?.set_equipment_stack(slot, s),
+            None => npc_mut(w, id)?.set_equipment(slot, None),
+        }
+    }
     w.mark_dirty();
     w.respawn(id);
     // Citizens prints the Bukkit ItemStack as it is.
-    let shown = item.map_or_else(|| "null".to_owned(), |i| format!("ItemStack{{{} x 1}}", i.to_ascii_uppercase()));
-    Ok(ok(w, M_EQUIPMENT_SET, &[&slot_arg, &shown]))
+    let shown = match (&stack, air) {
+        (Some(s), _) => format!("ItemStack{{{} x {}}}", s.id.trim_start_matches("minecraft:").to_ascii_uppercase(), s.count),
+        (None, true) => "ItemStack{AIR x 0}".to_owned(),
+        (None, false) => "null".to_owned(),
+    };
+    Ok(ok(w, if cosmetic { M_COSMETIC_EQUIPMENT_SET } else { M_EQUIPMENT_SET }, &[&slot_arg, &shown]))
 }
 
+const M_COSMETIC_EQUIPMENT_SET: &str = "Set [[{0}]] (cosmetic) to [[{1}]].";
 const M_EQUIP_EDITOR_BEGIN: &str = "Entered the equipment editor. Right click the NPC to equip it; type /npc equip again to leave.";
 const M_EQUIP_EDITOR_END: &str = "Exited the equipment editor.";
 const M_PATH_BEGIN: &str = "<green>=== [[Linear Waypoint Editor]] ===<br><br>[[Left click]] to add a waypoint, [[right click]] to remove it.";
@@ -4863,7 +4892,11 @@ fn debug(w: &mut World, sender: &Sender, args: &Args) -> Res {
         if sender.uuid.is_none() {
             return Err(err(w, M_MUST_BE_INGAME, &[]));
         }
-        return Err(err(w, M_UNSUPPORTED, &["debug -i"]));
+        // `NMS.getComponentMap` of the held stack.
+        return match w.hand_snbt.clone().filter(|_| w.hand_item.is_some()) {
+            Some(snbt) => Ok(say(w, &snbt)),
+            None => Err(err(w, "No item in hand to debug.", &[])),
+        };
     }
     Ok(Vec::new())
 }
