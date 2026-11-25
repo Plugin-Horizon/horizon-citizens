@@ -108,6 +108,10 @@ const M_HOLO_LINE_ADD: &str = "Added a new hologram line: [[{0}]].";
 const M_HOLO_LINE_SET: &str = "Set hologram text line [[{0}]] to [[{1}]].";
 const M_HOLO_LINE_REMOVED: &str = "Removed line [[{0}]].";
 const M_HOLO_CLEARED: &str = "Hologram lines cleared.";
+const M_HOLO_VIEW_SET: &str = "[[{0}]]''s hologram horizontal view range set to [[{1}]] blocks.";
+const M_HOLO_VVIEW_SET: &str = "[[{0}]]''s hologram vertical view range set to [[{1}]] blocks.";
+const M_HOLO_RATE_SET: &str = "[[{0}]]''s hologram update rate set to every [[{1}]] ticks.";
+const M_HOLO_BG_SET: &str = "Hologram [[{0}]]''s background color set to [[{1}]].";
 const M_HOLO_HEIGHT_SET: &str = "Line height set to [[{0}]].";
 const M_HOLO_MARGIN_MISSING: &str = "Missing margin to set.";
 const M_HOLO_MARGIN_SET: &str = "Set hologram line [[{0}]] margin [[{1}]] to [[{2}]].";
@@ -1290,6 +1294,13 @@ fn fill(t: &str, args: &[&str]) -> String {
     s
 }
 
+pub(crate) fn reply_ok(w: &World, t: &str, args: &[&str]) -> Reply {
+    ok(w, t, args)
+}
+pub(crate) fn reply_err(w: &World, t: &str, args: &[&str]) -> Reply {
+    err(w, t, args)
+}
+
 fn ok(w: &World, t: &str, args: &[&str]) -> Reply {
     render(w, false, &fill(t, args))
 }
@@ -2063,20 +2074,37 @@ pub fn nearest(w: &World, dimension: &str, at: &Location, range: f64) -> Option<
         .map(|(id, _)| id)
 }
 
-fn list(w: &World, sender: &Sender, args: &Args) -> Res {
+fn list(w: &mut World, sender: &Sender, args: &Args) -> Res {
     if let Some(r) = args.value("registry") {
         return Err(err(w, M_UNKNOWN_REGISTRY, &[r]));
     }
-    for what in ["tag", "filter"] {
-        if args.has_value(what) {
-            return Err(err(w, M_UNSUPPORTED, &[&format!("--{what}")]));
+    // `--filter` (with `citizens.admin`): the NPCs for which the expression holds, in the selected NPC's scope.
+    let filtered: Option<Vec<i32>> = match args.value("filter") {
+        Some(f) if !args.has('a') && allowed(sender, w.cfg.command_level, "citizens.admin") => {
+            let selected = selected_id(w, sender).ok();
+            let ids: Vec<i32> = { let mut v: Vec<i32> = w.saves.npcs.iter().map(|n| n.id).collect(); v.sort_unstable(); v };
+            let mut keep = Vec::new();
+            for id in ids {
+                match w.filter_holds(selected, f) {
+                    Ok(true) => keep.push(id),
+                    Ok(false) => {}
+                    Err(e) => return Err(err(w, &e, &[])),
+                }
+            }
+            Some(keep)
         }
-    }
+        _ => None,
+    };
+    let w: &World = w;
     let mut npcs: Vec<&NpcData> = w.saves.npcs.iter().collect();
     npcs.sort_by_key(|n| n.id);
     let owner = args.value("owner").map(crate::horizon_citizens_core::ids::parse_uuid);
     let mut shown: Vec<&NpcData> = if args.has('a') {
         npcs
+    } else if let Some(keep) = &filtered {
+        npcs.into_iter().filter(|n| keep.contains(&n.id)).collect()
+    } else if let Some(tag) = args.value("tag") {
+        npcs.into_iter().filter(|n| n.string_list(&["traits", "scoreboardtrait", "tags"]).iter().any(|t| t == tag)).collect()
     } else if let Some(o) = owner {
         npcs.into_iter().filter(|n| o.is_some() && n.owner() == o).collect()
     } else if sender.uuid.is_some() {
@@ -2385,14 +2413,61 @@ fn skin(w: &mut World, sender: &Sender, args: &Args) -> Res {
         w.respawn(id);
         return Ok(ok(w, M_SKIN_CLEARED, &[&npc_name]));
     }
-    if args.has_value("url") || args.has_value("file") {
-        let what = args.value("url").or_else(|| args.value("file")).unwrap_or("");
-        return Err(err(w, M_SKIN_URL_ERROR, &[what]));
+    let skins_dir = w.saves_path.as_ref().and_then(|p| p.parent()).map(|d| d.join("skins"));
+    let in_skins = |name: &str| -> Option<std::path::PathBuf> {
+        let dir = skins_dir.as_ref()?;
+        let bad = name.is_empty() || name.contains("..") || name.starts_with('/') || name.starts_with('\\') || name.contains(':');
+        (!bad).then(|| dir.join(name))
+    };
+    let texture = current.texture.clone();
+    let slim = args.has('s');
+    let skin_url = |texture: &str| crate::horizon_citizens_core::skin::texture_url(texture, base64_decode);
+    if args.has('u') {
+        let Some(t) = texture.as_deref() else { return Err(err(w, M_SKIN_REQUIRED, &[])) };
+        return match skin_url(t) {
+            Ok(u) => Ok(vec![u]),
+            Err(e) => Err(err(w, "Couldn''t parse texture: {0}", &[&e])),
+        };
     }
-    for (flag, what) in [('u', "-u"), ('e', "-e"), ('s', "-s"), ('l', "-l")] {
-        if args.has(flag) {
-            return Err(err(w, M_UNSUPPORTED, &[what]));
+    if args.has('e') {
+        let Some(t) = texture.as_deref() else { return Err(err(w, M_SKIN_REQUIRED, &[])) };
+        let uuid = w.saves.get(id).and_then(NpcData::uuid).map(crate::horizon_citizens_core::ids::format_uuid).unwrap_or_default();
+        let file = args.value("file").map(str::to_owned).unwrap_or_else(|| format!("{uuid}.png"));
+        let Some(path) = in_skins(&file).filter(|_| file.ends_with(".png")) else {
+            return Err(err(w, "Skin file [[{0}]] not found. Must be a file under plugins/Citizens/skins/<file.png> ", &[&file]));
+        };
+        let url = match skin_url(t) {
+            Ok(u) => u,
+            Err(e) => return Err(err(w, "Couldn''t parse texture: {0}", &[&e])),
+        };
+        if !url.contains("://textures.minecraft.net/") {
+            return Err(err(w, "Error downloading skin texture from [[{0}]]. Are you sure the URL is valid?", &["Mojang"]));
         }
+        w.push_op(crate::horizon_citizens_core::world::Op::SkinWork {
+            npc: id,
+            by: sender.uuid,
+            label: file,
+            work: crate::horizon_citizens_core::skin::Work::Export { url, path: path.to_string_lossy().into_owned() },
+        });
+        return Ok(Vec::new());
+    }
+    if args.has_value("url") || args.has_value("file") {
+        let (source, label, png) = if let Some(f) = args.value("file") {
+            let Some(path) = in_skins(f).filter(|p| p.is_file()) else {
+                return Err(err(w, "Skin file [[{0}]] not found. Must be a file under plugins/Citizens/skins/<file.png> ", &[f]));
+            };
+            (String::new(), f.to_owned(), std::fs::read(path).ok())
+        } else {
+            let u = args.value("url").unwrap_or("").to_owned();
+            (u.clone(), u, None)
+        };
+        w.push_op(crate::horizon_citizens_core::world::Op::SkinWork {
+            npc: id,
+            by: sender.uuid,
+            label,
+            work: crate::horizon_citizens_core::skin::Work::Generate { source, png, slim },
+        });
+        return Ok(ok(w, "Attempting to generate skin using https://mineskin.org", &[]));
     }
     if args.has('t') {
         // `skin -t <uuid/name> <data> <signature>`
@@ -2418,6 +2493,38 @@ fn skin(w: &mut World, sender: &Sender, args: &Args) -> Res {
         w.mark_dirty();
         w.respawn(id);
         return Ok(ok(w, M_SKIN_SET, &[&npc_name, name]));
+    }
+    if args.has('s') {
+        // `-s`: a player head wearing the NPC's skin goes to the sender's inventory.
+        if sender.name.is_empty() || sender.uuid.is_none() {
+            return Err(err(w, M_MUST_BE_INGAME, &[]));
+        }
+        let props = match (&current.texture, &current.signature) {
+            (Some(t), Some(sig)) => format!("{{name:\"textures\",value:\"{t}\",signature:\"{sig}\"}}"),
+            (Some(t), None) => format!("{{name:\"textures\",value:\"{t}\"}}"),
+            _ => String::new(),
+        };
+        w.push_op(crate::horizon_citizens_core::world::Op::Console(format!(
+            "give {} minecraft:player_head[profile={{name:\"{}\",properties:[{props}]}}]",
+            sender.name, text::strip(&npc_name)
+        )));
+        return Ok(Vec::new());
+    }
+    if args.has('l') {
+        let now = !w.saves.get(id).is_some_and(NpcData::update_skins);
+        npc_mut(w, id)?.set_update_skins(now);
+        w.mark_dirty();
+        let shown = current.name.clone().unwrap_or_else(|| npc_name.clone());
+        let mut out = ok(w, "[[{0}]] set to use latest skins. Current skin name is [[{1}]].", &[&npc_name, &shown]);
+        if args.words.is_empty() {
+            return Ok(out);
+        }
+        let skin_name = args.words[0].clone();
+        out.extend(ok(w, M_SKIN_SET, &[&npc_name, &skin_name]));
+        npc_mut(w, id)?.set_skin(&Skin { name: Some(text::strip(&skin_name)), texture: None, signature: None });
+        w.mark_dirty();
+        w.respawn(id);
+        return Ok(out);
     }
     let Some(skin_name) = args.words.first().cloned() else {
         // Only `/npc skin`: it tells the skin name.
@@ -3446,7 +3553,33 @@ fn wander(w: &mut World, sender: &Sender, args: &Args) -> Res {
             w.mark_dirty();
             Ok(ok(w, M_WANDER_PATHFIND, &[&b.to_string()]))
         }
-        "add" | "worldguardregion" => Err(err(w, M_UNSUPPORTED, &[&format!("wander {action}")])),
+        "add" => {
+            if n < 5 {
+                return Err(usage_of(w, "wander"));
+            }
+            let world = match args.words.get(4) {
+                Some(name) => name.clone(),
+                None => w.current_location(id).map(|l| l.world).ok_or_else(|| err(w, M_NPC_NOT_FOUND, &[]))?,
+            };
+            if w.cfg.worlds.dimension(&world).is_none() {
+                return Err(err(w, "World not found.", &[]));
+            }
+            let (x, y, z) = (int(w, 1)?, int(w, 2)?, int(w, 3)?);
+            let loc = Location { world, x: x as f64, y: y as f64, z: z as f64, yaw: 0.0, pitch: 0.0, body_yaw: 0.0 };
+            npc_mut(w, id)?.add_wander_centre(&loc);
+            w.mark_dirty();
+            let total = w.saves.get(id).map_or(0, |n| n.wander_centres().len());
+            Ok(ok(w, "Added waypoint at [[{0}]] (index [[{1}]]).", &[&format!("{}, {}, {}", x, y, z), &(total.saturating_sub(1)).to_string()]))
+        }
+        "worldguardregion" => {
+            if n != 3 {
+                return Err(usage_of(w, "wander"));
+            }
+            let region = args.words[1].clone();
+            npc_mut(w, id)?.set_wander_region(&region);
+            w.mark_dirty();
+            Ok(ok(w, "WorldGuard region set to [[{0}]].", &[&region]))
+        }
         _ => Ok(Vec::new()),
     }
 }
@@ -3460,6 +3593,27 @@ fn line_index(arg: &str, len: usize) -> Option<i64> {
         "top" => Some(len as i64 - 1),
         n => n.parse::<i64>().ok().map(|v| v.max(0)),
     }
+}
+
+/// `SpigotUtil.parseColor`: `0xRRGGBB`/`#RRGGBB`/decimal, or `r,g,b[,a]`; as the signed ARGB int the game's `background` takes.
+fn parse_color(s: &str) -> Option<i32> {
+    let argb = |r: u32, g: u32, b: u32, a: u32| -> Option<i32> {
+        (r < 256 && g < 256 && b < 256 && a < 256).then(|| ((a << 24) | (r << 16) | (g << 8) | b) as i32)
+    };
+    if s.contains(',') {
+        let v: Vec<u32> = s.split(',').map(|p| p.trim().parse().ok()).collect::<Option<_>>()?;
+        return match v.as_slice() {
+            [r, g, b] => argb(*r, *g, *b, 255),
+            [r, g, b, a] => argb(*r, *g, *b, *a),
+            _ => None,
+        };
+    }
+    let n = if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).or_else(|| s.strip_prefix('#')) {
+        u32::from_str_radix(h, 16).ok()?
+    } else {
+        s.parse::<u32>().ok()?
+    };
+    (n <= 0xFFFFFF).then(|| (0xFF00_0000u32 | n) as i32)
 }
 
 fn hologram(w: &mut World, sender: &Sender, tail: &str) -> Res {
@@ -3502,11 +3656,31 @@ fn hologram(w: &mut World, sender: &Sender, tail: &str) -> Res {
             if words.len() == 1 {
                 return Err(err(w, M_HOLO_TEXT_MISSING, &[]));
             }
-            if words.iter().any(|t| t.eq_ignore_ascii_case("--duration")) {
-                return Err(err(w, M_UNSUPPORTED, &["--duration"]));
+            // `--duration <time>`: the line is a temporary one (`addTemporaryLine`) and goes after that long.
+            let mut duration: Option<u32> = None;
+            let mut text_words: Vec<&str> = Vec::new();
+            let mut i = 1;
+            while i < words.len() {
+                if words[i].eq_ignore_ascii_case("--duration") && i + 1 < words.len() {
+                    duration = Some(
+                        crate::horizon_citizens_core::config::duration_ticks(words[i + 1])
+                            .or_else(|| words[i + 1].parse::<u32>().ok())
+                            .ok_or_else(|| err(w, M_INVALID_NUMBER, &[]))?,
+                    );
+                    i += 2;
+                } else {
+                    text_words.push(words[i]);
+                    i += 1;
+                }
             }
-            let text = after(1);
+            if text_words.is_empty() {
+                return Err(err(w, M_HOLO_TEXT_MISSING, &[]));
+            }
+            let text = text_words.join(" ");
             npc_mut(w, id)?.add_hologram_line(&text);
+            if let Some(t) = duration {
+                w.expire_hologram_line(id, &text, u64::from(t));
+            }
             ok(w, M_HOLO_LINE_ADD, &[&text])
         }
         "insert" => {
@@ -3554,8 +3728,44 @@ fn hologram(w: &mut World, sender: &Sender, tail: &str) -> Res {
                 &[&idx.to_string(), if top { "top" } else { "bottom" }, &jnum(margin)],
             )
         }
-        "viewrange" | "verticalviewrange" | "updaterate" | "bgcolor" | "edit_npc" => {
-            return Err(err(w, M_UNSUPPORTED, &[&format!("hologram {action}")]));
+        "viewrange" | "verticalviewrange" => {
+            let Some(r) = words.get(1) else {
+                return Err(usage_of(w, "hologram"));
+            };
+            let r: i64 = r.parse().map_err(|_| err(w, M_INVALID_NUMBER, &[]))?;
+            let vertical = action == "verticalviewrange";
+            let key = if vertical { "verticalViewRange" } else { "viewRange" };
+            npc_mut(w, id)?.map.put(&["traits", "hologramtrait", key], Node::int(r));
+            ok(w, if vertical { M_HOLO_VVIEW_SET } else { M_HOLO_VIEW_SET }, &[&name, &r.to_string()])
+        }
+        "updaterate" => {
+            let Some(r) = words.get(1) else {
+                return Err(usage_of(w, "hologram"));
+            };
+            let ticks = crate::horizon_citizens_core::config::duration_ticks(r)
+                .or_else(|| r.parse::<u32>().ok())
+                .ok_or_else(|| usage_of(w, "hologram"))?;
+            npc_mut(w, id)?.map.put(&["traits", "hologramtrait", "hologramUpdateRate"], Node::int(i64::from(ticks)));
+            ok(w, M_HOLO_RATE_SET, &[&name, &ticks.to_string()])
+        }
+        "bgcolor" => {
+            if words.len() <= 2 {
+                return Err(err(w, M_HOLO_INVALID_LINE, &[]));
+            }
+            let argb = parse_color(words[2]).ok_or_else(|| err(w, M_INVALID_NUMBER, &[]))?;
+            let which = words[1];
+            match which {
+                "name" => npc_mut(w, id)?.map.put(&["traits", "hologramtrait", "nameBgcolor"], Node::int(i64::from(argb))),
+                "template" => npc_mut(w, id)?.map.put(&["traits", "hologramtrait", "templateBgcolor"], Node::int(i64::from(argb))),
+                _ => {
+                    let idx = line(w, 1, len)?;
+                    npc_mut(w, id)?.set_hologram_bgcolor(idx, argb);
+                }
+            }
+            ok(w, M_HOLO_BG_SET, &[which, &format!("Color:[argb0x{:08X}]", argb as u32)])
+        }
+        "edit_npc" => {
+            return Err(err(w, M_UNSUPPORTED, &["hologram edit_npc"]));
         }
         _ => return Err(usage_of(w, "hologram")),
     };
@@ -3709,16 +3919,8 @@ fn command(w: &mut World, sender: &Sender, tail: &str) -> Res {
             }
             let key = npc_mut(w, id)?.add_command_spec(&spec);
             w.mark_dirty();
-            let mut out = ok(w, M_CMD_ADDED, &[&command, &key]);
-            let unenforced = w
-                .saves
-                .get(id)
-                .map(NpcData::commands)
-                .and_then(|c| c.into_iter().find(|c| c.key == key))
-                .and_then(|c| c.unenforced);
-            if let Some(why) = unenforced {
-                out.extend(err(w, M_UNSUPPORTED, &[&format!("The command's {why} limit")]));
-            }
+            // Every limit (cooldowns, uses, delay, cost) is enforced when the click runs.
+            let out = ok(w, M_CMD_ADDED, &[&command, &key]);
             Ok(out)
         }
         "remove" => {

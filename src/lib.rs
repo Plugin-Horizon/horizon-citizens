@@ -40,6 +40,8 @@ struct State {
     installed: bool,
     skins_tx: Sender<core::skin::Fetched>,
     skins_rx: Receiver<core::skin::Fetched>,
+    work_tx: Sender<core::skin::Done>,
+    work_rx: Receiver<core::skin::Done>,
     /// The NPC the main hand claimed in the click being handled. The off hand of that same click
     /// is refused for it, as the original (asked once per click) did not run it at all.
     last_claim: Option<i32>,
@@ -48,6 +50,7 @@ struct State {
 impl Default for Citizens {
     fn default() -> Self {
         let (tx, rx) = channel();
+        let (work_tx, work_rx) = channel();
         Self {
             state: Mutex::new(State {
                 cfg: core::config::Config::default(),
@@ -55,6 +58,8 @@ impl Default for Citizens {
                 installed: false,
                 skins_tx: tx,
                 skins_rx: rx,
+                work_tx,
+                work_rx,
                 last_claim: None,
             }),
         }
@@ -662,6 +667,61 @@ fn reply(host: &mut dyn ServerHost, lines: Vec<String>) {
 
 /// A blocking GET with a short timeout; anything but 200 is an error (Mojang answers 204 / 404
 /// for an unknown name).
+/// A skin job off the server thread: mineskin's generator, or the export of a skin PNG.
+fn run_skin_work(work: core::skin::Work) -> Result<Option<core::skin::Generated>, String> {
+    use std::io::Read;
+    match work {
+        core::skin::Work::Export { url, path } => {
+            let resp = ureq::get(&url).timeout(std::time::Duration::from_secs(10)).call().map_err(|e| e.to_string())?;
+            let mut bytes = Vec::new();
+            resp.into_reader().take(10_000).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+            if let Some(dir) = Path::new(&path).parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+            Ok(None)
+        }
+        core::skin::Work::Generate { source, png, slim } => {
+            let resp = match png {
+                Some(png) => {
+                    let mut body = Vec::new();
+                    body.extend_from_slice(b"--*****\r\nContent-Disposition: form-data; name=\"file\"; filename=\"skin.png\"\r\nContent-Type: image/png\r\n\r\n");
+                    body.extend_from_slice(&png);
+                    body.extend_from_slice(b"\r\n--*****\r\nContent-Disposition: form-data; name=\"name\";\r\n\r\n\r\n");
+                    if slim {
+                        body.extend_from_slice(b"--*****\r\nContent-Disposition: form-data; name=\"variant\";\r\n\r\nslim\r\n");
+                    }
+                    body.extend_from_slice(b"--*****--\r\n");
+                    let target = if slim { "https://api.mineskin.org/generate/upload?model=slim" } else { "https://api.mineskin.org/generate/upload" };
+                    ureq::post(target)
+                        .set("User-Agent", "Citizens/2.0")
+                        .set("Content-Type", "multipart/form-data;boundary=*****")
+                        .timeout(std::time::Duration::from_secs(30))
+                        .send_bytes(&body)
+                }
+                None => {
+                    let mut req = serde_json::json!({ "url": source, "name": "" });
+                    if slim {
+                        req["variant"] = serde_json::json!("slim");
+                    }
+                    ureq::post("https://api.mineskin.org/generate/url")
+                        .set("User-Agent", "Citizens/2.0")
+                        .set("Accept", "application/json")
+                        .set("Content-Type", "application/json")
+                        .timeout(std::time::Duration::from_secs(30))
+                        .send_string(&req.to_string())
+                }
+            }
+            .map_err(|e| e.to_string())?;
+            if resp.status() != 200 {
+                return Err(format!("HTTP {}", resp.status()));
+            }
+            let body = resp.into_string().map_err(|e| e.to_string())?;
+            core::skin::parse_mineskin(&body).map(Some).ok_or_else(|| "bad answer".to_owned())
+        }
+    }
+}
+
 fn http_get(url: &str) -> Result<String, String> {
     let resp = ureq::get(url)
         .timeout(std::time::Duration::from_secs(10))
@@ -856,6 +916,14 @@ impl Citizens {
                         let text = plain(host, &legacy);
                         let _ = p.tell(host, text);
                     }
+                }
+                core::world::Op::SkinWork { npc, by, label, work } => {
+                    let tx = lock(&self.state).work_tx.clone();
+                    std::thread::spawn(move || {
+                        let export = matches!(work, core::skin::Work::Export { .. });
+                        let result = run_skin_work(work);
+                        let _ = tx.send(core::skin::Done { npc, by, label, export, result });
+                    });
                 }
                 core::world::Op::FetchSkin { npc, name } => {
                     let tx = tx.clone();
@@ -1252,6 +1320,7 @@ impl Hooks for Citizens {
         }
         self.install(&*host);
         let fetched: Vec<core::skin::Fetched> = lock(&self.state).skins_rx.try_iter().collect();
+        let works: Vec<core::skin::Done> = lock(&self.state).work_rx.try_iter().collect();
         let players: Vec<core::look::PlayerView> = host
             .players()
             .server_players()
@@ -1352,6 +1421,9 @@ impl Hooks for Citizens {
             w.player_perms = held.into_iter().collect();
             for f in fetched {
                 w.skin_fetched(f);
+            }
+            for d in works {
+                w.skin_work_done(d);
             }
             api::flush_damage(w);
             w.tick(&players);

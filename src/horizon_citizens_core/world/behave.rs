@@ -419,6 +419,18 @@ impl World {
         out
     }
 
+    /// `list --filter`: whether the boolean expression holds in the scope of `npc` (the selected NPC, none: no NPC).
+    pub fn filter_holds(&mut self, npc: Option<i32>, text: &str) -> Result<bool, String> {
+        let value = expr::ExprValue::parse(&expr::default_markup(text));
+        let mut sc = Scope::new();
+        sc.no_memory = true;
+        match npc {
+            Some(id) => self.fill_scope(id, &mut sc),
+            None => sc.no_inv = true,
+        }
+        Ok(value.as_bool(&mut sc))
+    }
+
     /// Whether an NPC runs a tree now (for tests and the info output).
     pub fn behavior_running(&self, id: i32) -> bool {
         self.behaviors.get(&id).is_some_and(|r| r.running)

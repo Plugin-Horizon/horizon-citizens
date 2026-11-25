@@ -111,6 +111,8 @@ pub enum Op {
     /// Look a skin name up (off the server thread); the answer comes back through
     /// [`World::skin_fetched`].
     FetchSkin { npc: i32, name: String },
+    /// `/npc skin --url|--file|-e`: a job off the server thread; the glue answers with [`World::skin_work_done`].
+    SkinWork { npc: i32, by: Option<u128>, label: String, work: crate::horizon_citizens_core::skin::Work },
     /// Turn an NPC's entity (`Host::set_entity_rotation`: head and body, no `rotate` command);
     /// `fallback` is the console command for when the host refuses.
     Rotate { dimension: String, entity: u32, yaw: f32, pitch: f32, fallback: String },
@@ -509,6 +511,8 @@ pub struct World {
     pub targets: BTreeMap<i32, (u128, bool)>,
     /// Temporary NPCs that go at a tick (`create --temporaryduration`).
     temp_expire: Vec<(u64, i32)>,
+    /// Temporary hologram lines (`hologram add --duration`): (due tick, NPC, text).
+    holo_expire: Vec<(u64, i32, String)>,
     pub create_charge: Option<fn(u128, f64) -> Result<String, String>>,
     /// The behavior trees of the NPCs that have the `behavior` trait.
     behaviors: BTreeMap<i32, behave::BehaviorRun>,
@@ -600,6 +604,7 @@ impl World {
             create_charge: None,
             targets: BTreeMap::new(),
             temp_expire: Vec::new(),
+            holo_expire: Vec::new(),
             behaviors: BTreeMap::new(),
             signals: crate::horizon_citizens_core::behavior::Signals::default(),
             live_stats: HashMap::new(),
@@ -806,7 +811,7 @@ impl World {
         };
         self.dead.remove(&id);
         if npc.is_player()
-            && !npc.skin().has_texture()
+            && (!npc.skin().has_texture() || npc.update_skins() && npc.skin().name.is_some())
             && self.cfg.skins.fetch
             && !self.fetching.contains(&id)
         {
@@ -848,6 +853,11 @@ impl World {
             out.push((u, cmd));
         }
         out
+    }
+
+    /// `hologram add --duration`: the line `text` of NPC `id` goes after `ticks`.
+    pub fn expire_hologram_line(&mut self, id: i32, text: &str, ticks: u64) {
+        self.holo_expire.push((self.tick + ticks, id, text.to_owned()));
     }
 
     /// Puts the hologram lines up again (after a change or a move).
@@ -1764,6 +1774,41 @@ impl World {
         }
     }
 
+    /// A skin job finished (`--url`, `--file`, `-e`): applies the skin and tells whoever asked.
+    pub fn skin_work_done(&mut self, d: crate::horizon_citizens_core::skin::Done) {
+        let name = self.saves.get(d.npc).map(NpcData::name).unwrap_or_default();
+        let lines: Vec<String> = match (&d.result, d.export) {
+            (Ok(_), true) => crate::horizon_citizens_core::commands::reply_ok(self, "Exported skin to [[{0}]]", &[&d.label]),
+            (Ok(Some(g)), false) => {
+                if let Some(npc) = self.saves.get_mut(d.npc) {
+                    let keep = npc.skin().name;
+                    npc.set_skin(&Skin { name: keep, texture: Some(g.value.clone()), signature: g.signature.clone() });
+                    self.mark_dirty();
+                    self.respawn(d.npc);
+                }
+                crate::horizon_citizens_core::commands::reply_ok(self, "Downloaded [[{0}]]''s skin from [[{1}]].", &[&name, &d.label])
+            }
+            (Ok(None), false) | (Err(_), false) => crate::horizon_citizens_core::commands::reply_err(
+                self,
+                "Error downloading skin texture from [[{0}]]. Are you sure the URL is valid?",
+                &[&d.label],
+            ),
+            (Err(e), true) => crate::horizon_citizens_core::commands::reply_err(self, "Couldn''t parse texture: {0}", &[e]),
+        };
+        match d.by {
+            Some(player) => {
+                for legacy in lines {
+                    self.ops.push(Op::Tell { player, legacy });
+                }
+            }
+            None => {
+                for l in lines {
+                    eprintln!("[citizens] {l}");
+                }
+            }
+        }
+    }
+
     // ---- the tick -----------------------------------------------------------------------
 
     /// One server tick, with the players online.
@@ -2253,6 +2298,19 @@ impl World {
         {
             eprintln!("[citizens] could not save NPCs: {e}");
         }
+        if !self.holo_expire.is_empty() {
+            let now = self.tick;
+            let (due, wait): (Vec<_>, Vec<_>) = std::mem::take(&mut self.holo_expire).into_iter().partition(|(t, _, _)| *t <= now);
+            self.holo_expire = wait;
+            for (_, id, text) in due {
+                let at = self.saves.get(id).and_then(|n| n.hologram_lines().iter().position(|l| l.text == text));
+                if let (Some(i), Some(n)) = (at, self.saves.get_mut(id)) {
+                    n.remove_hologram_line(i);
+                    self.mark_dirty();
+                    self.refresh_holograms(id);
+                }
+            }
+        }
         if !self.temp_expire.is_empty() {
             let now = self.tick;
             let (due, wait): (Vec<_>, Vec<_>) = std::mem::take(&mut self.temp_expire).into_iter().partition(|(t, _)| *t <= now);
@@ -2525,7 +2583,17 @@ impl World {
             {
                 let (x, z) = (self.rng.between(-(xr as f64), xr as f64), self.rng.between(-(xr as f64), xr as f64));
                 let y = self.rng.between(-(yr as f64), yr as f64).round();
-                set.push((id, [at.x + x, at.y + y, at.z + z], speed, false));
+                let mut goal = [at.x + x, at.y + y, at.z + z];
+                // `wander add`: the NPC stays inside the boxes (x/y range) around the region centres.
+                let centres: Vec<Location> = npc.wander_centres().into_iter().filter(|c| c.world == at.world).collect();
+                let inside = |p: [f64; 3]| {
+                    centres.iter().any(|c| (p[0] - c.x).abs() <= xr as f64 && (p[1] - c.y).abs() <= yr as f64 && (p[2] - c.z).abs() <= xr as f64)
+                };
+                if !centres.is_empty() && !inside(goal) {
+                    let c = &centres[((self.rng.next_f64() * centres.len() as f64) as usize).min(centres.len() - 1)];
+                    goal = [c.x + self.rng.between(-(xr as f64), xr as f64), c.y + self.rng.between(-(yr as f64), yr as f64).round(), c.z + self.rng.between(-(xr as f64), xr as f64)];
+                }
+                set.push((id, goal, speed, false));
                 // Citizens' default delay is not in its plugin source; two to six seconds is a guess.
                 let wait = if delay > 0 { delay as u64 } else { 40 + (self.rng.next_f64() * 80.0) as u64 };
                 self.wander_at.insert(id, self.tick + wait);

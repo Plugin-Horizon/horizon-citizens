@@ -190,6 +190,8 @@ pub struct HologramLine {
     pub billboard: String,
     pub see_through: bool,
     pub shadowed: bool,
+    /// `renderer.bgcolor`: signed ARGB, when set.
+    pub bgcolor: Option<i32>,
 }
 
 impl HologramLine {
@@ -201,6 +203,7 @@ impl HologramLine {
             billboard: "CENTER".into(),
             see_through: false,
             shadowed: true,
+            bgcolor: None,
         }
     }
 }
@@ -559,6 +562,14 @@ impl NpcData {
             signature: s("signature"),
         }
     }
+    /// `skin -l` (`skintrait.updateSkins`): fetch the latest texture of the skin name on every spawn.
+    pub fn update_skins(&self) -> bool {
+        self.map.at(&["traits", "skintrait", "updateSkins"]).and_then(bool_of).unwrap_or(false)
+    }
+    pub fn set_update_skins(&mut self, on: bool) {
+        self.map.put(&["traits", "skintrait", "updateSkins"], Node::bool(on));
+        self.add_trait_name("skintrait");
+    }
     /// Sets the skin. A name alone clears the cached texture, which the mod then fetches.
     pub fn set_skin(&mut self, skin: &Skin) {
         let t = self.map.map_at(&["traits", "skintrait"]);
@@ -796,6 +807,53 @@ impl NpcData {
         };
         Some((i("xrange", 25), i("yrange", 3), i("delay", -1)))
     }
+    /// The wander provider's region centres (`regionCentres`), each a saved location.
+    pub fn wander_centres(&self) -> Vec<Location> {
+        let Some(list) = self.map.at(&["traits", "waypoints", "wander", "regionCentres"]).and_then(Node::as_seq) else {
+            return Vec::new();
+        };
+        list.iter()
+            .filter_map(|n| {
+                let l = n.as_map()?;
+                Some(Location {
+                    world: l.get("world").and_then(Node::text)?,
+                    x: l.get("x").and_then(Node::as_f64)?,
+                    y: l.get("y").and_then(Node::as_f64)?,
+                    z: l.get("z").and_then(Node::as_f64)?,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    body_yaw: 0.0,
+                })
+            })
+            .collect()
+    }
+    /// `wander add x y z [world]`: one more region centre.
+    pub fn add_wander_centre(&mut self, loc: &Location) {
+        let mut centres: Vec<Node> = self
+            .map
+            .at(&["traits", "waypoints", "wander", "regionCentres"])
+            .and_then(Node::as_seq)
+            .map(<[Node]>::to_vec)
+            .unwrap_or_default();
+        let mut n = Node::map();
+        if let Some(m) = n.as_map_mut() {
+            m.set("world", Node::str(&loc.world));
+            m.set("x", Node::float(loc.x));
+            m.set("y", Node::float(loc.y));
+            m.set("z", Node::float(loc.z));
+        }
+        centres.push(n);
+        self.map.put(&["traits", "waypoints", "wander", "regionCentres"], Node::seq(centres));
+        self.add_trait_name("waypoints");
+    }
+    /// `wander worldguardregion <name>` (`worldguardRegion`): the region the NPC stays inside.
+    pub fn wander_region(&self) -> Option<String> {
+        text_at(&self.map, &["traits", "waypoints", "wander", "worldguardRegion"])
+    }
+    pub fn set_wander_region(&mut self, name: &str) {
+        self.map.put(&["traits", "waypoints", "wander", "worldguardRegion"], Node::str(name));
+        self.add_trait_name("waypoints");
+    }
     /// The pose to hold (`traits.poses.defaultPose`) as (yaw, pitch).
     pub fn default_pose(&self) -> Option<(f32, f32)> {
         let name = text_at(&self.map, &["traits", "poses", "defaultPose"])?.to_ascii_lowercase();
@@ -834,6 +892,7 @@ impl NpcData {
                             .unwrap_or_else(|| "CENTER".into()),
                         see_through: flag("seeThrough", false),
                         shadowed: flag("shadowed", true),
+                        bgcolor: m.at(&["renderer", "bgcolor"]).and_then(Node::as_i64).map(|v| v as i32),
                     })
                 }
                 // Older saves keep plain strings.
@@ -919,6 +978,25 @@ impl NpcData {
             }
             None => false,
         }
+    }
+    /// `hologram bgcolor <line> <color>`: the line's background (signed ARGB), under `renderer.bgcolor`.
+    pub fn set_hologram_bgcolor(&mut self, i: usize, argb: i32) -> bool {
+        let seq = self.hologram_seq();
+        match seq.get_mut(i) {
+            Some(node) => {
+                if !node.is_map() {
+                    let text = node.text().unwrap_or_default();
+                    *node = Self::line_node(&text);
+                }
+                node.map_at(&["renderer"]).set("bgcolor", Node::int(i64::from(argb)));
+                true
+            }
+            None => false,
+        }
+    }
+    /// A hologram setting that is an integer (`viewRange`, `nameBgcolor`, ...).
+    pub fn hologram_int(&self, key: &str) -> Option<i64> {
+        self.map.at(&["traits", "hologramtrait", key]).and_then(Node::as_i64)
     }
     pub fn remove_hologram_line(&mut self, i: usize) -> bool {
         let seq = self.hologram_seq();

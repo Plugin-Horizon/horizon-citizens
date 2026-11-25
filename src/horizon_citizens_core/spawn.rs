@@ -290,8 +290,12 @@ pub fn hologram(npc: &NpcData, uuid: u128, dimension: &str, loc: &Location, cfg:
             "fixed" | "vertical" | "horizontal" | "center" => billboard,
             _ => "center".into(),
         };
+        let background = line
+            .bgcolor
+            .or_else(|| npc.hologram_int("templateBgcolor").map(|v| v as i32))
+            .map_or(String::new(), |c| format!(",background:{c}"));
         let data = format!(
-            "{{UUID:{},Tags:[\"{HOLOGRAM_TAG}\",\"{TAG}_{}\"],text:{},billboard:\"{billboard}\",see_through:{}b,shadow:{}b,alignment:\"center\"}}",
+            "{{UUID:{},Tags:[\"{HOLOGRAM_TAG}\",\"{TAG}_{}\"],text:{},billboard:\"{billboard}\",see_through:{}b,shadow:{}b,alignment:\"center\"{background}}}",
             int_array_snbt(id),
             npc.id,
             text::component_snbt(&line.text),
@@ -310,8 +314,9 @@ pub fn hologram(npc: &NpcData, uuid: u128, dimension: &str, loc: &Location, cfg:
     out.reverse();
     if name_hologram(npc) {
         let id = derived_uuid(uuid, NAME_HOLOGRAM);
+        let background = npc.hologram_int("nameBgcolor").map_or(String::new(), |c| format!(",background:{}", c as i32));
         let data = format!(
-            "{{UUID:{},Tags:[\"{HOLOGRAM_TAG}\",\"{TAG}_{}\"],text:{},billboard:\"center\",see_through:0b,shadow:1b,alignment:\"center\",transformation:{{translation:[0f,0.2f,0f],left_rotation:[0f,0f,0f,1f],right_rotation:[0f,0f,0f,1f],scale:[1f,1f,1f]}}}}",
+            "{{UUID:{},Tags:[\"{HOLOGRAM_TAG}\",\"{TAG}_{}\"],text:{},billboard:\"center\",see_through:0b,shadow:1b,alignment:\"center\"{background},transformation:{{translation:[0f,0.2f,0f],left_rotation:[0f,0f,0f,1f],right_rotation:[0f,0f,0f,1f],scale:[1f,1f,1f]}}}}",
             int_array_snbt(id),
             npc.id,
             text::component_snbt(&npc.name()),
