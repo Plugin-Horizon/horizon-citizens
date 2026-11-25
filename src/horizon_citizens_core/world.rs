@@ -88,6 +88,12 @@ pub enum Op {
     /// A command's price, paid: take `levels` experience levels and set each slot to the count it
     /// keeps (0 empties it). Sent only after every check of the command passed.
     Charge { player: u128, levels: i32, slots: Vec<(u32, u32)> },
+    /// `NMS.setShouldJump`: the mob's jump control fires on its next tick.
+    Jump { entity: u32 },
+    /// Seat a rider on a vehicle entity (`Entity.startRiding`): the player `player`, else the entity `rider`.
+    Ride { player: Option<u128>, rider: u32, vehicle: u32 },
+    /// Take a rider off its vehicle (`leaveVehicle`): the player `player`, else the entity `entity`.
+    Dismount { player: Option<u128>, entity: u32 },
 }
 
 /// What other mods hear (see `api`).
@@ -196,6 +202,8 @@ pub struct World {
     pub held_perms: BTreeSet<String>,
     /// The clicking player's level and inventory (the host reads them before the click).
     pub player_cost: Option<PlayerCost>,
+    /// `MountTrait.currentMount`: NPC id -> (its entity, the entity it sits on).
+    mounted: HashMap<i32, (u32, u32)>,
     teams_made: BTreeSet<String>,
     fetching: BTreeSet<i32>,
     pub tick: u64,
@@ -244,6 +252,7 @@ impl World {
             delayed: Vec::new(),
             held_perms: BTreeSet::new(),
             player_cost: None,
+            mounted: HashMap::new(),
             teams_made: BTreeSet::new(),
             fetching: BTreeSet::new(),
             tick: 0,
@@ -857,7 +866,12 @@ impl World {
             }
             let line = text::fill_placeholders(&c.command, &player.name, &npc.name(), id);
             let line = line.trim_start_matches('/').to_owned();
-            let op = if c.player || c.op {
+            // `CommandTrait.NPCCommand.run`: `npc` swaps the clicker for the NPC when the NPC is a player.
+            let npc_uuid = npc.uuid().filter(|_| c.npc && c.player && npc.kind().eq_ignore_ascii_case("PLAYER"));
+            let op = if let Some(me) = npc_uuid {
+                let who = crate::horizon_citizens_core::ids::format_uuid(me);
+                Op::Console(format!("execute as {who} at {who} run {line}"))
+            } else if c.player || c.op {
                 if self.cfg.commands.player_commands_via_execute {
                     let who = crate::horizon_citizens_core::ids::format_uuid(player.uuid);
                     Op::Console(format!("execute as {who} at {who} run {line}"))
@@ -991,6 +1005,48 @@ impl World {
     // ---- the tick -----------------------------------------------------------------------
 
     /// One server tick, with the players online.
+    /// `MountTrait.checkMounted`: seats the NPC on the NPC its `mountedon` names, once both are spawned
+    /// (again after either respawned, its entity being new).
+    pub fn check_mounted(&mut self, id: i32) {
+        let Some(mine) = self.entity_of(id) else {
+            self.mounted.remove(&id);
+            return;
+        };
+        let on = self
+            .saves
+            .get(id)
+            .and_then(|n| n.map.at(&["traits", "mounttrait", "mountedon"]).and_then(Node::text))
+            .and_then(|s| crate::horizon_citizens_core::ids::parse_uuid(&s));
+        let Some(vehicle) = on.and_then(|u| self.saves.by_uuid(u)).map(|n| n.id).and_then(|o| self.entity_of(o)) else {
+            return;
+        };
+        if self.mounted.get(&id) != Some(&(mine, vehicle)) {
+            self.mounted.insert(id, (mine, vehicle));
+            self.ops.push(Op::Ride { player: None, rider: mine, vehicle });
+        }
+    }
+
+    fn check_all_mounts(&mut self) {
+        let ids: Vec<i32> = self.saves.npcs.iter().map(|n| n.id).collect();
+        for id in ids {
+            self.check_mounted(id);
+        }
+    }
+
+    /// `MountTrait.unmount`: off the vehicle and forgotten, when it sits on one.
+    pub fn unmount(&mut self, id: i32) {
+        if self.mounted.remove(&id).is_none() {
+            return;
+        }
+        if let Some(entity) = self.entity_of(id) {
+            self.ops.push(Op::Dismount { player: None, entity });
+        }
+        if let Some(n) = self.saves.get_mut(id) {
+            n.map.drop_path(&["traits", "mounttrait", "mountedon"]);
+        }
+        self.mark_dirty();
+    }
+
     pub fn tick(&mut self, players: &[PlayerView]) {
         self.tick += 1;
         if self.stopping {
@@ -1009,6 +1065,7 @@ impl World {
             }
         }
         self.walk();
+        self.check_all_mounts();
         if self.tick % 2 == 0 {
             self.look_close(players);
         }
@@ -1654,6 +1711,27 @@ mod tests {
         let ops = w.take_ops();
         assert!(!ops.iter().any(|o| matches!(o, Op::Charge { .. })));
         assert!(tells(&ops).iter().any(|t| t == "You have reached the maximum number of uses (1)."));
+    }
+
+    #[test]
+    fn npc_flag_runs_a_player_command_as_the_npc() {
+        use crate::horizon_citizens_core::yaml::Node;
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        {
+            let n = w.saves.get_mut(id).unwrap();
+            n.add_command("spawn", Hand::Right, true, false);
+            let mut cmds = n.map.map_at(&["traits", "commandtrait", "commands"]).clone();
+            if let Some(e) = cmds.get_mut("0").filter(|e| e.is_map()) {
+                e.set("npc", Node::bool(true));
+            }
+            n.map.map_at(&["traits", "commandtrait"]).set("commands", cmds);
+        }
+        let uuid = crate::horizon_citizens_core::ids::format_uuid(w.saves.get(id).unwrap().uuid().unwrap());
+        w.take_ops();
+        assert!(w.on_click(10, &player(1.0, 1.0), Hand::Right, None));
+        let cmds = consoles(&mut w);
+        assert_eq!(cmds, vec![format!("execute as {uuid} at {uuid} run spawn")]);
     }
 
     #[test]

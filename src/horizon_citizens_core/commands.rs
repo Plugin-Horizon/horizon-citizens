@@ -320,6 +320,8 @@ const CMDS: &[Cmd] = &[
     cmd("collidable", &[], "collidable --fluids [true|false]", 1, Some(2), "citizens.npc.collidable"),
     cmd("knockback", &[], "knockback (--explicit true|false)", 1, Some(2), "citizens.npc.knockback"),
     cmd("leashable", &[], "leashable", 1, Some(2), "citizens.npc.leashable"),
+    cmd("mount", &[], "mount (--onnpc <npc id|uuid>) (-d(ismount)) (-c(ancel))", 1, Some(1), "citizens.npc.mount"),
+    cmd("jump", &[], "jump", 1, Some(1), "citizens.npc.jump"),
     cmd("passive", &[], "passive (--set [true|false])", 1, Some(2), "citizens.npc.passive"),
     cmd("pickupitems", &[], "pickupitems (--set [true|false])", 1, Some(2), "citizens.npc.pickupitems"),
     cmd("sitting", &[], "sitting (--explicit [true|false])", 1, Some(2), "citizens.npc.sitting"),
@@ -336,7 +338,7 @@ const CMDS: &[Cmd] = &[
 ];
 
 /// Citizens modifiers this port does not have (they answer "not supported", not "Too many arguments").
-const CITIZENS_ONLY: &[&str] = &["behavior", "cload", "pushable", "configgui", "copier", "disguise", "drops", "eval", "fish", "inventory", "jump", "mount", "nophysics", "shop", "shopitem", "showshop", "spectate", "target", "velocity", "vel", "warden", "donkey", "mule"];
+const CITIZENS_ONLY: &[&str] = &["behavior", "cload", "pushable", "configgui", "copier", "disguise", "drops", "eval", "fish", "inventory", "nophysics", "shop", "shopitem", "showshop", "spectate", "target", "velocity", "vel", "warden", "donkey", "mule"];
 
 fn find_cmd(sub: &str) -> Option<&'static Cmd> {
     let sub = sub.to_ascii_lowercase();
@@ -533,6 +535,8 @@ const TAILS: &[(&str, &[&str])] = &[
     ("collidable", &["", "--fluids true", "--fluids false"]),
     ("knockback", &["", "--explicit true", "--explicit false"]),
     ("leashable", &[""]),
+    ("mount", &["", "--onnpc", "-d", "-c"]),
+    ("jump", &[""]),
     ("passive", &["", "--set true", "--set false"]),
     ("pickupitems", &["", "--set true", "--set false"]),
     ("sitting", &["", "--explicit true", "--explicit false"]),
@@ -679,6 +683,8 @@ pub const NODES: &[&str] = &[
     "citizens.npc.collidable",
     "citizens.npc.knockback",
     "citizens.npc.leashable",
+    "citizens.npc.mount",
+    "citizens.npc.jump",
     "citizens.npc.passive",
     "citizens.npc.pickupitems",
     "citizens.npc.sitting",
@@ -767,6 +773,8 @@ const PARENT_EDGES: &[(&str, &str)] = &[
     ("citizens.npc.*", "citizens.npc.collidable"),
     ("citizens.npc.*", "citizens.npc.knockback"),
     ("citizens.npc.*", "citizens.npc.leashable"),
+    ("citizens.npc.*", "citizens.npc.mount"),
+    ("citizens.npc.*", "citizens.npc.jump"),
     ("citizens.npc.*", "citizens.npc.passive"),
     ("citizens.npc.*", "citizens.npc.pickupitems"),
     ("citizens.npc.*", "citizens.npc.sitting"),
@@ -840,6 +848,8 @@ const PARENT_EDGES: &[(&str, &str)] = &[
     ("citizens.*", "citizens.npc.collidable"),
     ("citizens.*", "citizens.npc.knockback"),
     ("citizens.*", "citizens.npc.leashable"),
+    ("citizens.*", "citizens.npc.mount"),
+    ("citizens.*", "citizens.npc.jump"),
     ("citizens.*", "citizens.npc.passive"),
     ("citizens.*", "citizens.npc.pickupitems"),
     ("citizens.*", "citizens.npc.sitting"),
@@ -1461,6 +1471,8 @@ fn npc(w: &mut World, sender: &Sender, rest: &str) -> Res {
         "command" => command(w, sender, tail),
         "text" => text_lines(w, sender, tail),
         "equip" => equip(w, sender, &args),
+        "mount" => mount(w, sender, &args),
+        "jump" => jump(w, sender),
         "path" => path(w, sender, tail),
         n if modifiers::handles(n) => modifiers::run(w, sender, n, &args),
         n if mobs::handles(n) => mobs::run(w, sender, n, tail),
@@ -3437,6 +3449,77 @@ fn item_id(raw: &str) -> Option<String> {
         .then(|| plain.to_owned())
 }
 
+const M_MOUNT_FAILED: &str = "Couldn''t mount [[{0}]].";
+const M_MOUNT_ITSELF: &str = "Can''t mount NPC on itself.";
+const M_MOUNT_MUST_SPAWN: &str = "Couldn''t mount [[{0}]]. Make sure that the destination NPC ID is correct and it is spawned.";
+const M_NOT_CONTROLLABLE: &str = "[[{0}]] is not controllable.";
+
+/// `/npc mount (--onnpc <npc id|uuid>) (-d) (-c)`: `-d` takes the sender off whatever they ride; `--onnpc`
+/// seats the NPC on another one (kept in `mounttrait`, redone when either respawns); `-c` takes it off;
+/// otherwise the sender rides the NPC when it is controllable.
+fn mount(w: &mut World, sender: &Sender, args: &Args) -> Res {
+    use crate::horizon_citizens_core::world::Op;
+    let id = target(w, sender)?;
+    if args.has('d') {
+        if let Some(player) = sender.uuid {
+            w.push_op(Op::Dismount { player: Some(player), entity: 0 });
+        }
+        return Ok(Vec::new());
+    }
+    if let Some(on) = args.value("onnpc") {
+        let other = crate::horizon_citizens_core::ids::parse_uuid(on)
+            .and_then(|u| w.saves.by_uuid(u).map(|n| n.id))
+            .or_else(|| on.parse::<i32>().ok().filter(|n| w.saves.get(*n).is_some()));
+        let Some(other) = other.filter(|o| w.is_spawned(*o)) else {
+            return Err(err(w, M_MOUNT_MUST_SPAWN, &[on]));
+        };
+        if other == id {
+            return Err(err(w, M_MOUNT_ITSELF, &[]));
+        }
+        let uuid = w.saves.get(other).and_then(NpcData::uuid).unwrap_or(0);
+        let npc = npc_mut(w, id)?;
+        npc.map.put(
+            &["traits", "mounttrait", "mountedon"],
+            Node::str(&crate::horizon_citizens_core::ids::format_uuid(uuid)),
+        );
+        npc.add_trait_name("mounttrait");
+        w.mark_dirty();
+        w.check_mounted(id);
+        return Ok(Vec::new());
+    }
+    if args.has('c') {
+        w.unmount(id);
+        return Ok(Vec::new());
+    }
+    let name = w.saves.get(id).map(NpcData::name).unwrap_or_default();
+    let controllable = w
+        .saves
+        .get(id)
+        .and_then(|n| n.map.at(&["traits", "controllable", "enabled"]))
+        .and_then(Node::as_bool)
+        .unwrap_or(false);
+    if !controllable {
+        return Ok(ok(w, M_NOT_CONTROLLABLE, &[&name]));
+    }
+    let Some(player) = sender.uuid else {
+        return Err(err(w, M_MUST_BE_INGAME, &[]));
+    };
+    match w.entity_of(id) {
+        Some(vehicle) => w.push_op(Op::Ride { player: Some(player), rider: 0, vehicle }),
+        None => return Ok(ok(w, M_MOUNT_FAILED, &[&name])),
+    }
+    Ok(Vec::new())
+}
+
+/// `/npc jump`: the NPC jumps on its next tick (`NMS.setShouldJump`).
+fn jump(w: &mut World, sender: &Sender) -> Res {
+    let id = target(w, sender)?;
+    if let Some(entity) = w.entity_of(id) {
+        w.push_op(crate::horizon_citizens_core::world::Op::Jump { entity });
+    }
+    Ok(Vec::new())
+}
+
 /// `/npc equip <slot> [item] [amount]`: an empty slot when no item is given (Citizens opens a GUI).
 fn equip(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let id = target(w, sender)?;
@@ -4293,5 +4376,63 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), nodes.len());
+    }
+
+    /// Two NPCs standing in the world (entities 10 and 11), the first selected.
+    fn two_spawned(w: &mut World, s: &Sender) -> (i32, i32) {
+        let a = w.create("Rider", "PLAYER", Location { world: "world".into(), x: 0.0, y: 64.0, z: 0.0, yaw: 0.0, pitch: 0.0, body_yaw: 0.0 }, None);
+        let b = w.create("Horse", "PLAYER", Location { world: "world".into(), x: 1.0, y: 64.0, z: 0.0, yaw: 0.0, pitch: 0.0, body_yaw: 0.0 }, None);
+        for (id, entity) in [(a, 10), (b, 11)] {
+            let uuid = w.saves.get(id).unwrap().uuid();
+            w.on_entity_join("minecraft:overworld", entity, uuid, true);
+        }
+        run_ok(w, s, &format!("npc select {a}"));
+        w.take_ops();
+        (a, b)
+    }
+
+    #[test]
+    fn mount_onnpc_is_saved_ridden_and_cancelled() {
+        let mut w = world();
+        let s = sender(2);
+        let (a, b) = two_spawned(&mut w, &s);
+        let r = run_ok(&mut w, &s, &format!("npc mount --onnpc {a}"));
+        assert!(r[0].contains("Can't mount NPC on itself."), "{r:?}");
+        let r = run_ok(&mut w, &s, "npc mount --onnpc 99");
+        assert!(r[0].contains("Make sure that the destination NPC ID is correct and it is spawned."), "{r:?}");
+        assert!(run_ok(&mut w, &s, &format!("npc mount --onnpc {b}")).is_empty());
+        let ops = w.take_ops();
+        assert!(ops.contains(&Op::Ride { player: None, rider: 10, vehicle: 11 }), "{ops:?}");
+        let saved = w.saves.get(a).unwrap().map.at(&["traits", "mounttrait", "mountedon"]).and_then(Node::text);
+        assert_eq!(saved, w.saves.get(b).unwrap().map.at(&["uuid"]).and_then(Node::text));
+        // Seated once; a tick does not seat it again.
+        w.tick(&[]);
+        assert!(!w.take_ops().iter().any(|o| matches!(o, Op::Ride { .. })));
+        run_ok(&mut w, &s, "npc mount -c");
+        assert!(w.take_ops().contains(&Op::Dismount { player: None, entity: 10 }));
+        assert!(w.saves.get(a).unwrap().map.at(&["traits", "mounttrait", "mountedon"]).is_none());
+    }
+
+    #[test]
+    fn mount_needs_controllable_and_dismount_frees_the_sender() {
+        let mut w = world();
+        let s = sender(2);
+        two_spawned(&mut w, &s);
+        let r = run_ok(&mut w, &s, "npc mount");
+        assert!(r[0].contains("is not controllable."), "{r:?}");
+        run_ok(&mut w, &s, "npc controllable");
+        assert!(run_ok(&mut w, &s, "npc mount").is_empty());
+        assert!(w.take_ops().contains(&Op::Ride { player: Some(0xA1), rider: 0, vehicle: 10 }));
+        run_ok(&mut w, &s, "npc mount -d");
+        assert!(w.take_ops().contains(&Op::Dismount { player: Some(0xA1), entity: 0 }));
+    }
+
+    #[test]
+    fn jump_asks_the_mob_to_jump() {
+        let mut w = world();
+        let s = sender(2);
+        two_spawned(&mut w, &s);
+        assert!(run_ok(&mut w, &s, "npc jump").is_empty());
+        assert!(w.take_ops().contains(&Op::Jump { entity: 10 }));
     }
 }

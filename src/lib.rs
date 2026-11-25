@@ -210,6 +210,42 @@ fn held_item_id(host: &dyn ServerHost, player: PlayerRef) -> Option<String> {
     Some(stack.item().id(host))
 }
 
+/// What a command's price is charged against: the experience level and the main inventory (slots 0 to 35).
+fn cost_state(host: &dyn ServerHost, p: PlayerRef) -> core::world::PlayerCost {
+    core::world::PlayerCost {
+        levels: p.experience(host).map_or(0, |x| x.level),
+        slots: p
+            .inventory_slots(host)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(slot, _)| *slot < 36)
+            .map(|(slot, st)| {
+                let id = st.item().id(host).to_string();
+                let id = if id.contains(':') { id } else { format!("minecraft:{id}") };
+                (slot, id, st.count())
+            })
+            .collect(),
+    }
+}
+
+/// Pays a command's price: takes the levels, then sets each slot to the count it keeps.
+fn charge(host: &mut dyn ServerHost, uuid: u128, levels: i32, slots: &[(u32, u32)]) {
+    let Some(p) = host.player(uuid) else { return };
+    if levels > 0 {
+        let now = p.experience(&*host).map_or(0, |x| x.level);
+        let _ = p.set_experience_levels(host, (now - levels).max(0));
+    }
+    if !slots.is_empty() {
+        let held = p.inventory_slots(&*host).unwrap_or_default();
+        for (slot, keep) in slots {
+            let Some((_, st)) = held.iter().find(|(i, _)| i == slot) else { continue };
+            let mut st = st.clone();
+            let left = if *keep > 0 && st.set_count(*keep).is_ok() { Some(st) } else { None };
+            let _ = p.set_inventory_slot(host, *slot, left);
+        }
+    }
+}
+
 fn sender_of(info: &PlayerInfo, cfg: &core::config::Config) -> core::world::Sender {
     core::world::Sender {
         uuid: Some(info.view.uuid),
@@ -459,6 +495,30 @@ impl Citizens {
                         let _ = host.commands().run_command(&fallback);
                     }
                 }
+                core::world::Op::Charge { player, levels, slots } => charge(host, player, levels, &slots),
+                core::world::Op::Jump { entity } => {
+                    if let Some(mob) = host.entity(entity).and_then(|e| host.mob(e)) {
+                        let _ = mob.jump(host);
+                    }
+                }
+                core::world::Op::Ride { player, rider, vehicle } => {
+                    let rider = match player {
+                        Some(uuid) => host.player(uuid).map(|p| p.entity()),
+                        None => host.entity(rider),
+                    };
+                    if let (Some(rider), Some(vehicle)) = (rider, host.entity(vehicle)) {
+                        let _ = rider.start_riding(host, vehicle, false);
+                    }
+                }
+                core::world::Op::Dismount { player, entity } => {
+                    let rider = match player {
+                        Some(uuid) => host.player(uuid).map(|p| p.entity()),
+                        None => host.entity(entity),
+                    };
+                    if let Some(rider) = rider {
+                        let _ = rider.stop_riding(host);
+                    }
+                }
                 core::world::Op::Tell { player, legacy } => {
                     if let Some(p) = host.player(player) {
                         let text = plain(host, &legacy);
@@ -699,8 +759,10 @@ impl Hooks for Citizens {
         let held = held_item_id(&*host, player);
         let wanted = api::with_world(|w| w.command_perms(entity)).unwrap_or_default();
         let granted: std::collections::BTreeSet<String> = wanted.into_iter().filter(|n| holds(host, player, n)).collect();
+        let cost = cost_state(&*host, player);
         let claimed = api::with_world(|w| {
             w.held_perms = granted;
+            w.player_cost = Some(cost);
             w.on_click(entity, &info.view, core::npc::Hand::Right, held.as_deref())
         })
         .unwrap_or(false);
@@ -725,8 +787,10 @@ impl Hooks for Citizens {
         };
         let wanted = api::with_world(|w| w.command_perms(entity)).unwrap_or_default();
         let granted: std::collections::BTreeSet<String> = wanted.into_iter().filter(|n| holds(host, player, n)).collect();
+        let cost = cost_state(&*host, player);
         let refused = api::with_world(|w| {
             w.held_perms = granted;
+            w.player_cost = Some(cost);
             w.on_click(entity, &info.view, core::npc::Hand::Left, None) && w.hit_refused(entity)
         })
         .unwrap_or(false);

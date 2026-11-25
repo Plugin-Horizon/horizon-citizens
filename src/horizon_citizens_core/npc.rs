@@ -97,6 +97,8 @@ pub struct NpcCommand {
     pub player: bool,
     /// Run as the player with operator rights.
     pub op: bool,
+    /// `npc`: with `player`, run as the NPC itself (a PLAYER-type NPC), not as the clicker.
+    pub npc: bool,
     /// Why the port does not run it (review C4): a limit it cannot enforce yet (`perms`, `n`,
     /// `cost`, per-command `cooldown`/`globalcooldown`/`delay`, or an `executionmode` other than
     /// `LINEAR`). Such a command is skipped rather than run for everyone, every time.
@@ -836,8 +838,8 @@ impl NpcData {
                     !(t.is_empty() || t == "null" || t.parse::<f64>().is_ok_and(|x| x <= 0.0))
                 }
             };
-            // Only what needs an economy or the NPC as a sender is still not run (cost, npc).
-            let unenforced = ["cost", "npc"]
+            // Only what needs an economy is still not run (cost).
+            let unenforced = ["cost"]
                 .into_iter()
                 .find(|k| set(k))
                 .map(str::to_owned);
@@ -858,6 +860,7 @@ impl NpcData {
                 },
                 player: m.get("player").and_then(bool_of).unwrap_or(false),
                 op: m.get("op").and_then(bool_of).unwrap_or(false),
+                npc: m.get("npc").and_then(bool_of).unwrap_or(false),
                 unenforced,
                 cooldown: m.get("cooldown").and_then(Node::as_i64).unwrap_or(0),
                 global_cooldown: m.get("globalcooldown").and_then(Node::as_i64).unwrap_or(0),
