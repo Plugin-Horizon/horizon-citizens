@@ -302,17 +302,29 @@ impl StackData {
         crate::horizon_citizens_core::items::ItemMeta { unmapped: Vec::new(), ..self.meta.clone() }
     }
 
-    /// The saved form: `type` in upper case, `amount`, and `meta` (the original blob when unchanged).
+    /// The saved form (`ItemStorage.saveItem`): `type` as the lower-case key, `amount`, `meta` (the original
+    /// blob when unchanged) and the `editable_components` copy of the name and lore.
     pub fn to_node(&self) -> Node {
         use crate::horizon_citizens_core::items;
         let mut n = Node::map();
-        n.set("type", Node::str(&self.id.trim_start_matches("minecraft:").to_ascii_uppercase()));
+        n.set("type", Node::str(&self.id.trim_start_matches("minecraft:").to_ascii_lowercase()));
         n.set("amount", Node::int(self.count));
         let empty = self.mapped_meta() == items::ItemMeta::default();
         if let Some(raw) = &self.raw_meta {
             n.set("meta", Node::str(raw));
         } else if !empty {
             n.set("meta", Node::str(&items::encode_meta(&self.meta)));
+        }
+        if self.meta.display_name.is_some() || !self.meta.lore.is_empty() {
+            let mut c = Node::map();
+            if let Some(name) = &self.meta.display_name {
+                c.set("display_name", Node::str(name));
+            }
+            if !self.meta.lore.is_empty() {
+                c.set("lore", Node::str(&self.meta.lore.join("<br>")));
+            }
+            c.set("edited", Node::bool(false));
+            n.set("editable_components", c);
         }
         n
     }
@@ -955,37 +967,34 @@ impl NpcData {
         out
     }
 
-    /// The `inventory` trait's stacks by slot (saved as a map of slot to stack, or a list).
+    /// The `inventory` trait's stacks by slot (`Inventory.save`: the slot numbers are the keys under the trait).
     pub fn inventory(&self) -> Vec<(i64, StackData)> {
-        let Some(n) = self.map.at(&["traits", "inventory", "contents"]) else {
+        let Some(n) = self.map.at(&["traits", "inventory"]).filter(|n| n.is_map()) else {
             return Vec::new();
         };
-        let mut out: Vec<(i64, StackData)> = if n.is_map() {
-            n.entries().iter().filter_map(|e| Some((e.key.parse().ok()?, StackData::from_node(&e.value)?))).collect()
-        } else {
-            n.items().iter().enumerate().filter_map(|(i, v)| Some((i as i64, StackData::from_node(v)?))).collect()
-        };
+        let mut out: Vec<(i64, StackData)> =
+            n.entries().iter().filter_map(|e| Some((e.key.parse().ok()?, StackData::from_node(&e.value)?))).collect();
         out.sort_by_key(|(slot, _)| *slot);
         out
     }
 
-    /// Replaces the `inventory` trait's stacks (an empty list removes the key).
+    /// Replaces the `inventory` trait's stacks (the slot keys; other keys stay).
     pub fn set_inventory(&mut self, mut slots: Vec<(i64, StackData)>) {
         let old = self.inventory();
         let olds: Vec<&StackData> = old.iter().map(|(_, s)| s).collect();
         for (_, s) in &mut slots {
             reuse_raw(&olds, s);
         }
-        if slots.is_empty() {
-            self.map.drop_path(&["traits", "inventory", "contents"]);
-        } else {
-            let mut m = Node::map();
-            for (slot, s) in &slots {
-                m.set(&slot.to_string(), s.to_node());
-            }
-            self.map.put(&["traits", "inventory", "contents"], m);
-            self.add_trait_name("inventory");
+        for (slot, _) in &old {
+            self.map.drop_path(&["traits", "inventory", &slot.to_string()]);
         }
+        if slots.is_empty() {
+            return;
+        }
+        for (slot, s) in &slots {
+            self.map.put(&["traits", "inventory", &slot.to_string()], s.to_node());
+        }
+        self.add_trait_name("inventory");
     }
 
     /// The `dropstrait`'s drops: a stack and its chance (0 to 1).
@@ -993,8 +1002,8 @@ impl NpcData {
         let Some(n) = self.map.at(&["traits", "dropstrait", "drops"]) else {
             return Vec::new();
         };
-        n.items()
-            .iter()
+        let list: Vec<&Node> = if n.is_map() { n.entries().iter().map(|e| &e.value).collect() } else { n.items().iter().collect() };
+        list.into_iter()
             .filter_map(|d| {
                 let stack = StackData::from_node(d.get("drop")?)?;
                 Some((stack, d.get("chance").and_then(Node::as_f64).unwrap_or(1.0)))
@@ -1012,16 +1021,15 @@ impl NpcData {
             self.map.drop_path(&["traits", "dropstrait", "drops"]);
             return;
         }
-        let items = drops
-            .iter()
-            .map(|(s, chance)| {
-                let mut m = Node::map();
-                m.set("chance", Node::float(*chance));
-                m.set("drop", s.to_node());
-                m
-            })
-            .collect();
-        self.map.put(&["traits", "dropstrait", "drops"], Node::seq(items));
+        // `PersistenceLoader`: a collection is a map of 0, 1, 2 ... to the items, each with its fields.
+        let mut list = Node::map();
+        for (i, (s, chance)) in drops.iter().enumerate() {
+            let mut m = Node::map();
+            m.set("chance", Node::float(*chance));
+            m.set("drop", s.to_node());
+            list.set(&i.to_string(), m);
+        }
+        self.map.put(&["traits", "dropstrait", "drops"], list);
         self.add_trait_name("dropstrait");
     }
 
@@ -1521,6 +1529,12 @@ uuid: 00000000-0000-4000-8000-0000000000aa
         assert_eq!(d[0].0.meta.display_name.as_deref(), Some("Wand"));
         assert_eq!((d[0].1, d[1].1), (0.25, 1.0));
         assert_eq!(d[1].0.id, "minecraft:apple");
+        // CitizensAPI layout: slot numbers under the trait, a collection as a map 0, 1 ..., lower-case type.
+        n.set_inventory(vec![(3, StackData::new("minecraft:diamond_sword", 1))]);
+        assert_eq!(n.map.at(&["traits", "inventory", "3", "type"]).and_then(Node::text).as_deref(), Some("diamond_sword"));
+        assert_eq!(n.map.at(&["traits", "dropstrait", "drops", "0", "chance"]).and_then(Node::as_f64), Some(0.25));
+        assert_eq!(n.map.at(&["traits", "dropstrait", "drops", "1", "drop", "type"]).and_then(Node::text).as_deref(), Some("apple"));
+        assert_eq!(n.map.at(&["traits", "dropstrait", "drops", "0", "drop", "editable_components", "display_name"]).and_then(Node::text).as_deref(), Some("Wand"));
         n.set_drops(Vec::new());
         assert!(n.drops().is_empty());
         n.set_inventory(Vec::new());

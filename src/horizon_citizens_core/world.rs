@@ -1064,20 +1064,21 @@ impl World {
     /// One server tick, with the players online.
     // ---- the inventory and drops menus ----------------------------------------------------
 
-    /// `/npc inventory`: the NPC's `inventory` trait in a chest for `player`. Four rows, more when a saved
-    /// slot lies beyond them (the size Citizens' own trait uses is not in the source this port has).
+    /// `/npc inventory`: the NPC's `inventory` trait in a chest for `player` (`Inventory.openInventory`).
     pub fn open_inventory(&mut self, player: u128, npc: i32) {
         let Some(data) = self.saves.get(npc) else { return };
         let stacks = data.inventory();
-        let top = stacks.iter().map(|(s, _)| *s).max().unwrap_or(0) as usize;
-        let rows = ((top / 9) + 1).clamp(4, 6) as u8;
+        // `Inventory.onSpawn`: 36 slots for a player NPC, else the 72 saved ones cut to 54.
+        let rows: u8 = if data.kind().eq_ignore_ascii_case("PLAYER") { 4 } else { 6 };
         let mut slots = vec![None; usize::from(rows) * 9];
         for (slot, st) in stacks {
             if let Some(cell) = slots.get_mut(slot.max(0) as usize) {
                 *cell = Some(st);
             }
         }
-        let title = text::strip(&data.name());
+        let name = text::strip(&data.name());
+        let name = if name.chars().count() >= 19 { format!("{}~", name.chars().take(19).collect::<String>()) } else { name };
+        let title = format!("{name}'s Inventory");
         let chances = vec![1.0; slots.len()];
         self.start_menu(player, title, MenuSession { npc, kind: MenuKind::Inventory, rows, window: None, slots, chances });
     }
@@ -1131,10 +1132,9 @@ impl World {
     }
 
     /// A click in the menu `window` of `player`. The menu's own slots: a stack is taken out; a drops
-    /// barrier changes its chance (left click up 10 %, right click down 10 %: the step of Citizens'
-    /// percentage handler is not in the source this port has). A slot of the player's own inventory
+    /// barrier changes its chance (`PercentageSlotHandler`: left +10, right -10, shift 1). A slot of the player's own inventory
     /// (the chest menu's bottom 36 slots) is offered for deposit.
-    pub fn menu_click(&mut self, player: u128, window: i32, slot: i32, button: i32) -> MenuAction {
+    pub fn menu_click(&mut self, player: u128, window: i32, slot: i32, button: i32, shift: bool) -> MenuAction {
         let Some(m) = self.menus.get_mut(&player).filter(|m| m.window == Some(window)) else {
             return MenuAction::Nothing;
         };
@@ -1150,9 +1150,11 @@ impl World {
         }
         if !m.is_item_slot(slot) {
             if slot >= 9 && m.slots[slot - 9].is_some() {
+                // `PercentageSlotHandler`: 10 per click, 1 with shift, right click down, kept in 0..=100.
                 let c = &mut m.chances[slot - 9];
-                let step = if button == 1 { -0.1 } else { 0.1 };
-                *c = (((*c + step) * 100.0).round() / 100.0).clamp(0.0, 1.0);
+                let dx = (if shift { 1 } else { 10 }) * if button == 1 { -1 } else { 1 };
+                let pct = ((*c * 100.0 + 1e-6).floor() as i64 + dx).clamp(0, 100);
+                *c = pct as f64 / 100.0;
                 self.refresh_menu(player);
             }
             return MenuAction::Nothing;
@@ -1938,18 +1940,18 @@ mod tests {
         w.take_ops();
         w.open_inventory(0xA1, id);
         let ops = menu_ops(&mut w);
-        let Some(Op::OpenMenu { rows, items, .. }) = ops.first() else { panic!("{ops:?}") };
-        assert_eq!(*rows, 4);
+        let Some(Op::OpenMenu { rows, items, title, .. }) = ops.first() else { panic!("{ops:?}") };
+        assert_eq!((*rows, title.as_str()), (4, "Guide's Inventory"));
         assert_eq!(items[2].as_ref().map(|s| s.count), Some(5));
         w.menu_opened(0xA1, Some(7));
         // A click in another window is not ours.
-        assert_eq!(w.menu_click(0xA1, 8, 2, 0), MenuAction::Nothing);
+        assert_eq!(w.menu_click(0xA1, 8, 2, 0, false), MenuAction::Nothing);
         // The first slot of the player's own part (36) is main-inventory slot 9; the last is hotbar 8.
-        assert_eq!(w.menu_click(0xA1, 7, 36, 0), MenuAction::Deposit { inv_slot: 9 });
-        assert_eq!(w.menu_click(0xA1, 7, 71, 0), MenuAction::Deposit { inv_slot: 8 });
+        assert_eq!(w.menu_click(0xA1, 7, 36, 0, false), MenuAction::Deposit { inv_slot: 9 });
+        assert_eq!(w.menu_click(0xA1, 7, 71, 0, false), MenuAction::Deposit { inv_slot: 8 });
         assert!(w.menu_deposit(0xA1, StackData::new("minecraft:stone", 64)));
         assert!(matches!(menu_ops(&mut w).last(), Some(Op::SetMenuItems { window: 7, .. })));
-        let MenuAction::Take(apples) = w.menu_click(0xA1, 7, 2, 0) else { panic!("take") };
+        let MenuAction::Take(apples) = w.menu_click(0xA1, 7, 2, 0, false) else { panic!("take") };
         assert_eq!((apples.id.as_str(), apples.count), ("minecraft:apple", 5));
         w.menu_closed(0xA1, 7);
         let saved = w.saves.get(id).unwrap().inventory();
@@ -1973,14 +1975,24 @@ mod tests {
         assert_eq!(barrier(10).as_deref(), Some("Drop chance 100%"));
         w.menu_opened(0xA1, Some(3));
         // Left click on the barrier: 60 %. Row 4 takes a new drop at 100 %.
-        assert_eq!(w.menu_click(0xA1, 3, 9, 0), MenuAction::Nothing);
+        assert_eq!(w.menu_click(0xA1, 3, 9, 0, false), MenuAction::Nothing);
         let Some(Op::SetMenuItems { items, .. }) = menu_ops(&mut w).pop() else { panic!("refresh") };
         assert_eq!(items[9].as_ref().and_then(|s| s.meta.display_name.clone()).as_deref(), Some("Drop chance 60%"));
+        // Shift moves one point, right click down ten; never past 0 or 100.
+        w.menu_click(0xA1, 3, 9, 1, true);
+        w.menu_click(0xA1, 3, 9, 1, false);
+        w.menu_click(0xA1, 3, 9, 1, false);
+        w.menu_click(0xA1, 3, 9, 1, false);
+        w.menu_click(0xA1, 3, 9, 1, false);
+        w.menu_click(0xA1, 3, 9, 1, false);
+        w.menu_click(0xA1, 3, 9, 1, false);
+        w.menu_click(0xA1, 3, 9, 0, true);
+        menu_ops(&mut w);
         assert!(w.menu_deposit(0xA1, StackData::new("minecraft:apple", 1)));
         w.menu_closed(0xA1, 3);
         let d = w.saves.get(id).unwrap().drops();
         assert_eq!(d.len(), 2);
-        assert_eq!((d[0].0.id.as_str(), d[0].1), ("minecraft:bone", 0.6));
+        assert_eq!((d[0].0.id.as_str(), d[0].1), ("minecraft:bone", 0.01));
         assert_eq!((d[1].0.id.as_str(), d[1].1), ("minecraft:apple", 1.0));
     }
 

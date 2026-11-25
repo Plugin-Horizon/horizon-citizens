@@ -920,7 +920,7 @@ impl Hooks for Citizens {
 
     fn menu_clicked(&self, host: &mut dyn ServerHost, event: &mut MenuClickedEvent) {
         let (uuid, window) = (event.uuid, event.window);
-        let Some(action) = api::with_world(|w| w.menu_click(uuid, window, event.slot, event.button)) else {
+        let Some(action) = api::with_world(|w| w.menu_click(uuid, window, event.slot, event.button, event.mode == 1)) else {
             return;
         };
         let Some(p) = host.player(uuid) else { return };
