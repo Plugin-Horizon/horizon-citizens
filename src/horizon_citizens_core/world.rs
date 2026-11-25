@@ -10,12 +10,23 @@ use crate::horizon_citizens_core::config::Config;
 use crate::horizon_citizens_core::tree::TreeExt;
 use crate::horizon_citizens_core::yaml::Node;
 use crate::horizon_citizens_core::look::{self, PlayerView, Rng};
-use crate::horizon_citizens_core::npc::{Hand, Location, NpcData, Skin};
+use crate::horizon_citizens_core::npc::{Hand, Location, NpcCommand, NpcData, Skin};
 use crate::horizon_citizens_core::saves::Saves;
 use crate::horizon_citizens_core::spawn;
 use crate::horizon_citizens_core::text;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
+
+/// Nodes that skip a command's cooldown, global cooldown and use limit (Citizens' `ignoreerrors`).
+pub const IGNORE_ERRORS: [&str; 3] = [
+    "citizens.npc.command.ignoreerrors.cooldown",
+    "citizens.npc.command.ignoreerrors.globalcooldown",
+    "citizens.npc.command.ignoreerrors.nused",
+];
+
+fn text_fill(s: &str, player: &str, npc: &str) -> String {
+    s.replace("<player>", player).replace("<npc>", &text::strip(npc))
+}
 
 /// Something for the game to do, at the next tick, outside every player's hook.
 #[derive(Clone, Debug, PartialEq)]
@@ -124,8 +135,20 @@ pub struct World {
     events: Vec<NpcEvent>,
     /// Each player's selected NPC.
     selected: HashMap<u128, i32>,
-    /// (player, npc) -> tick of the last click whose commands ran.
-    cooldowns: HashMap<(u128, i32), u64>,
+    /// Per command (player, npc, key): tick of the last use (`cooldown`, the global default delay).
+    cmd_last: HashMap<(u128, i32, String), u64>,
+    /// Per command (npc, key): tick of the last use by anybody (`globalcooldown`).
+    cmd_global: HashMap<(i32, String), u64>,
+    /// Per command (player, npc, key): times used (`n`).
+    cmd_used: HashMap<(u128, i32, String), i64>,
+    /// Per command (npc, key): times used by anybody (`gn`, only counted, as in Citizens).
+    cmd_global_uses: HashMap<(i32, String), i64>,
+    /// SEQUENTIAL: the id of the last command a player ran on an NPC; CYCLE: of the NPC (player 0).
+    cmd_last_id: HashMap<(u128, i32), i64>,
+    /// Commands waiting for their `delay`: (due tick, op).
+    delayed: Vec<(u64, Op)>,
+    /// Command permissions the clicking player holds (the host asked before the click).
+    pub held_perms: BTreeSet<String>,
     teams_made: BTreeSet<String>,
     fetching: BTreeSet<i32>,
     pub tick: u64,
@@ -166,7 +189,13 @@ impl World {
             ops: Vec::new(),
             events: Vec::new(),
             selected: HashMap::new(),
-            cooldowns: HashMap::new(),
+            cmd_last: HashMap::new(),
+            cmd_global: HashMap::new(),
+            cmd_used: HashMap::new(),
+            cmd_global_uses: HashMap::new(),
+            cmd_last_id: HashMap::new(),
+            delayed: Vec::new(),
+            held_perms: BTreeSet::new(),
             teams_made: BTreeSet::new(),
             fetching: BTreeSet::new(),
             tick: 0,
@@ -593,32 +622,151 @@ impl World {
             },
         };
         self.events.push(event);
-        let last = self.cooldowns.get(&(player.uuid, id)).copied();
-        let cooled = last.is_none_or(|t| self.tick.saturating_sub(t) >= u64::from(self.cfg.commands.global_cooldown_ticks));
         let commands: Vec<_> = npc.commands().into_iter().filter(|c| c.hand.matches(hand, player.sneaking)).collect();
-        if cooled && !commands.is_empty() {
-            self.cooldowns.insert((player.uuid, id), self.tick);
-            for c in commands {
-                if let Some(why) = &c.unenforced {
-                    eprintln!("[citizens] NPC {id}: command {} skipped ({why} is not enforced on Horizon yet)", c.key);
-                    continue;
-                }
-                let line = text::fill_placeholders(&c.command, &player.name, &npc.name(), id);
-                let line = line.trim_start_matches('/').to_owned();
-                if c.player || c.op {
-                    if self.cfg.commands.player_commands_via_execute {
-                        let who = crate::horizon_citizens_core::ids::format_uuid(player.uuid);
-                        self.ops
-                            .push(Op::Console(format!("execute as {who} at {who} run {line}")));
-                    } else {
-                        eprintln!("[citizens] NPC {id}: player command skipped (player-commands-via-execute is off): {line}");
-                    }
-                } else {
-                    self.ops.push(Op::Console(line));
-                }
-            }
+        if !commands.is_empty() {
+            self.run_commands(player, hand, &npc, id, commands);
         }
         true
+    }
+
+    /// The permissions the commands of the NPC behind `entity` ask (and the `ignoreerrors` nodes), for the
+    /// host to look up before a click: see `held_perms`.
+    pub fn command_perms(&self, entity: u32) -> Vec<String> {
+        let Some(npc) = self.npc_of_entity(entity).and_then(|id| self.saves.get(id)) else {
+            return Vec::new();
+        };
+        let mut v: Vec<String> = npc.commands().into_iter().flat_map(|c| c.perms).collect();
+        if !v.is_empty() || !npc.commands().is_empty() {
+            v.extend(IGNORE_ERRORS.iter().map(|s| (*s).to_owned()));
+        }
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    fn command_error(&mut self, player: &PlayerView, npc: &NpcData, kind: &str, msg: &str, secs: i64, n: i64, sent: &mut BTreeSet<String>) {
+        if npc.hide_command_errors() || !sent.insert(kind.to_owned()) || msg.trim().is_empty() {
+            return;
+        }
+        let text = msg
+            .replace("{minutes}", &(secs / 60).to_string())
+            .replace("{seconds_over}", &(secs % 60).to_string())
+            .replace("{0}", &if kind.contains("cooldown") { secs } else { n }.to_string());
+        let text = text_fill(&text, &player.name, &npc.name());
+        self.ops.push(Op::Tell { player: player.uuid, legacy: text });
+    }
+
+    /// `commandtrait`: which commands of a click run (execution mode, `perms`, `cooldown`,
+    /// `globalcooldown`, `n`, `gn`), and when (`delay`).
+    fn run_commands(&mut self, player: &PlayerView, hand: Hand, npc: &NpcData, id: i32, mut commands: Vec<NpcCommand>) {
+        use crate::horizon_citizens_core::npc::ExecutionMode;
+        commands.sort_by_key(|c| c.id);
+        let mode = npc.execution_mode();
+        let max = commands.last().map_or(-1, |c| c.id);
+        let mut sent = BTreeSet::new();
+        let list: Vec<NpcCommand> = match mode {
+            ExecutionMode::Random => {
+                let pick = ((self.rng.next_f64() * commands.len() as f64) as usize).min(commands.len() - 1);
+                vec![commands[pick].clone()]
+            }
+            ExecutionMode::Linear => commands,
+            ExecutionMode::Sequential | ExecutionMode::Cycle => {
+                let who = if mode == ExecutionMode::Cycle { 0 } else { player.uuid };
+                let mut last = self.cmd_last_id.get(&(who, id)).copied().unwrap_or(-1);
+                let mut picked = None;
+                for c in &commands {
+                    if c.id <= last {
+                        if last != max {
+                            continue;
+                        }
+                        last = -1;
+                    }
+                    picked = Some(c.clone());
+                    break;
+                }
+                picked.into_iter().collect()
+            }
+        };
+        let sequential = matches!(mode, ExecutionMode::Sequential | ExecutionMode::Cycle);
+        for c in list {
+            if let Some(why) = &c.unenforced {
+                eprintln!("[citizens] NPC {id}: command {} skipped ({why} is not enforced on Horizon yet)", c.key);
+                continue;
+            }
+            let em = self.cfg.commands.error_messages.clone();
+            if c.perms.iter().any(|p| !self.held_perms.contains(p)) {
+                self.command_error(player, npc, "no_permission", &em.no_permission, 0, 0, &mut sent);
+                continue;
+            }
+            let now = self.tick;
+            let global_delay = u64::from(self.cfg.commands.global_cooldown_ticks);
+            let key = (player.uuid, id, c.key.clone());
+            let gkey = (id, c.key.clone());
+            let ig: Vec<bool> = IGNORE_ERRORS.iter().map(|p| self.held_perms.contains(*p)).collect();
+            let own_ticks = if c.cooldown != 0 { c.cooldown.max(0) as u64 * 20 } else { global_delay };
+            if !ig[0]
+                && let Some(&t) = self.cmd_last.get(&key)
+            {
+                if now < t + own_ticks {
+                    let secs = ((t + own_ticks - now) as i64 + 19) / 20;
+                    self.command_error(player, npc, "on_cooldown", &em.on_cooldown, secs, 0, &mut sent);
+                    continue;
+                }
+                self.cmd_last.remove(&key);
+            }
+            if !ig[1]
+                && c.global_cooldown > 0
+                && let Some(&t) = self.cmd_global.get(&gkey)
+            {
+                let span = c.global_cooldown as u64 * 20;
+                if now < t + span {
+                    let secs = ((t + span - now) as i64 + 19) / 20;
+                    self.command_error(player, npc, "on_global_cooldown", &em.on_global_cooldown, secs, 0, &mut sent);
+                    continue;
+                }
+                self.cmd_global.remove(&gkey);
+            }
+            let used = self.cmd_used.get(&key).copied().unwrap_or(0);
+            if !ig[2] && c.n > 0 && c.n <= used {
+                self.command_error(player, npc, "maximum_times_used", &em.maximum_times_used, 0, c.n, &mut sent);
+                continue;
+            }
+            if c.cooldown > 0 || global_delay > 0 {
+                self.cmd_last.insert(key.clone(), now);
+            }
+            if c.global_cooldown > 0 {
+                self.cmd_global.insert(gkey.clone(), now);
+            }
+            if c.n > 0 {
+                self.cmd_used.insert(key, used + 1);
+            }
+            if c.gn > 0 {
+                *self.cmd_global_uses.entry(gkey).or_insert(0) += 1;
+            }
+            if sequential {
+                let who = if mode == ExecutionMode::Cycle { 0 } else { player.uuid };
+                self.cmd_last_id.insert((who, id), c.id);
+            }
+            let line = text::fill_placeholders(&c.command, &player.name, &npc.name(), id);
+            let line = line.trim_start_matches('/').to_owned();
+            let op = if c.player || c.op {
+                if self.cfg.commands.player_commands_via_execute {
+                    let who = crate::horizon_citizens_core::ids::format_uuid(player.uuid);
+                    Op::Console(format!("execute as {who} at {who} run {line}"))
+                } else {
+                    eprintln!("[citizens] NPC {id}: player command skipped (player-commands-via-execute is off): {line}");
+                    continue;
+                }
+            } else {
+                Op::Console(line)
+            };
+            if c.delay > 0 {
+                self.delayed.push((now + c.delay as u64, op));
+            } else {
+                self.ops.push(op);
+            }
+        }
+        let _ = hand;
     }
 
     /// Whether a hit on this entity is refused (a protected NPC).
@@ -762,10 +910,17 @@ impl World {
         {
             eprintln!("[citizens] could not save NPCs: {e}");
         }
+        if !self.delayed.is_empty() {
+            let now = self.tick;
+            let (due, wait): (Vec<_>, Vec<_>) = std::mem::take(&mut self.delayed).into_iter().partition(|(t, _)| *t <= now);
+            self.delayed = wait;
+            self.ops.extend(due.into_iter().map(|(_, op)| op));
+        }
         if self.tick % 1200 == 0 {
             let tick = self.tick;
-            let cooldown = u64::from(self.cfg.commands.global_cooldown_ticks);
-            self.cooldowns.retain(|_, t| tick.saturating_sub(*t) < cooldown);
+            // A cooldown over an hour ago is over whatever it was.
+            self.cmd_last.retain(|_, t| tick.saturating_sub(*t) < 72_000);
+            self.cmd_global.retain(|_, t| tick.saturating_sub(*t) < 72_000);
         }
     }
 
@@ -1289,6 +1444,74 @@ mod tests {
         assert!(matches!(w.take_events()[0], NpcEvent::LeftClick { .. }));
         assert_eq!(consoles(&mut w).len(), 1);
         assert!(!w.on_click(99, &p, Hand::Right, None), "not an NPC");
+    }
+
+    #[test]
+    fn commandtrait_limits_modes_and_delay() {
+        use crate::horizon_citizens_core::yaml::Node;
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        {
+            let n = w.saves.get_mut(id).unwrap();
+            n.add_command("say a", Hand::Right, false, false);
+            n.add_command("say b", Hand::Right, false, false);
+            let mut cmds = n.map.map_at(&["traits", "commandtrait", "commands"]).clone();
+            if let Some(e) = cmds.get_mut("0").filter(|e| e.is_map()) {
+                e.set("n", Node::int(1));
+                e.set("permissions", Node::seq(vec![Node::str("vip.use")]));
+            }
+            if let Some(e) = cmds.get_mut("1").filter(|e| e.is_map()) {
+                e.set("delay", Node::int(40));
+            }
+            n.map.map_at(&["traits", "commandtrait"]).set("commands", cmds);
+        }
+        w.take_ops();
+        let p = player(1.0, 1.0);
+        // No permission: "a" is refused with the configured text, "b" is delayed 40 ticks.
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        let ops = w.take_ops();
+        assert!(ops.iter().any(|o| matches!(o, Op::Tell { legacy, .. } if legacy == "You don't have permission to do that.")));
+        assert!(!ops.iter().any(|o| matches!(o, Op::Console(c) if c == "say b")));
+        for _ in 0..41 {
+            w.tick(&[]);
+        }
+        assert!(consoles(&mut w).contains(&"say b".to_owned()));
+        // With the permission "a" runs once (n = 1), then the use limit answers.
+        w.held_perms.insert("vip.use".into());
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        assert!(consoles(&mut w).contains(&"say a".to_owned()));
+        for _ in 0..25 {
+            w.tick(&[]);
+        }
+        w.take_ops();
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        let ops = w.take_ops();
+        assert!(!ops.iter().any(|o| matches!(o, Op::Console(c) if c == "say a")));
+        assert!(ops.iter().any(|o| matches!(o, Op::Tell { legacy, .. } if legacy == "You have reached the maximum number of uses (1).")));
+    }
+
+    #[test]
+    fn sequential_runs_one_command_per_click() {
+        use crate::horizon_citizens_core::yaml::Node;
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        {
+            let n = w.saves.get_mut(id).unwrap();
+            n.add_command("say a", Hand::Right, false, false);
+            n.add_command("say b", Hand::Right, false, false);
+            n.map.map_at(&["traits", "commandtrait"]).set("executionmode", Node::str("SEQUENTIAL"));
+        }
+        w.take_ops();
+        let p = player(1.0, 1.0);
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            assert!(w.on_click(10, &p, Hand::Right, None));
+            seen.extend(consoles(&mut w));
+            for _ in 0..25 {
+                w.tick(&[]);
+            }
+        }
+        assert_eq!(seen, ["say a", "say b", "say a"]);
     }
 
     #[test]

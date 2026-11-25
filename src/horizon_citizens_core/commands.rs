@@ -1339,7 +1339,7 @@ fn citizens(w: &mut World, sender: &Sender, rest: &str, reload: impl FnOnce() ->
         "reload" | "load" if words.len() == 1 => {
             let key = skey(sender);
             let confirmed = w.reload_warned.get(&key).is_some_and(|until| w.tick <= *until);
-            if !confirmed {
+            if w.cfg.reload_warning_enabled && !confirmed {
                 // Five seconds to type it again.
                 let until = w.tick + 100;
                 w.reload_warned.insert(key, until);

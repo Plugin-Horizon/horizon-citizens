@@ -25,6 +25,8 @@ pub struct Config {
     pub selection: Selection,
     pub talk: Talk,
     pub messages: Messages,
+    /// `general.reload-warning-enabled`: `/citizens reload` asks to be typed twice.
+    pub reload_warning_enabled: bool,
     /// Blocks around a player within which an NPC is (re)spawned when it is not out: its chunk is
     /// loaded there.
     pub spawn_radius: f64,
@@ -44,6 +46,7 @@ impl Default for Config {
             selection: Selection::default(),
             talk: Talk::default(),
             messages: Messages::default(),
+            reload_warning_enabled: true,
             spawn_radius: 96.0,
         }
     }
@@ -153,6 +156,9 @@ pub struct Skins {
     /// `general.authlib.profile-url`.
     pub profile_url: String,
     pub name_lookup_url: String,
+    /// `npc.skins.rotation-update-degrees`: the turn, in degrees, of a player towards an NPC that
+    /// makes the skin tracker send the NPC's look again.
+    pub rotation_update_degrees: f32,
 }
 
 impl Default for Skins {
@@ -162,6 +168,7 @@ impl Default for Skins {
             fetch: true,
             profile_url: "https://sessionserver.mojang.com/session/minecraft/profile/".into(),
             name_lookup_url: "https://api.mojang.com/users/profiles/minecraft/".into(),
+            rotation_update_degrees: 90.0,
         }
     }
 }
@@ -176,6 +183,38 @@ pub struct Commands {
     /// (with the console's rights: Horizon has no "run as this player" helper). Off: they are
     /// skipped with a log line.
     pub player_commands_via_execute: bool,
+    /// `npc.commands.error-messages.*`.
+    pub error_messages: ErrorMessages,
+}
+
+/// `npc.commands.error-messages.*` (Citizens' `Settings`): sent to a player whose click a command
+/// refuses. `{0}`, `{minutes}` and `{seconds_over}` are filled in; an empty text sends nothing.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ErrorMessages {
+    pub global_maximum_times_used: String,
+    pub maximum_times_used: String,
+    pub missing_item: String,
+    pub no_permission: String,
+    pub not_enough_experience: String,
+    pub not_enough_money: String,
+    pub on_cooldown: String,
+    pub on_global_cooldown: String,
+}
+
+impl Default for ErrorMessages {
+    fn default() -> Self {
+        ErrorMessages {
+            global_maximum_times_used: "You have reached the maximum number of uses ({0}).".into(),
+            maximum_times_used: "You have reached the maximum number of uses ({0}).".into(),
+            missing_item: "Missing {1} {0}".into(),
+            no_permission: "You don't have permission to do that.".into(),
+            not_enough_experience: "You need at least {0} experience.".into(),
+            not_enough_money: "You need at least ${0}.".into(),
+            on_cooldown: "Please wait for {minutes} minutes and {seconds_over} seconds.".into(),
+            on_global_cooldown: "Please wait for {minutes} minutes and {seconds_over} seconds.".into(),
+        }
+    }
 }
 
 impl Default for Commands {
@@ -183,6 +222,7 @@ impl Default for Commands {
         Commands {
             global_cooldown_ticks: 20,
             player_commands_via_execute: true,
+            error_messages: ErrorMessages::default(),
         }
     }
 }
@@ -212,12 +252,16 @@ impl Default for Selection {
 pub struct Talk {
     /// `<npc>` and `<text>` are filled in. Citizens' `npc.chat.format.no-targets`.
     pub format: String,
+    /// `npc.chat.options.multiple-targets-format`: four parts split by `|` (first, further, last,
+    /// "and others"), `<target>` filled in.
+    pub multiple_targets_format: String,
 }
 
 impl Default for Talk {
     fn default() -> Self {
         Talk {
             format: "[<npc>]: <text>".into(),
+            multiple_targets_format: "<target>|, <target>| & <target>| & others".into(),
         }
     }
 }

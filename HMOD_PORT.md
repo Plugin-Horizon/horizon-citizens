@@ -8,8 +8,10 @@ Round 1
   - `src/lib.rs`: added `permission_gather_nodes`.
 - Permission nodes: every non-wildcard entry of `core::commands::NODES` (about 50 `citizens.*` nodes) -> `NodeDefault::Level(2)` (shipped `command-level`), declared in `permission_gather_nodes` in `src/lib.rs`.
 - Gaps:
-  - HMOD-GAP(wildcard_nodes): `citizens.*`, `citizens.admin.*`, `citizens.npc.*` and the other wildcard parents cannot be declared as typed nodes (Horizon has no wildcards). A child node is granted only by its own node, not by a held parent; parent queries answer as a denial.
-  - HMOD-GAP(profile_cache): Horizon main has no profile lookup for offline players. Owner and name lookups resolve online players only; offline owners show as their UUID. The core's own handling is unchanged.
+  - Round 2: wildcard parents (`citizens.npc.*`) are now declared nodes (names ending in `.*` are valid), so a held parent grants its children through `parents_of`.
+  - Round 2: owner and name lookups use `host.profile_by_uuid/profile_by_name` (user cache) after the online players.
+  - Round 2: `commandtrait` limits are enforced (`permissions`, `cooldown`, `globalcooldown`, `n`, `gn` counted, `delay`, `executionmode` RANDOM/SEQUENTIAL/CYCLE, `hideErrorMessages`, the `ignoreerrors` nodes); error texts from `[commands.error-messages]`. Still skipped with a log line: `cost`, `experienceCost`, `itemCost`, `npc` (no economy; run-as-NPC).
+  - Round 2 config: `reload-warning-enabled`, `[skins] rotation-update-degrees` (read, no effect yet), `[talk] multiple-targets-format` (read, no bystander chat yet).
 - Audit round: node defaults now follow the configured `command-level` (read at gather time, 2 when the config is not loaded yet); the per-type nodes `citizens.npc.create.<type>` are declared and included in the grants `create` asks (`core::commands::create_type_nodes`), so a non-operator holding `citizens.npc.create.zombie` can create zombies. Still open: `/template`, `/waypoints` and about 100 `/npc` modifiers (work, not API), the `ignoreerrors` nodes (no command-trait cost feature to gate), a parent grant does not pass the engine's per-usage node gate (needs a permission handler that expands wildcards itself, unverified).
 - Unsure:
   - Node defaults use the shipped `command-level` 2. The config value is read after gathering, so a changed `command-level` does not move the node defaults; the command gate itself still uses the config level.

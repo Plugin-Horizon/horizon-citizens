@@ -183,7 +183,7 @@ fn may_any(host: &mut dyn ServerHost, p: PlayerRef, root: &str, level: u8, usage
 }
 
 /// The `citizens.*` nodes a player below `command_level` holds, as the handler answers them. Wildcard parents
-/// (`citizens.npc.*`) are not declared on Horizon, so their children are not granted by them (HMOD-GAP(wildcard_nodes)).
+/// (`citizens.npc.*`) are declared nodes: a player holding one holds its children (`parents_of`).
 fn granted_nodes(host: &mut dyn ServerHost, p: PlayerRef, level: u8, command_level: u8) -> Vec<String> {
     if level >= command_level {
         return Vec::new();
@@ -278,15 +278,21 @@ fn npc_kind(kind: &str) -> bool {
 
 /// The name of a player by UUID: online, else the server's user cache (`usercache.json`). Never asked
 /// of Mojang, so an owner who was never on the server shows as the UUID.
-/// HMOD-GAP(profile_cache): Horizon main has no profile lookup for offline players, so only online players resolve here.
 fn profile_by_uuid(host: &dyn ServerHost, uuid: u128) -> Option<String> {
-    host.player(uuid)?.name(host)
+    if let Some(name) = host.player(uuid).and_then(|p| p.name(host)) {
+        return Some(name);
+    }
+    host.profile_by_uuid(uuid).map(|p| p.name)
 }
 
-/// A player by account name, any case: online only (HMOD-GAP(profile_cache), see `profile_by_uuid`).
+/// A player by account name, any case: online, else the user cache.
 fn profile_by_name(host: &dyn ServerHost, name: &str) -> Option<(u128, String)> {
-    let player = host.players().player_by_name(name)?;
-    Some((player.uuid(), player.name(host)?))
+    if let Some(player) = host.players().player_by_name(name)
+        && let Some(n) = player.name(host)
+    {
+        return Some((player.uuid(), n));
+    }
+    host.profile_by_name(name).map(|p| (p.uuid, p.name))
 }
 
 /// Names for `/npc owner`: the owners of all NPCs (UUID -> name) and the typed word as a name.
@@ -534,13 +540,12 @@ impl Hooks for Citizens {
     }
 
     fn permission_gather_nodes(&self, event: &mut PermissionGatherNodesEvent<'_>) {
-        // Every non-wildcard node the commands ask, at the configured `command-level` (the level the command
-        // gate uses, so both agree; 2 when gathering runs before the config is read). The wildcard parents
-        // cannot be declared (HMOD-GAP(wildcard_nodes)).
+        // Every node the commands ask, wildcard parents (`citizens.npc.*`) included (a node whose name ends
+        // in `.*` is an ordinary node), at the configured `command-level` (the level the command gate uses,
+        // so both agree; 2 when gathering runs before the config is read).
         let level = i32::from(lock(&self.state).cfg.command_level);
         let mut all: Vec<String> = core::commands::all_nodes()
             .into_iter()
-            .filter(|n| !n.contains('*'))
             .map(str::to_owned)
             .collect();
         all.extend(core::commands::create_type_nodes());
@@ -692,7 +697,10 @@ impl Hooks for Citizens {
             return None;
         };
         let held = held_item_id(&*host, player);
+        let wanted = api::with_world(|w| w.command_perms(entity)).unwrap_or_default();
+        let granted: std::collections::BTreeSet<String> = wanted.into_iter().filter(|n| holds(host, player, n)).collect();
         let claimed = api::with_world(|w| {
+            w.held_perms = granted;
             w.on_click(entity, &info.view, core::npc::Hand::Right, held.as_deref())
         })
         .unwrap_or(false);
@@ -715,7 +723,10 @@ impl Hooks for Citizens {
         let Some(info) = player_info(&*host, player) else {
             return Flow::Continue;
         };
+        let wanted = api::with_world(|w| w.command_perms(entity)).unwrap_or_default();
+        let granted: std::collections::BTreeSet<String> = wanted.into_iter().filter(|n| holds(host, player, n)).collect();
         let refused = api::with_world(|w| {
+            w.held_perms = granted;
             w.on_click(entity, &info.view, core::npc::Hand::Left, None) && w.hit_refused(entity)
         })
         .unwrap_or(false);

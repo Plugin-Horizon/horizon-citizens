@@ -110,6 +110,19 @@ pub struct NpcCommand {
     /// `cost` and `experienceCost`: -1 when unset (Citizens' default).
     pub cost: f64,
     pub experience_cost: i64,
+    /// `permissions` (Citizens' `perms`): the clicking player must hold every one.
+    pub perms: Vec<String>,
+    /// Position among the NPC's commands by id (the numeric key; the list form's index).
+    pub id: i64,
+}
+
+/// `executionmode` of the `commandtrait`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutionMode {
+    Linear,
+    Random,
+    Sequential,
+    Cycle,
 }
 
 /// What `/npc command add` writes for a new `commandtrait` entry (Citizens' `NPCCommandBuilder`).
@@ -777,11 +790,6 @@ impl NpcData {
         let Some(node) = self.map.at(&["traits", "commandtrait", "commands"]) else {
             return Vec::new();
         };
-        let mode = self
-            .map
-            .at(&["traits", "commandtrait", "executionmode"])
-            .and_then(Node::text)
-            .unwrap_or_default();
         let entry = |key: String, n: &Node| -> Option<NpcCommand> {
             let m = n.as_map()?;
             let set = |k: &str| match m.get(k) {
@@ -794,15 +802,16 @@ impl NpcData {
                     !(t.is_empty() || t == "null" || t.parse::<f64>().is_ok_and(|x| x <= 0.0))
                 }
             };
-            let unenforced = if !mode.is_empty() && !mode.eq_ignore_ascii_case("LINEAR") {
-                Some(format!("executionmode {mode}"))
-            } else {
-                // Citizens saves the permission list as `permissions`, the run-as-NPC flag as `npc`.
-                ["permissions", "perms", "n", "gn", "npc", "cost", "cooldown", "globalcooldown", "delay", "experienceCost"]
-                    .into_iter()
-                    .find(|k| set(k))
-                    .map(str::to_owned)
-            };
+            // Only what needs an economy or the NPC as a sender is still not run (cost, experienceCost, npc).
+            let unenforced = ["cost", "experienceCost", "npc"]
+                .into_iter()
+                .find(|k| set(k))
+                .map(str::to_owned);
+            let perms: Vec<String> = ["permissions", "perms"]
+                .into_iter()
+                .filter_map(|k| m.get(k))
+                .flat_map(|v| v.items().iter().filter_map(Node::text).collect::<Vec<_>>())
+                .collect();
             Some(NpcCommand {
                 key,
                 command: m.get("command").and_then(Node::text)?,
@@ -823,9 +832,11 @@ impl NpcData {
                 gn: m.get("gn").and_then(Node::as_i64).unwrap_or(-1),
                 cost: m.get("cost").and_then(Node::as_f64).unwrap_or(-1.0),
                 experience_cost: m.get("experienceCost").and_then(Node::as_i64).unwrap_or(-1),
+                perms,
+                id: 0,
             })
         };
-        match node {
+        let mut out: Vec<NpcCommand> = match node {
             m if m.is_map() => m
                 .entries()
                 .iter()
@@ -838,7 +849,34 @@ impl NpcData {
                 .filter_map(|(i, v)| entry(i.to_string(), v))
                 .collect(),
             _ => Vec::new(),
+        };
+        for (i, c) in out.iter_mut().enumerate() {
+            c.id = c.key.parse().unwrap_or(i as i64);
         }
+        out
+    }
+
+    /// `executionmode` of the `commandtrait` (LINEAR when unset or unknown).
+    pub fn execution_mode(&self) -> ExecutionMode {
+        let mode = self
+            .map
+            .at(&["traits", "commandtrait", "executionmode"])
+            .and_then(Node::text)
+            .unwrap_or_default();
+        match mode.to_ascii_uppercase().as_str() {
+            "RANDOM" => ExecutionMode::Random,
+            "SEQUENTIAL" => ExecutionMode::Sequential,
+            "CYCLE" => ExecutionMode::Cycle,
+            _ => ExecutionMode::Linear,
+        }
+    }
+
+    /// `hideErrorMessages` of the `commandtrait`.
+    pub fn hide_command_errors(&self) -> bool {
+        self.map
+            .at(&["traits", "commandtrait", "hideErrorMessages"])
+            .and_then(bool_of)
+            .unwrap_or(false)
     }
     /// Adds a command and returns its key. Kept in the map form when the NPC has it (or nothing),
     /// in the list form when that is what the file has.
@@ -1288,26 +1326,28 @@ uuid: 00000000-0000-4000-8000-0000000000aa
     }
 
     #[test]
-    fn limits_the_port_cannot_enforce_are_flagged() {
-        // Review C4: a command limited by permission or uses must not run for everyone.
+    fn limits_and_modes_are_read() {
         let mut n = NpcData::new(1, 7, "A", "PLAYER");
         n.add_command("say a", Hand::Right, false, false);
         n.add_command("say b", Hand::Right, false, false);
         let mut cmds = n.map.map_at(&["traits", "commandtrait", "commands"]).clone();
         if let Some(e) = cmds.get_mut("1").filter(|e| e.is_map()) {
-            e.set("perms", Node::seq(vec![Node::str("some.node")]));
-            e.set("n", Node::int(-1));
+            e.set("permissions", Node::seq(vec![Node::str("some.node")]));
+            e.set("n", Node::int(2));
+            e.set("cost", Node::int(5));
         }
         n.map.map_at(&["traits", "commandtrait"]).set("commands", cmds);
         let c = n.commands();
         assert_eq!(c[0].unenforced, None);
-        assert_eq!(c[1].unenforced.as_deref(), Some("perms"));
+        assert_eq!(c[1].perms, vec!["some.node".to_owned()]);
+        assert_eq!(c[1].n, 2);
+        assert_eq!(c[1].id, 1);
+        assert_eq!(c[1].unenforced.as_deref(), Some("cost"));
+        assert_eq!(n.execution_mode(), ExecutionMode::Linear);
         n.map
             .map_at(&["traits", "commandtrait"])
             .set("executionmode", Node::str("SEQUENTIAL"));
-        assert!(n.commands().iter().all(|c| c.unenforced.is_some()));
-        n.map.map_at(&["traits", "commandtrait"]).set("executionmode", Node::str("LINEAR"));
-        assert_eq!(n.commands()[0].unenforced, None);
+        assert_eq!(n.execution_mode(), ExecutionMode::Sequential);
     }
 }
 

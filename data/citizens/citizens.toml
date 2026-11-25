@@ -9,6 +9,8 @@ save-delay-seconds = 5
 command-level = 2
 # Blocks around a player within which an NPC that is not out is spawned.
 spawn-radius = 96.0
+# general.reload-warning-enabled: /citizens reload must be typed twice.
+reload-warning-enabled = true
 
 [worlds]
 # The world folder name of the overworld (level-name); <main>_nether and <main>_the_end are the
@@ -40,12 +42,25 @@ try-fetch-default-skin = true
 fetch = true
 profile-url = "https://sessionserver.mojang.com/session/minecraft/profile/"
 name-lookup-url = "https://api.mojang.com/users/profiles/minecraft/"
+# Degrees a player turns before the skin tracker re-sends an NPC's look.
+rotation-update-degrees = 90.0
 
 [commands]
 # Clicks of one player on one NPC closer than this (ticks) run its commands once.
 global-cooldown-ticks = 20
 # Commands marked "player" run through "execute as <player> run ..." (with the console's rights).
 player-commands-via-execute = true
+
+# Sent to a player a command refuses ({0}, {minutes}, {seconds_over} are filled in).
+[commands.error-messages]
+global-maximum-times-used = "You have reached the maximum number of uses ({0})."
+maximum-times-used = "You have reached the maximum number of uses ({0})."
+missing-item = "Missing {1} {0}"
+no-permission = "You don't have permission to do that."
+not-enough-experience = "You need at least {0} experience."
+not-enough-money = "You need at least ${0}."
+on-cooldown = "Please wait for {minutes} minutes and {seconds_over} seconds."
+on-global-cooldown = "Please wait for {minutes} minutes and {seconds_over} seconds."
 
 [selection]
 # Right-clicking an NPC with this item selects it (operators of command-level).
@@ -56,6 +71,8 @@ message = "Selected [[<npc>]] (ID [[<id>]])."
 # What an NPC with text lines (`/npc text add`) says to a player who right-clicks it, one of its
 # lines picked at random. Citizens' npc.chat.format.no-targets.
 format = "[<npc>]: <text>"
+# Four parts split by "|": first, further, last, and "and others".
+multiple-targets-format = "<target>|, <target>| & <target>| & others"
 
 [messages]
 message = "&a"
