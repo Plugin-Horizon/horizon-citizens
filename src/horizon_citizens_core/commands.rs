@@ -108,6 +108,7 @@ const M_HOLO_LINE_ADD: &str = "Added a new hologram line: [[{0}]].";
 const M_HOLO_LINE_SET: &str = "Set hologram text line [[{0}]] to [[{1}]].";
 const M_HOLO_LINE_REMOVED: &str = "Removed line [[{0}]].";
 const M_HOLO_CLEARED: &str = "Hologram lines cleared.";
+const M_HOLO_RENDERER_SELECTED: &str = "Hologram renderer NPC [[{0}]] selected. Changes made to this NPC will be saved.";
 const M_HOLO_VIEW_SET: &str = "[[{0}]]''s hologram horizontal view range set to [[{1}]] blocks.";
 const M_HOLO_VVIEW_SET: &str = "[[{0}]]''s hologram vertical view range set to [[{1}]] blocks.";
 const M_HOLO_RATE_SET: &str = "[[{0}]]''s hologram update rate set to every [[{1}]] ticks.";
@@ -1521,9 +1522,16 @@ pub fn run(w: &mut World, sender: &Sender, line: &str, reload: impl FnOnce() -> 
         "trait" => match trait_cmd(w, sender, rest) {
             Ok(r) | Err(r) => r,
         },
-        _ => match npc(w, sender, rest) {
-            Ok(r) | Err(r) => r,
-        },
+        _ => {
+            let out = match npc(w, sender, rest) {
+                Ok(r) | Err(r) => r,
+            };
+            // A hologram renderer NPC (`hologram edit_npc`): what was changed on it goes back to its line.
+            if let Some(tid) = selected_id(w, sender).ok().filter(|t| w.is_hologram_template(*t)) {
+                w.sync_hologram_template(tid);
+            }
+            out
+        }
     }
 }
 
@@ -3765,7 +3773,28 @@ fn hologram(w: &mut World, sender: &Sender, tail: &str) -> Res {
             ok(w, M_HOLO_BG_SET, &[which, &format!("Color:[argb0x{:08X}]", argb as u32)])
         }
         "edit_npc" => {
-            return Err(err(w, M_UNSUPPORTED, &["hologram edit_npc"]));
+            if words.len() == 1 {
+                return Err(err(w, M_HOLO_INVALID_LINE, &[]));
+            }
+            let who = sender.uuid.ok_or_else(|| err(w, M_MUST_BE_INGAME, &[]))?;
+            // `name` is the name line's renderer (none unless the name hologram shows), `template` the default one.
+            let (key, text) = match words[1] {
+                "name" => {
+                    let has = w.saves.get(id).is_some_and(crate::horizon_citizens_core::spawn::name_hologram);
+                    if !has {
+                        return Ok(Vec::new());
+                    }
+                    ("name".to_owned(), name.clone())
+                }
+                "template" => ("template".to_owned(), String::new()),
+                _ => {
+                    let idx = line(w, 1, len)?;
+                    (idx.to_string(), w.saves.get(id).map(|n| n.hologram_lines()[idx].text.clone()).unwrap_or_default())
+                }
+            };
+            let tid = w.hologram_template(id, &key, &text).ok_or_else(|| err(w, M_NPC_NOT_FOUND, &[]))?;
+            w.select(who, tid);
+            return Ok(ok(w, M_HOLO_RENDERER_SELECTED, &[&text]));
         }
         _ => return Err(usage_of(w, "hologram")),
     };

@@ -362,6 +362,102 @@ pub enum DespawnReason {
     Teleport,
 }
 
+/// A WorldGuard region as the `worldguard:region` service describes it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RegionShape {
+    Cuboid([i32; 3], [i32; 3]),
+    Polygon { y0: i32, y1: i32, points: Vec<[i32; 2]> },
+    Global,
+}
+
+impl RegionShape {
+    /// The service's reply: `cuboid\tminx..maxz`, `polygon\tminy\tmaxy\tx,z;x,z`, `global`.
+    pub fn parse(reply: &str) -> Option<RegionShape> {
+        let f: Vec<&str> = reply.trim().split('\t').collect();
+        match f.as_slice() {
+            ["cuboid", a, b, c, d, e, g] => {
+                let n = |s: &&str| s.parse::<i32>().ok();
+                Some(RegionShape::Cuboid([n(a)?, n(b)?, n(c)?], [n(d)?, n(e)?, n(g)?]))
+            }
+            ["polygon", y0, y1, pts] => {
+                let points = pts
+                    .split(';')
+                    .map(|p| {
+                        let (x, z) = p.split_once(',')?;
+                        Some([x.parse().ok()?, z.parse().ok()?])
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(RegionShape::Polygon { y0: y0.parse().ok()?, y1: y1.parse().ok()?, points })
+            }
+            ["global"] => Some(RegionShape::Global),
+            _ => None,
+        }
+    }
+    /// The box around the region (none for the global one).
+    pub fn bounds(&self) -> Option<([f64; 3], [f64; 3])> {
+        match self {
+            RegionShape::Cuboid(a, b) => Some((a.map(f64::from), b.map(|v| f64::from(v) + 1.0))),
+            RegionShape::Polygon { y0, y1, points } => {
+                let xs = points.iter().map(|p| p[0]);
+                let zs = points.iter().map(|p| p[1]);
+                Some((
+                    [f64::from(xs.clone().min()?), f64::from(*y0), f64::from(zs.clone().min()?)],
+                    [f64::from(xs.max()?) + 1.0, f64::from(*y1) + 1.0, f64::from(zs.max()?) + 1.0],
+                ))
+            }
+            RegionShape::Global => None,
+        }
+    }
+    pub fn contains(&self, p: [f64; 3]) -> bool {
+        let (x, y, z) = (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32);
+        match self {
+            RegionShape::Cuboid(a, b) => (a[0]..=b[0]).contains(&x) && (a[1]..=b[1]).contains(&y) && (a[2]..=b[2]).contains(&z),
+            RegionShape::Polygon { y0, y1, points } => {
+                if y < *y0 || y > *y1 {
+                    return false;
+                }
+                // Even-odd rule on the block centre.
+                let (px, pz) = (f64::from(x) + 0.5, f64::from(z) + 0.5);
+                let mut inside = false;
+                let mut j = points.len().saturating_sub(1);
+                for i in 0..points.len() {
+                    let (xi, zi) = (f64::from(points[i][0]) + 0.5, f64::from(points[i][1]) + 0.5);
+                    let (xj, zj) = (f64::from(points[j][0]) + 0.5, f64::from(points[j][1]) + 0.5);
+                    if (zi > pz) != (zj > pz) && px < (xj - xi) * (pz - zi) / (zj - zi) + xi {
+                        inside = !inside;
+                    }
+                    j = i;
+                }
+                inside
+            }
+            RegionShape::Global => true,
+        }
+    }
+}
+
+/// The hologram of one NPC with a view range, for the host's per-viewer visibility.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HoloView {
+    /// The text displays of the NPC's hologram lines (and name line).
+    pub uuids: Vec<u128>,
+    pub pos: [f64; 3],
+    pub dimension: String,
+    /// `viewRange` and `verticalViewRange` in blocks (0 or less: unlimited).
+    pub view: f64,
+    pub vertical: f64,
+}
+
+/// `SingleEntityHologramRenderer.onSeenByPlayer`: whether a player at `player` sees the hologram of an NPC at `npc`.
+pub fn hologram_seen(view: f64, vertical: f64, npc: [f64; 3], player: [f64; 3]) -> bool {
+    if view > 0.0 {
+        let (dx, dz) = (npc[0] - player[0], npc[2] - player[2]);
+        if dx * dx + dz * dz > view * view {
+            return false;
+        }
+    }
+    vertical <= 0.0 || (npc[1] - player[1]).abs() <= vertical
+}
+
 /// An NPC's presence in the world.
 #[derive(Clone, Debug, Default)]
 struct Live {
@@ -469,6 +565,8 @@ pub struct World {
     pub chat_edits: HashMap<u128, ChatEdit>,
     /// Where online players look (yaw, pitch), set by the host every tick.
     pub rotations: HashMap<u128, [f32; 2]>,
+    /// WorldGuard regions the host fetched through `worldguard:region`: (world, id) -> shape.
+    pub regions: HashMap<(String, String), RegionShape>,
     /// `rotate -s`: NPC -> the yaw and pitch it is turning to.
     smooth: HashMap<i32, (f32, f32)>,
     /// Entities that hurt a followed one (`follow -p`): where they stand, set by the host.
@@ -579,6 +677,7 @@ impl World {
             path_editors: HashMap::new(),
             chat_edits: HashMap::new(),
             rotations: HashMap::new(),
+            regions: HashMap::new(),
             smooth: HashMap::new(),
             foes: HashMap::new(),
             foe_entity: HashMap::new(),
@@ -2593,6 +2692,20 @@ impl World {
                     let c = &centres[((self.rng.next_f64() * centres.len() as f64) as usize).min(centres.len() - 1)];
                     goal = [c.x + self.rng.between(-(xr as f64), xr as f64), c.y + self.rng.between(-(yr as f64), yr as f64).round(), c.z + self.rng.between(-(xr as f64), xr as f64)];
                 }
+                // `worldguardregion`: the goal stays inside the region (a few tries at random points of its box).
+                if let Some(region) = npc.wander_region().and_then(|r| self.regions.get(&(at.world.clone(), r))) {
+                    if let Some((lo, hi)) = region.bounds() {
+                        for _ in 0..16 {
+                            if region.contains(goal) {
+                                break;
+                            }
+                            goal = [self.rng.between(lo[0], hi[0]), self.rng.between(lo[1], hi[1]).floor(), self.rng.between(lo[2], hi[2])];
+                        }
+                        if !region.contains(goal) {
+                            continue;
+                        }
+                    }
+                }
                 set.push((id, goal, speed, false));
                 // Citizens' default delay is not in its plugin source; two to six seconds is a guess.
                 let wait = if delay > 0 { delay as u64 } else { 40 + (self.rng.next_f64() * 80.0) as u64 };
@@ -3972,5 +4085,191 @@ mod tests {
         let n = w.saves.get(id).unwrap();
         assert!(n.lookclose_flag("targetnpcs", false) && n.lookclose_flag("headonly", false));
         assert_eq!(n.random_look_delay(), Some(60));
+    }
+
+    // ---- round 7 ----------------------------------------------------------------------------
+
+    fn op_view(entity: u32) -> PlayerView {
+        PlayerView { uuid: 7, name: "Op".into(), dimension: "minecraft:overworld".into(), pos: [0.0, 64.0, 0.0], game_mode: 0, permission: 4, entity_id: entity as i32, sneaking: false }
+    }
+
+    fn cmd(w: &mut World, line: &str) -> String {
+        crate::horizon_citizens_core::commands::run(w, &creator(), line, || Err("x".into())).join("|")
+    }
+
+    #[test]
+    fn follow_protect_chases_whoever_hurts_the_followed_player() {
+        let mut w = world();
+        let id = spawned(&mut w, "Guard", 10);
+        w.select(7, id);
+        w.online = vec![op_view(900)];
+        assert!(!cmd(&mut w, "npc follow -p").contains("not supported"));
+        assert!(w.saves.get(id).unwrap().follow_protect());
+        assert_eq!(w.protectees(), vec![(900, id)]);
+        w.protect_hit(900, Some((0xBEEF, 77, [5.0, 64.0, 0.0])));
+        assert_eq!(w.targets.get(&id), Some(&(0xBEEF, true)));
+        assert_eq!(w.locate(0xBEEF).map(|l| l.1), Some([5.0, 64.0, 0.0]));
+        w.foe_report(0xBEEF, None);
+        assert!(w.targets.get(&id).is_none());
+    }
+
+    #[test]
+    fn pathto_margin_ends_the_walk_early() {
+        let mut w = world();
+        let id = spawned(&mut w, "Walker", 10);
+        w.select(7, id);
+        cmd(&mut w, "npc pathto 10 64 0 --margin 3");
+        assert_eq!(w.walks.get(&id).map(|k| k.margin), Some(3.0));
+    }
+
+    #[test]
+    fn rotate_s_turns_at_most_forty_degrees_a_tick() {
+        let mut w = world();
+        let id = spawned(&mut w, "Turner", 10);
+        w.select(7, id);
+        cmd(&mut w, "npc rotate -s --body 120 --pitch 0");
+        w.smooth_tick();
+        assert_eq!(w.live.get(&id).and_then(|l| l.look), Some((40.0, 0.0)));
+        w.smooth_tick();
+        w.smooth_tick();
+        assert_eq!(w.live.get(&id).and_then(|l| l.look).map(|l| l.0), Some(120.0));
+        assert!(w.smooth.is_empty(), "arrived");
+    }
+
+    #[test]
+    fn setequipment_cosmetic_and_hand() {
+        use crate::horizon_citizens_core::npc::{Cosmetic, StackData};
+        let mut w = world();
+        let id = spawned(&mut w, "Dresser", 10);
+        w.select(7, id);
+        let out = cmd(&mut w, "npc setequipment -c hand diamond_sword");
+        assert!(out.contains("(cosmetic)"), "{out}");
+        assert!(matches!(w.saves.get(id).unwrap().cosmetic("hand"), Cosmetic::Item(_)));
+        w.hand_item = Some(StackData::new("minecraft:stick", 3));
+        cmd(&mut w, "npc setequipment helmet hand");
+        let eq = w.saves.get(id).unwrap().equipment();
+        assert!(eq.iter().any(|e| e.slot == "head" && e.item == "stick" && e.count == 3), "{eq:?}");
+        assert!(eq.iter().all(|e| !(e.slot == "mainhand" && e.item == "diamond_sword")), "the cosmetic shows in the real slot only");
+    }
+
+    #[test]
+    fn wander_add_and_regions_keep_the_npc_inside() {
+        use crate::horizon_citizens_core::world::RegionShape;
+        let mut w = world();
+        let id = spawned(&mut w, "Wanderer", 10);
+        w.select(7, id);
+        cmd(&mut w, "npc wander");
+        assert!(cmd(&mut w, "npc wander add 100 64 100").contains("Added waypoint"));
+        assert_eq!(w.saves.get(id).unwrap().wander_centres().len(), 1);
+        assert!(cmd(&mut w, "npc wander worldguardregion spawn").contains("WorldGuard region set"));
+        assert_eq!(w.saves.get(id).unwrap().wander_region().as_deref(), Some("spawn"));
+        assert_eq!(w.wander_regions_wanted(), vec![("world".to_owned(), "spawn".to_owned())]);
+        let c = RegionShape::parse("cuboid\t0\t60\t0\t9\t70\t9").unwrap();
+        assert!(c.contains([5.5, 64.0, 5.5]) && !c.contains([10.5, 64.0, 5.5]));
+        let p = RegionShape::parse("polygon\t0\t100\t0,0;10,0;0,10").unwrap();
+        assert!(p.contains([1.5, 64.0, 1.5]) && !p.contains([9.5, 64.0, 9.5]));
+        assert_eq!(RegionShape::parse("global"), Some(RegionShape::Global));
+    }
+
+    #[test]
+    fn list_filters_by_tag_and_expression() {
+        let mut w = world();
+        let id = spawned(&mut w, "Tagged", 10);
+        spawned(&mut w, "Plain", 11);
+        w.select(7, id);
+        w.saves.get_mut(id).unwrap().map.put(&["traits", "scoreboardtrait", "tags"], Node::seq(vec![Node::str("vip")]));
+        let out = cmd(&mut w, "npc list --tag vip");
+        assert!(out.contains("Tagged") && !out.contains("Plain"), "{out}");
+        let all = cmd(&mut w, "npc list --filter 1");
+        assert!(all.contains("Tagged") && all.contains("Plain"), "{all}");
+        assert!(!cmd(&mut w, "npc list --filter 0").contains("Tagged"));
+    }
+
+    #[test]
+    fn skin_url_and_skull() {
+        use crate::horizon_citizens_core::npc::Skin;
+        let mut w = world();
+        let id = spawned(&mut w, "Skinned", 10);
+        w.select(7, id);
+        let texture = "eyJ0ZXh0dXJlcyI6eyJTS0lOIjp7InVybCI6Imh0dHA6Ly90ZXh0dXJlcy5taW5lY3JhZnQubmV0L3RleHR1cmUvYWJjIn19fQ==";
+        w.saves.get_mut(id).unwrap().set_skin(&Skin { name: Some("x".into()), texture: Some(texture.into()), signature: Some("sig".into()) });
+        assert!(cmd(&mut w, "npc skin -u").contains("http://textures.minecraft.net/texture/abc"));
+        w.take_ops();
+        cmd(&mut w, "npc skin -s");
+        let given = consoles(&mut w);
+        assert!(given.iter().any(|c| c.starts_with("give Op minecraft:player_head[profile=") && c.contains("signature:\"sig\"")), "{given:?}");
+        assert!(cmd(&mut w, "npc skin -l").contains("latest skins"));
+        assert!(w.saves.get(id).unwrap().update_skins());
+    }
+
+    #[test]
+    fn debug_i_shows_the_held_stack() {
+        let mut w = world();
+        let id = spawned(&mut w, "Debugger", 10);
+        w.select(7, id);
+        assert!(cmd(&mut w, "npc debug -i").contains("No item in hand"));
+        w.hand_item = Some(crate::horizon_citizens_core::npc::StackData::new("minecraft:stick", 1));
+        w.hand_snbt = Some("{id:\"minecraft:stick\",count:1}".into());
+        assert!(cmd(&mut w, "npc debug -i").contains("minecraft:stick"));
+    }
+
+    #[test]
+    fn hologram_view_range_bgcolor_duration_and_edit_npc() {
+        let mut w = world();
+        let id = spawned(&mut w, "Holo", 10);
+        w.select(7, id);
+        cmd(&mut w, "npc hologram add First");
+        assert!(cmd(&mut w, "npc hologram viewrange 8").contains("view range set to"));
+        assert!(cmd(&mut w, "npc hologram verticalviewrange 2").contains("vertical view range"));
+        assert!(cmd(&mut w, "npc hologram updaterate 10").contains("update rate"));
+        assert!(hologram_seen(8.0, 2.0, [0.0, 64.0, 0.0], [5.0, 65.0, 5.0]));
+        assert!(!hologram_seen(8.0, 2.0, [0.0, 64.0, 0.0], [7.0, 64.0, 7.0]), "too far");
+        assert!(!hologram_seen(8.0, 2.0, [0.0, 64.0, 0.0], [1.0, 70.0, 0.0]), "too high");
+        w.tick = 10;
+        assert_eq!(w.hologram_views().len(), 1, "due on a multiple of the update rate");
+        assert!(cmd(&mut w, "npc hologram bgcolor 0 #FF0000").contains("background color set"));
+        assert_eq!(w.saves.get(id).unwrap().hologram_lines()[0].bgcolor, Some(0xFFFF0000u32 as i32));
+        cmd(&mut w, "npc hologram add Gone --duration 2s");
+        assert_eq!(w.saves.get(id).unwrap().hologram_lines().len(), 2);
+        w.tick = 100;
+        w.holo_expire.iter_mut().for_each(|e| e.0 = 0);
+        w.tick(&[]);
+        assert_eq!(w.saves.get(id).unwrap().hologram_lines().len(), 1, "the temporary line went");
+        let out = cmd(&mut w, "npc hologram edit_npc 0");
+        assert!(out.contains("renderer NPC"), "{out}");
+        let tid = w.selected(7).unwrap();
+        assert_ne!(tid, id);
+        assert!(w.is_hologram_template(tid));
+        cmd(&mut w, "npc textdisplay --text Changed --shadowed false");
+        let line = &w.saves.get(id).unwrap().hologram_lines()[0];
+        assert_eq!(line.text, "Changed");
+        assert!(!line.shadowed);
+    }
+
+    #[test]
+    fn lookclose_switch_targets_filter_and_linked_body() {
+        let mut w = world();
+        let id = spawned(&mut w, "Looker", 10);
+        w.select(7, id);
+        cmd(&mut w, "npc lookclose --range 20 --randomswitchtargets true --randomlookdelay 1t --filter permission=vip.look");
+        w.saves.get_mut(id).unwrap().set_look_close(true);
+        let mut a = player(5.0, 0.0);
+        a.uuid = 1;
+        let mut b = player(8.0, 0.0);
+        b.uuid = 2;
+        // Without the permission nobody passes the filter.
+        w.tick = 2;
+        w.look_close(&[a.clone(), b.clone()]);
+        assert_eq!(w.live.get(&id).unwrap().look_target, None);
+        w.player_perms.insert(1, ["vip.look".to_owned()].into_iter().collect());
+        w.player_perms.insert(2, ["vip.look".to_owned()].into_iter().collect());
+        w.look_close(&[a.clone(), b.clone()]);
+        assert_eq!(w.live.get(&id).unwrap().look_target, Some(1), "the nearest first");
+        w.tick = 10;
+        w.look_close(&[a, b]);
+        assert_eq!(w.live.get(&id).unwrap().look_target, Some(2), "switched to the other one");
+        w.saves.get_mut(id).unwrap().map.put(&["traits", "lookclose", "realisticlooking"], Node::bool(true));
+        w.sight.insert((id, 2), false);
+        assert_eq!(w.sight_wanted().len(), 1);
     }
 }

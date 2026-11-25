@@ -1365,6 +1365,33 @@ impl Hooks for Citizens {
                 held.push((info.view.uuid, nodes));
             }
         }
+        // `wander worldguardregion`: the shapes of the regions the wandering NPCs stay in (the WorldGuard mod's service).
+        let region_shapes: Vec<((String, String), core::world::RegionShape)> =
+            api::with_world(|w| if w.tick % 40 == 0 { w.wander_regions_wanted() } else { Vec::new() })
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(world, id)| {
+                    let reply = host.commands().call_mod_service("worldguard:region", format!("{world}\t{id}").as_bytes()).ok()?;
+                    let shape = core::world::RegionShape::parse(&String::from_utf8_lossy(&reply))?;
+                    Some(((world, id), shape))
+                })
+                .collect();
+        // Hologram view ranges: each player sees a hologram only within `viewRange` / `verticalViewRange`.
+        let views = api::with_world(|w| w.hologram_views()).unwrap_or_default();
+        if !views.is_empty() {
+            for p in host.players().server_players() {
+                let Some(info) = player_info(&*host, p) else { continue };
+                for v in &views {
+                    let seen = info.view.dimension == v.dimension
+                        && core::world::hologram_seen(v.view, v.vertical, v.pos, info.view.pos);
+                    for u in &v.uuids {
+                        if let Some(e) = host.entity_by_uuid(*u) {
+                            let _ = e.set_visible_to(host, p, seen);
+                        }
+                    }
+                }
+            }
+        }
         // `follow -p`: who hurt a followed entity, and where the foes being chased stand.
         let hits: Vec<(u32, Option<(u128, u32, [f64; 3])>)> = api::take_protect_hits()
             .into_iter()
@@ -1412,6 +1439,9 @@ impl Hooks for Citizens {
             }
             w.rotations = rotations.into_iter().collect();
             w.sight = sight.into_iter().collect();
+            for (k, shape) in region_shapes {
+                w.regions.insert(k, shape);
+            }
             for (victim, foe) in hits {
                 w.protect_hit(victim, foe);
             }

@@ -994,6 +994,29 @@ impl NpcData {
             None => false,
         }
     }
+    /// The renderer NPC tag (`<owner id>:<line|name|template>`) of a `hologram edit_npc` NPC.
+    pub fn hologram_template_tag(&self) -> Option<String> {
+        text_at(&self.map, &["metadata", "hologram-template"])
+    }
+    pub fn set_hologram_template_tag(&mut self, tag: &str) {
+        self.map.put(&["metadata", "hologram-template"], Node::str(tag));
+    }
+    /// Sets the `shadowed` / `seeThrough` flags of line `i`'s renderer.
+    pub fn set_hologram_renderer_flags(&mut self, i: usize, shadowed: Option<bool>, see_through: Option<bool>) {
+        let seq = self.hologram_seq();
+        if let Some(node) = seq.get_mut(i) {
+            if !node.is_map() {
+                let text = node.text().unwrap_or_default();
+                *node = Self::line_node(&text);
+            }
+            if let Some(s) = shadowed {
+                node.map_at(&["renderer"]).set("shadowed", Node::bool(s));
+            }
+            if let Some(s) = see_through {
+                node.map_at(&["renderer"]).set("seeThrough", Node::bool(s));
+            }
+        }
+    }
     /// A hologram setting that is an integer (`viewRange`, `nameBgcolor`, ...).
     pub fn hologram_int(&self, key: &str) -> Option<i64> {
         self.map.at(&["traits", "hologramtrait", key]).and_then(Node::as_i64)
