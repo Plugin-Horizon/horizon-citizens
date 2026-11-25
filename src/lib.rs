@@ -907,7 +907,14 @@ impl Hooks for Citizens {
             .filter_map(|p| player_info(&*host, p))
             .map(|info| info.view)
             .collect();
+        let rotations: Vec<(u128, [f32; 2])> = host
+            .players()
+            .server_players()
+            .into_iter()
+            .filter_map(|p| player_info(&*host, p).map(|i| (i.view.uuid, i.rot)))
+            .collect();
         api::with_world(|w| {
+            w.rotations = rotations.into_iter().collect();
             for f in fetched {
                 w.skin_fetched(f);
             }
@@ -946,8 +953,19 @@ impl Hooks for Citizens {
 
     fn right_click_block(&self, _host: HostSide, event: &mut mod_api::RightClickBlockEvent<'_>) -> Flow {
         let (player, pos) = (event.click.player, event.click.pos);
-        let ours = api::with_world(|w| core::commands::copier_click(w, player, pos)).unwrap_or(false);
+        let ours = api::with_world(|w| core::commands::copier_click(w, player, pos) || core::commands::path_click(w, player, pos, false))
+            .unwrap_or(false);
         if ours { Flow::Cancel } else { Flow::Continue }
+    }
+
+    fn left_click_block(&self, host: &mut dyn ServerHost, event: &mut mod_api::LeftClickBlockEvent) -> Flow {
+        let Some(player) = host.players().acting_player() else { return Flow::Continue };
+        let (uuid, pos) = (player.uuid(), event.pos);
+        if api::with_world(|w| core::commands::path_click(w, uuid, pos, true)).unwrap_or(false) {
+            Flow::Cancel
+        } else {
+            Flow::Continue
+        }
     }
 
     fn menu_closed(&self, _: &mut dyn ServerHost, event: &mut MenuClosedEvent) {

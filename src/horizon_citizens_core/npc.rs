@@ -1255,6 +1255,22 @@ impl NpcData {
             .map(|s| s.iter().filter_map(Node::text).collect())
             .unwrap_or_default()
     }
+    /// `talk-close` of the text trait: say the lines to players who come near (off unless saved true).
+    pub fn talk_close(&self) -> bool {
+        self.map.at(&["traits", "text", "talk-close"]).and_then(Node::as_bool).unwrap_or(false)
+    }
+    pub fn set_talk_close(&mut self, on: bool) {
+        self.map.put(&["traits", "text", "talk-close"], Node::bool(on));
+        self.add_trait_name("text");
+    }
+    /// The text trait's `range` (blocks), 5 by default.
+    pub fn talk_range(&self) -> f64 {
+        self.map.at(&["traits", "text", "range"]).and_then(Node::as_f64).unwrap_or(5.0)
+    }
+    pub fn set_talk_range(&mut self, r: f64) {
+        self.map.put(&["traits", "text", "range"], Node::float(r));
+        self.add_trait_name("text");
+    }
     /// Replaces the talk lines; none removes the trait.
     pub fn set_talk_lines(&mut self, lines: &[String]) {
         if lines.is_empty() {

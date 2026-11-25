@@ -106,6 +106,30 @@ pub enum Op {
 pub enum MenuKind {
     Inventory,
     Drops,
+    /// `GenericEquipperGUI`: three rows, the NPC's equipment in row 1.
+    Equipment,
+}
+
+/// The equipment slots of the menu's row 1 (`GenericEquipperGUI`): hand, off hand, helmet, chestplate,
+/// leggings, boots; the two last cells (body, saddle) are unused here.
+const EQUIPMENT_MENU: [&str; 6] = ["hand", "off_hand", "helmet", "chestplate", "leggings", "boots"];
+
+/// The equipment cell an item goes to: by its name's ending, the shield or elytra, else the hand.
+fn equipment_cell_for(id: &str) -> usize {
+    let name = id.trim_start_matches("minecraft:");
+    if name.ends_with("_helmet") || name.ends_with("_head") || name == "turtle_helmet" {
+        2
+    } else if name.ends_with("_chestplate") || name == "elytra" {
+        3
+    } else if name.ends_with("_leggings") {
+        4
+    } else if name.ends_with("_boots") {
+        5
+    } else if name == "shield" {
+        1
+    } else {
+        0
+    }
 }
 
 /// What a click in an open menu asks the glue to do.
@@ -132,11 +156,31 @@ struct MenuSession {
 impl MenuSession {
     /// `DropsTrait.DropsGUI`: items live in rows 0, 2 and 4; rows 1 and 3 hold the chance barriers.
     fn is_item_slot(&self, slot: usize) -> bool {
-        self.kind == MenuKind::Inventory || (slot / 9) % 2 == 0
+        match self.kind {
+            MenuKind::Inventory => true,
+            MenuKind::Drops => (slot / 9) % 2 == 0,
+            MenuKind::Equipment => (9..9 + EQUIPMENT_MENU.len()).contains(&slot),
+        }
     }
 
     fn shown(&self) -> Vec<Option<StackData>> {
         let mut out = self.slots.clone();
+        if self.kind == MenuKind::Equipment {
+            let labels = ["Place in hand item below", "Place offhand item below", "Place helmet below", "Place chestplate below", "Place leggings below", "Place boots below"];
+            let icons = ["minecraft:diamond_sword", "minecraft:shield", "minecraft:diamond_helmet", "minecraft:diamond_chestplate", "minecraft:diamond_leggings", "minecraft:diamond_boots"];
+            for (i, cell) in out.iter_mut().enumerate() {
+                if i < 6 {
+                    let mut b = StackData::new(icons[i], 1);
+                    b.meta.display_name = Some(labels[i].to_owned());
+                    *cell = Some(b);
+                } else if !self.is_item_slot(i) {
+                    let mut b = StackData::new("minecraft:barrier", 1);
+                    b.meta.display_name = Some("Unused".to_owned());
+                    *cell = Some(b);
+                }
+            }
+            return out;
+        }
         if self.kind == MenuKind::Drops {
             for (i, cell) in out.iter_mut().enumerate() {
                 if !self.is_item_slot(i) {
@@ -262,6 +306,12 @@ pub struct World {
     menus: HashMap<u128, MenuSession>,
     /// Players with the NPC copier on: the NPC they copy.
     pub copiers: HashMap<u128, i32>,
+    /// Players with the linear waypoint editor on: the NPC they edit.
+    pub path_editors: HashMap<u128, i32>,
+    /// Where online players look (yaw, pitch), set by the host every tick.
+    pub rotations: HashMap<u128, [f32; 2]>,
+    /// `Text.cooldowns`: (NPC, player) -> the tick it may talk to that player again.
+    talk_cd: HashMap<(i32, u128), u64>,
     /// `WardenTrait.anger`: NPC id -> entity uuid -> anger.
     warden_anger: HashMap<i32, BTreeMap<u128, i32>>,
     teams_made: BTreeSet<String>,
@@ -315,6 +365,9 @@ impl World {
             mounted: HashMap::new(),
             menus: HashMap::new(),
             copiers: HashMap::new(),
+            path_editors: HashMap::new(),
+            rotations: HashMap::new(),
+            talk_cd: HashMap::new(),
             warden_anger: HashMap::new(),
             teams_made: BTreeSet::new(),
             fetching: BTreeSet::new(),
@@ -1068,6 +1121,31 @@ impl World {
     // ---- the tick -----------------------------------------------------------------------
 
     /// One server tick, with the players online.
+    /// `Text.run`: an NPC with `talk-close` says a line to each player within its `range` (5 by default),
+    /// then not to that player again for 5 to 10 seconds (`npc.text.default-random-text-delay-*`).
+    fn talk_close(&mut self, players: &[PlayerView]) {
+        let ids: Vec<i32> = self.live.keys().copied().collect();
+        for id in ids {
+            let Some(npc) = self.saves.get(id).filter(|n| n.talk_close()).cloned() else { continue };
+            let (Some(at), Some(dim)) = (self.current_location(id), self.dimension_of(id)) else { continue };
+            if self.entity_of(id).is_none() {
+                continue;
+            }
+            let range = npc.talk_range();
+            for p in players.iter().filter(|p| p.dimension == dim) {
+                if look::dist2([at.x, at.y, at.z], p.pos) > range * range {
+                    continue;
+                }
+                if self.talk_cd.get(&(id, p.uuid)).is_some_and(|t| self.tick < *t) {
+                    continue;
+                }
+                self.talk(p, &npc);
+                let wait = 100 + (self.rng.next_f64() * 100.0) as u64;
+                self.talk_cd.insert((id, p.uuid), self.tick + wait);
+            }
+        }
+    }
+
     /// The dimension an online player stands in.
     pub fn online_dimension(&self, player: u128) -> Option<String> {
         self.online.iter().find(|p| p.uuid == player).map(|p| p.dimension.clone())
@@ -1126,6 +1204,19 @@ impl World {
         self.start_menu(player, "Add items for drops".into(), MenuSession { npc, kind: MenuKind::Drops, rows: 5, window: None, slots, chances });
     }
 
+    /// `/npc equip` with no arguments: the equipment menu. Click one of your stacks to put it on the NPC
+    /// (helmet, chestplate, leggings, boots, shield by its name, else the hand); click a worn stack to take it off.
+    pub fn open_equipment(&mut self, player: u128, npc: i32) {
+        let Some(data) = self.saves.get(npc) else { return };
+        let mut slots = vec![None; 27];
+        for (i, name) in EQUIPMENT_MENU.iter().enumerate() {
+            if let Some(n) = data.map.at(&["traits", "equipment", name]).and_then(StackData::from_node) {
+                slots[9 + i] = Some(n);
+            }
+        }
+        self.start_menu(player, "NPC Equipment".into(), MenuSession { npc, kind: MenuKind::Equipment, rows: 3, window: None, slots, chances: vec![1.0; 27] });
+    }
+
     fn start_menu(&mut self, player: u128, title: String, session: MenuSession) {
         let items = session.shown();
         let rows = session.rows;
@@ -1174,7 +1265,7 @@ impl World {
             return MenuAction::Deposit { inv_slot: inv_slot as u32 };
         }
         if !m.is_item_slot(slot) {
-            if slot >= 9 && m.slots[slot - 9].is_some() {
+            if m.kind == MenuKind::Drops && slot >= 9 && m.slots[slot - 9].is_some() {
                 // `PercentageSlotHandler`: 10 per click, 1 with shift, right click down, kept in 0..=100.
                 let c = &mut m.chances[slot - 9];
                 let dx = (if shift { 1 } else { 10 }) * if button == 1 { -1 } else { 1 };
@@ -1193,7 +1284,12 @@ impl World {
     /// Puts `stack` into the first free item slot of the player's open menu; whether there was room.
     pub fn menu_deposit(&mut self, player: u128, stack: StackData) -> bool {
         let Some(m) = self.menus.get_mut(&player) else { return false };
-        let free = (0..m.slots.len()).find(|i| m.is_item_slot(*i) && m.slots[*i].is_none());
+        let free = if m.kind == MenuKind::Equipment {
+            let cell = 9 + equipment_cell_for(&stack.id);
+            m.slots[cell].is_none().then_some(cell)
+        } else {
+            (0..m.slots.len()).find(|i| m.is_item_slot(*i) && m.slots[*i].is_none())
+        };
         let Some(i) = free else { return false };
         m.slots[i] = Some(stack);
         m.chances[i] = 1.0;
@@ -1212,6 +1308,21 @@ impl World {
             MenuKind::Inventory => npc.set_inventory(
                 m.slots.into_iter().enumerate().filter_map(|(i, s)| Some((i as i64, s?))).collect(),
             ),
+            MenuKind::Equipment => {
+                for (i, name) in EQUIPMENT_MENU.iter().enumerate() {
+                    match &m.slots[9 + i] {
+                        Some(st) => npc.map.put(&["traits", "equipment", name], st.to_node()),
+                        None => {
+                            npc.map.drop_path(&["traits", "equipment", name]);
+                        }
+                    }
+                }
+                npc.add_trait_name("equipment");
+                let id = m.npc;
+                self.mark_dirty();
+                self.respawn(id);
+                return;
+            }
             MenuKind::Drops => npc.set_drops(
                 m.slots
                     .into_iter()
@@ -1285,6 +1396,9 @@ impl World {
         }
         self.walk();
         self.check_all_mounts();
+        if self.tick % 5 == 0 {
+            self.talk_close(players);
+        }
         if self.tick % 2 == 0 {
             self.look_close(players);
         }

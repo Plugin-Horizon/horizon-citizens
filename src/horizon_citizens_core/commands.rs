@@ -3456,7 +3456,19 @@ fn text_lines(w: &mut World, sender: &Sender, tail: &str) -> Res {
             lines.clear();
             say(w, "Text cleared.")
         }
-        _ => return Err(err(w, "Usage: /npc text add <text>|remove <line>|clear|list", &[])),
+        "talkclose" => {
+            let on = !npc_mut(w, id)?.talk_close();
+            npc_mut(w, id)?.set_talk_close(on);
+            w.mark_dirty();
+            return Ok(say(w, if on { "Now talking to nearby players." } else { "No longer talking to nearby players." }));
+        }
+        "range" => {
+            let r: f64 = rest.trim().parse().map_err(|_| err(w, M_INVALID_NUMBER, &[]))?;
+            npc_mut(w, id)?.set_talk_range(r);
+            w.mark_dirty();
+            return Ok(say(w, &format!("Talk range set to [[{r}]] blocks.")));
+        }
+        _ => return Err(err(w, "Usage: /npc text add <text>|remove <line>|clear|list|talkclose|range <blocks>", &[])),
     };
     npc_mut(w, id)?.set_talk_lines(&lines);
     w.mark_dirty();
@@ -3592,7 +3604,9 @@ pub fn copier_click(w: &mut World, player: u128, pos: [i32; 3]) -> bool {
         return false;
     };
     let name = npc.name();
-    let (yaw, pitch) = npc.location().map_or((0.0, 0.0), |l| (l.yaw, l.pitch));
+    // The player's own turn, as `CopierEditor` takes it; the original's when the host has not said.
+    let own = npc.location().map_or((0.0, 0.0), |l| (l.yaw, l.pitch));
+    let [yaw, pitch] = w.rotations.get(&player).copied().unwrap_or([own.0, own.1]);
     let loc = Location {
         world: w.cfg.worlds.world_name(&dim),
         x: f64::from(pos[0]),
@@ -3650,6 +3664,13 @@ fn jump(w: &mut World, sender: &Sender) -> Res {
 /// `/npc equip <slot> [item] [amount]`: an empty slot when no item is given (Citizens opens a GUI).
 fn equip(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let id = target(w, sender)?;
+    if args.words.is_empty() {
+        let Some(who) = sender.uuid else {
+            return Err(err(w, M_MUST_BE_INGAME, &[]));
+        };
+        w.open_equipment(who, id);
+        return Ok(Vec::new());
+    }
     let usage = "Usage: /npc equip <hand|off_hand|helmet|chestplate|leggings|boots> [item] [amount]";
     let slot = args.words.first().ok_or_else(|| err(w, usage, &[]))?.to_ascii_lowercase();
     if !crate::horizon_citizens_core::npc::EQUIPMENT_SLOTS.iter().any(|(c, _)| *c == slot) {
@@ -3699,6 +3720,60 @@ fn setequipment(w: &mut World, sender: &Sender, args: &Args, c: &Cmd) -> Res {
     Ok(ok(w, M_EQUIPMENT_SET, &[&slot_arg, &shown]))
 }
 
+const M_PATH_BEGIN: &str = "<green>=== [[Linear Waypoint Editor]] ===<br><br>[[Left click]] to add a waypoint, [[right click]] to remove it.";
+const M_PATH_END: &str = "Exited the linear waypoint editor.";
+const M_PATH_ADDED: &str = "[[Added]] a waypoint at ({0}) ([[{1}]] total).";
+const M_PATH_REMOVED: &str = "[[Removed]] a waypoint ([[{0}]] remaining)";
+const M_PATH_RANGE: &str = "Previous waypoint is {0} blocks away but the distance limit is {1}.";
+
+/// A click on the block `pos` by a player in the waypoint editor (`LinearWaypointEditor.onPlayerInteract`): a
+/// left click adds a waypoint on top of the block (refused beyond the navigator's range of 25 from the last
+/// one), a right click without sneaking removes the last. Whether the click was the editor's.
+pub fn path_click(w: &mut World, player: u128, pos: [i32; 3], left: bool) -> bool {
+    use crate::horizon_citizens_core::world::Op;
+    let Some(id) = w.path_editors.get(&player).copied() else {
+        return false;
+    };
+    let Some(dim) = w.online_dimension(player) else {
+        return false;
+    };
+    let sneaking = w.online.iter().any(|p| p.uuid == player && p.sneaking);
+    let mut lines = Vec::new();
+    let world = w.cfg.worlds.world_name(&dim);
+    if left {
+        let at = Location { world, x: f64::from(pos[0]), y: f64::from(pos[1] + 1), z: f64::from(pos[2]), yaw: 0.0, pitch: 0.0, body_yaw: 0.0 };
+        let points = w.saves.get(id).map(NpcData::waypoints).unwrap_or_default();
+        if let Some(prev) = points.last().filter(|p| p.world == at.world) {
+            let d = crate::horizon_citizens_core::look::dist2([prev.x, prev.y, prev.z], [at.x, at.y, at.z]).sqrt();
+            if d > 25.0 {
+                lines = err(w, M_PATH_RANGE, &[&format!("{d}"), "25.0"]);
+            }
+        }
+        if lines.is_empty() {
+            if let Some(n) = w.saves.get_mut(id) {
+                n.add_waypoint(&at);
+            }
+            w.mark_dirty();
+            let total = w.saves.get(id).map_or(0, |n| n.waypoints().len());
+            lines = ok(w, M_PATH_ADDED, &[&format!("{}, {}, {}", at.x, at.y, at.z), &total.to_string()]);
+        }
+    } else {
+        let n = w.saves.get(id).map_or(0, |n| n.waypoints().len());
+        if n == 0 || sneaking {
+            return false;
+        }
+        if let Some(npc) = w.saves.get_mut(id) {
+            npc.remove_waypoint(n - 1);
+        }
+        w.mark_dirty();
+        lines = ok(w, M_PATH_REMOVED, &[&(n - 1).to_string()]);
+    }
+    for legacy in lines {
+        w.push_op(Op::Tell { player, legacy });
+    }
+    true
+}
+
 /// `/npc path add|remove <point>|clear|list`: the linear waypoints the NPC walks in order (no
 /// pathfinding; Citizens' path-recording editor is not done).
 fn path(w: &mut World, sender: &Sender, tail: &str) -> Res {
@@ -3711,7 +3786,17 @@ fn path(w: &mut World, sender: &Sender, tail: &str) -> Res {
             w.mark_dirty();
             Ok(say(w, &format!("Point added at [[{:.1} {:.1} {:.1}]].", loc.x, loc.y, loc.z)))
         }
-        "" | "list" => {
+        "" => {
+            let Some(who) = sender.uuid else {
+                return Err(err(w, M_MUST_BE_INGAME, &[]));
+            };
+            if w.path_editors.remove(&who).is_some() {
+                return Ok(ok(w, M_PATH_END, &[]));
+            }
+            w.path_editors.insert(who, id);
+            Ok(ok(w, M_PATH_BEGIN, &[]))
+        }
+        "list" => {
             let points = npc_mut(w, id)?.waypoints();
             let mut out = say(w, &header(&format!("Path ({} points)", points.len())));
             for (i, p) in points.iter().enumerate() {
@@ -4603,6 +4688,79 @@ mod tests {
         assert!(run_ok(&mut w, &s, "npc warden roar")[0].contains("pose set to"));
         run_ok(&mut w, &s, "npc create Bob");
         assert!(run_ok(&mut w, &s, "npc warden roar")[0].contains("cannot be the mob type"));
+    }
+
+    #[test]
+    fn path_editor_adds_on_left_click_and_removes_on_right_click() {
+        let mut w = world();
+        let s = sender(2);
+        two_spawned(&mut w, &s);
+        let r = run_ok(&mut w, &s, "npc path");
+        assert!(r[0].contains("Linear Waypoint Editor"), "{r:?}");
+        w.online = vec![crate::horizon_citizens_core::look::PlayerView {
+            uuid: 0xA1, name: "Alex".into(), dimension: "minecraft:overworld".into(), pos: [0.0; 3],
+            game_mode: 0, permission: 2, entity_id: 900, sneaking: false,
+        }];
+        assert!(path_click(&mut w, 0xA1, [4, 64, 4], true));
+        assert!(path_click(&mut w, 0xA1, [6, 64, 4], true));
+        assert!(w.take_ops().iter().any(|o| matches!(o, Op::Tell { legacy, .. } if legacy.contains("a waypoint at (6, 65, 4)"))));
+        assert_eq!(w.saves.get(0).unwrap().waypoints().len(), 2);
+        assert!(path_click(&mut w, 0xA1, [0, 0, 0], false));
+        assert_eq!(w.saves.get(0).unwrap().waypoints().len(), 1);
+        // Too far from the last point.
+        path_click(&mut w, 0xA1, [100, 64, 4], true);
+        assert_eq!(w.saves.get(0).unwrap().waypoints().len(), 1);
+        assert!(run_ok(&mut w, &s, "npc path")[0].contains("Exited"));
+        assert!(!path_click(&mut w, 0xA1, [4, 64, 4], true));
+    }
+
+    #[test]
+    fn equipment_menu_puts_items_on_the_right_slot() {
+        use crate::horizon_citizens_core::world::MenuAction;
+        let mut w = world();
+        let s = sender(2);
+        two_spawned(&mut w, &s);
+        assert!(run_ok(&mut w, &s, "npc equip").is_empty());
+        let ops = w.take_ops();
+        let Some(Op::OpenMenu { rows, title, .. }) = ops.iter().find(|o| matches!(o, Op::OpenMenu { .. })) else { panic!("{ops:?}") };
+        assert_eq!((*rows, title.as_str()), (3, "NPC Equipment"));
+        w.menu_opened(0xA1, Some(2));
+        assert!(w.menu_deposit(0xA1, crate::horizon_citizens_core::npc::StackData::new("minecraft:iron_boots", 1)));
+        assert!(w.menu_deposit(0xA1, crate::horizon_citizens_core::npc::StackData::new("minecraft:stick", 1)));
+        assert!(!w.menu_deposit(0xA1, crate::horizon_citizens_core::npc::StackData::new("minecraft:stone", 1)), "hand is taken");
+        // Row 1, cell 5 (boots) is menu slot 14: taking it off.
+        assert!(matches!(w.menu_click(0xA1, 2, 14, 0, false), MenuAction::Take(_)));
+        assert!(w.menu_deposit(0xA1, crate::horizon_citizens_core::npc::StackData::new("minecraft:iron_boots", 1)));
+        w.menu_closed(0xA1, 2);
+        let n = w.saves.get(0).unwrap();
+        assert_eq!(n.map.at(&["traits", "equipment", "boots", "type"]).and_then(Node::text).as_deref(), Some("iron_boots"));
+        assert_eq!(n.map.at(&["traits", "equipment", "hand", "type"]).and_then(Node::text).as_deref(), Some("stick"));
+    }
+
+    #[test]
+    fn talk_close_speaks_to_players_in_range_once_per_delay() {
+        let mut w = world();
+        let s = sender(2);
+        two_spawned(&mut w, &s);
+        run_ok(&mut w, &s, "npc text add Hello there");
+        run_ok(&mut w, &s, "npc text talkclose");
+        let near = crate::horizon_citizens_core::look::PlayerView {
+            uuid: 0xA1, name: "Alex".into(), dimension: "minecraft:overworld".into(), pos: [2.0, 64.0, 0.0],
+            game_mode: 0, permission: 0, entity_id: 900, sneaking: false,
+        };
+        let mut far = near.clone();
+        far.uuid = 0xB2;
+        far.pos = [200.0, 64.0, 0.0];
+        w.take_ops();
+        for _ in 0..5 {
+            w.tick(&[near.clone(), far.clone()]);
+        }
+        let said: Vec<_> = w.take_ops().into_iter().filter(|o| matches!(o, Op::Tell { legacy, .. } if legacy.contains("Hello there"))).collect();
+        assert_eq!(said.len(), 1, "{said:?}");
+        for _ in 0..40 {
+            w.tick(&[near.clone()]);
+        }
+        assert!(!w.take_ops().iter().any(|o| matches!(o, Op::Tell { .. })), "within the delay");
     }
 
     #[test]
