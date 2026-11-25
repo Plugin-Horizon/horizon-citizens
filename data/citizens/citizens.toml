@@ -78,3 +78,21 @@ multiple-targets-format = "<target>|, <target>| & <target>| & others"
 message = "&a"
 highlight = "&e"
 error = "&c"
+
+[shops]
+# Citizens' npc.shops.*. A node every viewer of any NPC shop needs (empty: none).
+global-view-permission = ""
+# Add the cost and result of an item to its lore when it has none.
+add-default-item-description = false
+
+[shops.default-item]
+# What a new shop item starts with (empty or 0: nothing).
+already-purchased-message = ""
+click-to-confirm-message = ""
+cost-message = ""
+result-message = ""
+max-repeats-on-shift-click = false
+times-purchasable = 0
+global-times-purchasable = 0
+lore = ""
+name = ""

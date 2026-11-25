@@ -30,6 +30,8 @@ pub struct Config {
     /// Blocks around a player within which an NPC is (re)spawned when it is not out: its chunk is
     /// loaded there.
     pub spawn_radius: f64,
+    /// `npc.shops.*`: the shop settings.
+    pub shops: crate::horizon_citizens_core::shop::ShopsConfig,
 }
 
 impl Default for Config {
@@ -48,6 +50,7 @@ impl Default for Config {
             messages: Messages::default(),
             reload_warning_enabled: true,
             spawn_radius: 96.0,
+            shops: Default::default(),
         }
     }
 }
@@ -361,6 +364,36 @@ impl Config {
         if let Some(v) = text_of("npc.chat.format.no-targets") {
             cfg.talk.format = v;
         }
+        if let Some(v) = text_of("npc.defaults.shops.global-view-permission").or_else(|| text_of("npc.shops.global-view-permission")) {
+            cfg.shops.global_view_permission = v;
+        }
+        if let Some(v) = boolean("npc.shops.add-default-item-description") {
+            cfg.shops.add_default_item_description = v;
+        }
+        {
+            let d = &mut cfg.shops.default_item;
+            for (key, slot) in [
+                ("already-purchased-message", &mut d.already_purchased_message),
+                ("click-to-confirm-message", &mut d.click_to_confirm_message),
+                ("cost-message", &mut d.cost_message),
+                ("result-message", &mut d.result_message),
+                ("lore", &mut d.lore),
+                ("name", &mut d.name),
+            ] {
+                if let Some(v) = text_of(&format!("npc.shops.default-item.{key}")) {
+                    *slot = v;
+                }
+            }
+            if let Some(v) = boolean("npc.shops.default-item.max-repeats-on-shift-click") {
+                d.max_repeats_on_shift_click = v;
+            }
+            if let Some(v) = float("npc.shops.default-item.times-purchasable") {
+                d.times_purchasable = v as i32;
+            }
+            if let Some(v) = float("npc.shops.default-item.global-times-purchasable") {
+                d.global_times_purchasable = v as i32;
+            }
+        }
         if let Some(file) = text_of("storage.file") {
             // Citizens keeps the file in its own folder.
             cfg.saves_file = format!("plugins/Citizens/{file}");
@@ -459,6 +492,18 @@ pub const CITIZENS_CONFIG_KEYS: &[&str] = &[
     "npc.selection.message",
     "npc.chat.format.no-targets",
     "storage.file",
+    "npc.defaults.shops.global-view-permission",
+    "npc.shops.global-view-permission",
+    "npc.shops.add-default-item-description",
+    "npc.shops.default-item.already-purchased-message",
+    "npc.shops.default-item.click-to-confirm-message",
+    "npc.shops.default-item.cost-message",
+    "npc.shops.default-item.result-message",
+    "npc.shops.default-item.lore",
+    "npc.shops.default-item.name",
+    "npc.shops.default-item.max-repeats-on-shift-click",
+    "npc.shops.default-item.times-purchasable",
+    "npc.shops.default-item.global-times-purchasable",
     "general.color-scheme.message",
     "general.color-scheme.message-highlight",
     "general.color-scheme.message-error",

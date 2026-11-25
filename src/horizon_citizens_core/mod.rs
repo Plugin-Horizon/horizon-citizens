@@ -11,6 +11,7 @@ pub mod javaser;
 pub mod look;
 pub mod npc;
 pub mod saves;
+pub mod shop;
 pub mod skin;
 pub mod spawn;
 pub mod text;
