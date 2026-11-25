@@ -102,6 +102,17 @@ const M_CMD_ADDED: &str = "Command [[{0}]] added with id [[{1}]].";
 const M_CMD_REMOVED: &str = "Command [[{0}]] removed.";
 const M_CMD_CLEARED: &str = "[[{0}]]''s commands cleared.";
 const M_CMD_UNKNOWN_ID: &str = "Unknown command id [[{0}]] for this NPC.";
+const M_CMD_SEQUENTIAL_SET: &str = "Commands will now run one per click, in order, for each player.";
+const M_CMD_SEQUENTIAL_UNSET: &str = "Commands will now all run on a click.";
+const M_CMD_CYCLE_SET: &str = "Commands will now run one per click, in order, for all players.";
+const M_CMD_CYCLE_UNSET: &str = "Commands will now all run on a click.";
+const M_CMD_RANDOM_SET: &str = "A random command will now run on a click.";
+const M_CMD_RANDOM_UNSET: &str = "Commands will now all run on a click.";
+const M_CMD_COST_MISSING: &str = "Missing cost.";
+const M_CMD_COST_SET: &str = "The click cost is now [[{0}]].";
+const M_CMD_EXPCOST_SET: &str = "The click experience cost is now [[{0}]] levels.";
+const M_CMD_HIDE_SET: &str = "Command error messages are now hidden.";
+const M_CMD_HIDE_UNSET: &str = "Command error messages are now shown.";
 const M_CMD_NONE: &str = "No commands have been added.";
 const M_CMD_LEFT: &str = "Commands to run on [[left click]]:";
 const M_CMD_RIGHT: &str = "Commands to run on [[right click]]:";
@@ -345,10 +356,12 @@ const CMDS: &[Cmd] = &[
     cmd("skinlayers", &[], "skinlayers (--cape [true|false]) (--hat [true|false]) (--jacket [true|false]) (--sleeves [true|false]) (--pants [true|false])", 1, Some(1), "citizens.npc.skinlayers"),
     cmd("entitypose", &[], "entitypose [pose]", 1, Some(2), "citizens.npc.entitypose"),
     cmd("metadata", &[], "metadata set|get|remove [key] (value) (-t(emporary))", 3, None, "citizens.npc.metadata"),
+    cmd("behavior", &[], "behavior [file.yml]", 2, Some(2), "citizens.npc.behavior"),
+    cmd("eval", &[], "eval [expression]", 2, None, "citizens.npc.eval"),
 ];
 
 /// Citizens modifiers this port does not have (they answer "not supported", not "Too many arguments").
-const CITIZENS_ONLY: &[&str] = &["behavior", "cload", "pushable", "eval", "fish", "nophysics", "target", "velocity", "vel", "donkey", "mule"];
+const CITIZENS_ONLY: &[&str] = &["cload", "pushable", "fish", "nophysics", "target", "velocity", "vel", "donkey", "mule"];
 
 fn find_cmd(sub: &str) -> Option<&'static Cmd> {
     let sub = sub.to_ascii_lowercase();
@@ -654,6 +667,8 @@ pub fn help_lines() -> Vec<String> {
 pub const NODES: &[&str] = &[
     "citizens.admin",
     "citizens.npc.debug",
+    "citizens.npc.behavior",
+    "citizens.npc.eval",
     "citizens.npc.gamemode",
     "citizens.npc.flyable",
     "citizens.npc.trait",
@@ -1612,6 +1627,8 @@ fn npc(w: &mut World, sender: &Sender, rest: &str) -> Res {
         "disguise" => disguise(w, sender, &args),
         "spectate" => spectate(w, sender, &args),
         "configgui" => configgui(w, sender),
+        "behavior" => behavior_cmd(w, sender, &args),
+        "eval" => eval_cmd(w, sender, tail),
         "inventory" => inventory(w, sender, &args),
         "drops" => drops(w, sender),
         "shop" => shop_cmd(w, sender, &args),
@@ -3539,8 +3556,41 @@ fn command(w: &mut World, sender: &Sender, tail: &str) -> Res {
             w.mark_dirty();
             Ok(ok(w, M_CMD_REMOVED, &[&key]))
         }
-        "execute" | "forgetplayer" | "clearerror" | "sequential" | "cycle" | "random" | "permissions" | "perms"
-        | "cost" | "expcost" | "itemcost" | "hideerrors" | "errormessage" | "rememberlastused" => {
+        "sequential" | "cycle" | "random" => {
+            use crate::horizon_citizens_core::npc::ExecutionMode;
+            let (want, on, off) = match op.to_ascii_lowercase().as_str() {
+                "sequential" => (ExecutionMode::Sequential, M_CMD_SEQUENTIAL_SET, M_CMD_SEQUENTIAL_UNSET),
+                "cycle" => (ExecutionMode::Cycle, M_CMD_CYCLE_SET, M_CMD_CYCLE_UNSET),
+                _ => (ExecutionMode::Random, M_CMD_RANDOM_SET, M_CMD_RANDOM_UNSET),
+            };
+            let n = npc_mut(w, id)?;
+            let mode = if n.execution_mode() == want { ExecutionMode::Linear } else { want };
+            n.set_execution_mode(mode);
+            w.mark_dirty();
+            Ok(ok(w, if mode == want { on } else { off }, &[]))
+        }
+        "cost" => {
+            let Some(v) = rest.split_whitespace().next() else { return Err(err(w, M_CMD_COST_MISSING, &[])) };
+            let cost: f64 = v.parse().map_err(|_| err(w, M_INVALID_NUMBER, &[]))?;
+            npc_mut(w, id)?.set_trait_cost(cost);
+            w.mark_dirty();
+            Ok(ok(w, M_CMD_COST_SET, &[&jnum(cost)]))
+        }
+        "expcost" => {
+            let Some(v) = rest.split_whitespace().next() else { return Err(err(w, M_CMD_COST_MISSING, &[])) };
+            let cost = parse_i64(w, v)?;
+            npc_mut(w, id)?.set_trait_experience_cost(cost);
+            w.mark_dirty();
+            Ok(ok(w, M_CMD_EXPCOST_SET, &[&cost.to_string()]))
+        }
+        "hideerrors" => {
+            let n = npc_mut(w, id)?;
+            let on = !n.hide_command_errors();
+            n.set_hide_command_errors(on);
+            w.mark_dirty();
+            Ok(ok(w, if on { M_CMD_HIDE_SET } else { M_CMD_HIDE_UNSET }, &[]))
+        }
+        "execute" | "forgetplayer" | "clearerror" | "permissions" | "perms" | "itemcost" | "errormessage" | "rememberlastused" => {
             Err(err(w, M_UNSUPPORTED, &[&format!("command {op}")]))
         }
         _ => Err(usage_of(w, "command")),
@@ -4031,6 +4081,27 @@ fn configgui(w: &mut World, sender: &Sender) -> Res {
     Ok(Vec::new())
 }
 
+const M_BEHAVIOR_APPLIED: &str = "Applied the behavior tree [[{1}]] to [[{0}]].";
+const M_BEHAVIOR_INVALID: &str = "That behavior file does not exist in the behaviors folder.";
+
+/// `/npc behavior [file.yml]`: the tree of `behaviors/<file>` for the selected NPC.
+fn behavior_cmd(w: &mut World, sender: &Sender, args: &Args) -> Res {
+    let id = target(w, sender)?;
+    let Some(file) = args.words.first().cloned() else { return Err(err(w, M_BEHAVIOR_INVALID, &[])) };
+    if w.apply_behavior_file(id, &file).is_err() {
+        return Err(err(w, M_BEHAVIOR_INVALID, &[]));
+    }
+    let name = name_of(w.saves.get(id).ok_or_else(|| err(w, M_NPC_NOT_FOUND, &[]))?);
+    Ok(ok(w, M_BEHAVIOR_APPLIED, &[&name, &file]))
+}
+
+/// `/npc eval [expression]`: the value of an expression, in the selected NPC's scope when there is one.
+fn eval_cmd(w: &mut World, sender: &Sender, tail: &str) -> Res {
+    let id = selected_id(w, sender).ok().filter(|id| owns(w, sender, *id));
+    let value = w.eval_text(id, tail.trim());
+    Ok(say(w, &value))
+}
+
 /// A chat line of a player in one of the chat-based editors (`TextEditor`, the configurator's name prompt, the
 /// waypoint editor's words). Whether the line was the editor's, so it stays out of public chat.
 pub fn chat_edit(w: &mut World, player: u128, text: &str) -> bool {
@@ -4139,7 +4210,21 @@ fn equip(w: &mut World, sender: &Sender, args: &Args) -> Res {
         let Some(who) = sender.uuid else {
             return Err(err(w, M_MUST_BE_INGAME, &[]));
         };
-        w.open_equipment(who, id);
+        let kind = w.saves.get(id).map(NpcData::kind).unwrap_or_default().to_ascii_uppercase();
+        match kind.as_str() {
+            "PIG" | "STRIDER" => w.open_saddle(who, id),
+            "ENDERMAN" => w.open_enderman(who, id),
+            "SHEEP" | "HORSE" | "ZOMBIE_HORSE" | "LLAMA" | "TRADER_LLAMA" | "DONKEY" | "MULE" | "SKELETON_HORSE" | "CAMEL" => {
+                // `Editor.enterOrLeave`: a right click on the NPC equips it, until the command is typed again.
+                if w.equip_editors.get(&who) == Some(&id) {
+                    w.equip_editors.remove(&who);
+                    return Ok(say(w, M_EQUIP_EDITOR_END));
+                }
+                w.equip_editors.insert(who, id);
+                return Ok(say(w, M_EQUIP_EDITOR_BEGIN));
+            }
+            _ => w.open_equipment(who, id),
+        }
         return Ok(Vec::new());
     }
     let usage = "Usage: /npc equip <hand|off_hand|helmet|chestplate|leggings|boots> [item] [amount]";
@@ -4191,6 +4276,8 @@ fn setequipment(w: &mut World, sender: &Sender, args: &Args, c: &Cmd) -> Res {
     Ok(ok(w, M_EQUIPMENT_SET, &[&slot_arg, &shown]))
 }
 
+const M_EQUIP_EDITOR_BEGIN: &str = "Entered the equipment editor. Right click the NPC to equip it; type /npc equip again to leave.";
+const M_EQUIP_EDITOR_END: &str = "Exited the equipment editor.";
 const M_PATH_BEGIN: &str = "<green>=== [[Linear Waypoint Editor]] ===<br><br>[[Left click]] to add a waypoint, [[right click]] to remove it.";
 const M_PATH_END: &str = "Exited the linear waypoint editor.";
 const M_PATH_ADDED: &str = "[[Added]] a waypoint at ({0}) ([[{1}]] total).";
@@ -5030,8 +5117,10 @@ mod tests {
         assert!(run_ok(&mut w, &s, "npc gamemode nope")[0].contains("not a valid gamemode"));
         assert!(run_ok(&mut w, &s, "npc flyable")[0].contains("is now flyable"));
         assert!(run_ok(&mut w, &s, "npc flyable")[0].contains("no longer flyable"));
-        // A real Citizens command this port lacks.
-        assert!(run_ok(&mut w, &s, "npc behavior")[0].contains("not supported"));
+        // A real Citizens command needing an argument.
+        assert!(run_ok(&mut w, &s, "npc behavior")[0].contains("Too few arguments"));
+        assert!(run_ok(&mut w, &s, "npc behavior nofile.yml")[0].contains("does not exist"));
+        assert!(run_ok(&mut w, &s, "npc eval 2 + 3")[0].contains("5.0"));
         // Not a Citizens command at all.
         assert!(run_ok(&mut w, &s, "npc sneak")[0].contains("Too many arguments"));
     }

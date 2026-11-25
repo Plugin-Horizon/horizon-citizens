@@ -177,7 +177,8 @@ impl Kind {
         }
     }
 
-    /// `GUI.createMenuItem`: the editor button's item and name. Money has none without an economy.
+    /// `GUI.createMenuItem`: the editor button's item and name. Money is offered only with an economy
+    /// (see [`Kind::money_button`]).
     pub fn button(self) -> Option<(&'static str, &'static str)> {
         match self {
             Kind::Item => Some(("minecraft:chest", "Item")),
@@ -191,12 +192,23 @@ impl Kind {
     }
 }
 
+impl Kind {
+    /// The money button, shown when an economy provider answers (`MoneyActionGUI.createMenuItem`).
+    pub const fn money_button() -> (&'static str, &'static str) {
+        ("minecraft:gold_ingot", "Money")
+    }
+}
+
 /// Everything the actions ask the rest of the world about other shops.
 pub trait Lookup {
     /// The stored shop `name` (a number is an NPC id): its canonical name, when it exists.
     fn shop_name(&self, name: &str) -> Option<String>;
     /// `NPCShop.canView` for the buyer.
     fn can_view(&self, name: &str, buyer: &Buyer) -> bool;
+    /// `Economy.format`: an amount with the economy's currency (a plain double without one).
+    fn format_money(&self, amount: f64) -> String {
+        java_double(amount)
+    }
 }
 
 /// What a buyer has: the experience level, the 36 main-inventory slots, and the permission nodes known to be held.
@@ -210,6 +222,8 @@ pub struct Buyer {
     pub perms: BTreeSet<String>,
     /// Whether the player is an operator (an undeclared node is held by operators, as in Bukkit).
     pub op: bool,
+    /// The player's balance in the economy (0 without one).
+    pub money: f64,
 }
 
 /// Something a purchase does outside the buyer's levels and inventory.
@@ -233,12 +247,17 @@ pub struct Outcome {
     pub done: bool,
     pub levels: i32,
     pub inv: Vec<Option<StackData>>,
+    /// The buyer's balance after the purchase.
+    pub money: f64,
 }
 
 /// The working copy a purchase runs on.
 #[derive(Clone)]
 struct Work {
     levels: i32,
+    /// The buyer's balance, and the shop storage's.
+    money: f64,
+    balance: f64,
     inv: Vec<Option<StackData>>,
     perms: BTreeSet<String>,
     /// The shop's storage inventory (limited storage only).
@@ -372,7 +391,7 @@ impl Action {
             }
             Action::Permission { permissions } => list_description(permissions, &format!("{} permissions", permissions.len())),
             Action::Command { commands, .. } => list_description(commands, &format!("{} command", commands.len())),
-            Action::Money { money } => java_double(*money),
+            Action::Money { money } => shops.format_money(*money),
             Action::Experience { exp } => {
                 if *exp == 1 { format!("{exp} level") } else { format!("{exp} levels") }
             }
@@ -414,7 +433,7 @@ impl Action {
                 if *exp == 0 { -1 } else { i64::from(w.levels / exp) }
             }
             Action::Money { money } => {
-                if *money <= 0.0 { -1 } else { 0 }
+                if *money <= 0.0 { -1 } else { (w.money / money).floor() as i64 }
             }
             _ => -1,
         }
@@ -916,7 +935,7 @@ impl ShopItem {
 
     /// `NPCShopItem.onClick`. `storage` is the storage the shop shows: only a limited one is touched.
     pub fn click(&mut self, storage: &mut Storage, buyer: &Buyer, shift: bool, second_click: bool, shops: &dyn Lookup) -> Outcome {
-        let mut out = Outcome { levels: buyer.levels, inv: buyer.inv.clone(), ..Outcome::default() };
+        let mut out = Outcome { levels: buyer.levels, inv: buyer.inv.clone(), money: buyer.money, ..Outcome::default() };
         if let Some(expr) = &self.is_clickable_expression
             && !eval_pass(expr, Some(buyer))
         {
@@ -939,6 +958,8 @@ impl ShopItem {
         }
         let start = Work {
             levels: buyer.levels,
+            money: buyer.money,
+            balance: storage.balance,
             inv: buyer.inv.clone(),
             perms: buyer.perms.clone(),
             storage: storage.inventory.iter().cloned().map(Some).collect(),
@@ -981,9 +1002,12 @@ impl ShopItem {
         if !storage.unlimited {
             storage.inventory = work.storage.into_iter().flatten().filter(|s| s.count > 0).collect();
         }
+        // The storage's balance follows every payment, limited or not (`MoneyAction` sets it).
+        storage.balance = work.balance;
         out.done = true;
         out.effects = effects;
         out.levels = work.levels;
+        out.money = work.money;
         out.inv = work.inv;
         out
     }
@@ -1031,7 +1055,15 @@ fn possible(a: &Action, take: bool, storage: &Storage, buyer: &Buyer, repeats: i
                 true
             }
         }
-        Action::Money { money } => *money <= 0.0,
+        Action::Money { money } => {
+            if *money <= 0.0 {
+                true
+            } else if take {
+                w.money >= money * repeats as f64
+            } else {
+                storage.unlimited || w.balance - money * repeats as f64 >= 0.0
+            }
+        }
         Action::Command { .. } => true,
         Action::Experience { exp } => !take || w.levels >= exp.saturating_mul(repeats as i32),
         Action::OpenShop { shop_name } => match shop_name.as_deref().and_then(|n| shops.shop_name(n)) {
@@ -1071,7 +1103,19 @@ fn run(a: &Action, take: bool, storage: &Storage, buyer: &Buyer, repeats: i64, w
                 effects.push(Effect::Perm { node, set: !take });
             }
         }
-        Action::Money { .. } | Action::Condition { .. } => {}
+        Action::Money { money } => {
+            if *money > 0.0 {
+                let amount = money * repeats as f64;
+                if take {
+                    w.money -= amount;
+                    w.balance += amount;
+                } else {
+                    w.money += amount;
+                    w.balance -= amount;
+                }
+            }
+        }
+        Action::Condition { .. } => {}
         Action::Command { commands, server, .. } => {
             for _ in 0..repeats {
                 for c in commands {
@@ -1312,329 +1356,46 @@ impl StoredShops {
     }
 }
 
-// ---- expressions (a Molang subset) ---------------------------------------------------------
+// ---- expressions (Molang, through `expr`) ------------------------------------------------------
 
-#[derive(Clone, Debug, PartialEq)]
-enum Val {
-    Num(f64),
-    Str(String),
-    /// `papi('...')`: a string that reads as a number when it looks like one.
-    Parse(String),
+pub use crate::horizon_citizens_core::expr::{default_markup, is_expression};
+use crate::horizon_citizens_core::expr::{self, Value};
+
+/// The scope a shop expression sees: the buyer's `<player>` style text for `papi`, and PlaceholderAPI behind it.
+fn buyer_scope(buyer: Option<&Buyer>) -> expr::Scope {
+    let mut sc = expr::Scope::new();
+    if let Some(b) = buyer {
+        sc.player = Some(b.uuid);
+        sc.subst = vec![
+            ("<player>".to_owned(), b.name.clone()),
+            ("<p>".to_owned(), b.name.clone()),
+            ("%player%".to_owned(), b.name.clone()),
+            ("<player_uuid>".to_owned(), crate::horizon_citizens_core::ids::format_uuid(b.uuid)),
+            ("<world>".to_owned(), b.world.clone()),
+        ];
+        sc.set("player.name", Value::Str(b.name.clone()));
+        sc.set("player.world", Value::Str(b.world.clone()));
+        sc.set("player.level", Value::Num(f64::from(b.levels)));
+    }
+    sc
 }
 
-impl Val {
-    fn num(&self) -> f64 {
-        match self {
-            Val::Num(n) => *n,
-            Val::Str(s) | Val::Parse(s) => s.trim().parse().unwrap_or(0.0),
-        }
-    }
-
-    fn numeric(&self) -> bool {
-        match self {
-            Val::Num(_) => true,
-            Val::Str(s) | Val::Parse(s) => s.trim().parse::<f64>().is_ok(),
-        }
-    }
-
-    fn truthy(&self) -> bool {
-        match self {
-            Val::Num(n) => *n != 0.0,
-            Val::Str(_) => true,
-            Val::Parse(s) => match s.trim().parse::<f64>() {
-                Ok(n) => n != 0.0,
-                Err(_) => s.trim().eq_ignore_ascii_case("true") || !s.is_empty(),
-            },
-        }
-    }
-
-    fn text(&self) -> String {
-        match self {
-            Val::Num(n) => {
-                if *n == n.trunc() { format!("{}", *n as i64) } else { n.to_string() }
-            }
-            Val::Str(s) | Val::Parse(s) => s.clone(),
-        }
-    }
-}
-
-struct Parser<'a> {
-    s: Vec<char>,
-    i: usize,
-    buyer: Option<&'a Buyer>,
-}
-
-/// `ExpressionRegistry.isPossiblyExpression`: `^([a-zA-Z_]*)\`(.+)\`$`.
-pub fn is_expression(s: &str) -> bool {
-    split_expression(s).is_some()
-}
-
-fn split_expression(s: &str) -> Option<(String, String)> {
-    let tick = s.find('`')?;
-    let prefix = &s[..tick];
-    if !prefix.chars().all(|c| c.is_ascii_alphabetic() || c == '_') || !s.ends_with('`') || s.len() < tick + 3 {
-        return None;
-    }
-    Some((prefix.to_ascii_lowercase(), s[tick + 1..s.len() - 1].to_owned()))
-}
-
-/// `applyDefaultExpressionMarkup`: wraps a plain text in backticks.
-pub fn default_markup(s: &str) -> String {
-    if is_expression(s) { s.to_owned() } else { format!("`{s}`") }
-}
-
-/// `evaluateAsBoolean` of the compiled expression; `None` when it does not compile (no backticks, a syntax error,
-/// or the JavaScript engine, which is not available).
-pub fn eval(expr: &str, buyer: Option<&Buyer>) -> Option<bool> {
-    let (prefix, body) = split_expression(expr)?;
-    if !(prefix.is_empty() || prefix == "molang") {
-        return None;
-    }
-    let mut p = Parser { s: body.chars().collect(), i: 0, buyer };
-    let v = p.expr()?;
-    p.at_end().then(|| v.truthy())
+/// `evaluateAsBoolean` of the compiled expression; `None` when it does not compile (no backticks, a syntax error).
+/// Any prefix compiles as Molang, the one engine Citizens registers.
+pub fn eval(expr_text: &str, buyer: Option<&Buyer>) -> Option<bool> {
+    let c = expr::compile_markup(expr_text).ok()?;
+    let mut sc = buyer_scope(buyer);
+    Some(c.eval_bool(&mut sc))
 }
 
 /// `ConditionAction`: an expression that does not compile fails (the original throws on the missing compiled form).
-pub fn eval_bool(expr: &str, buyer: Option<&Buyer>) -> bool {
-    eval(expr, buyer).unwrap_or(false)
+pub fn eval_bool(expr_text: &str, buyer: Option<&Buyer>) -> bool {
+    eval(expr_text, buyer).unwrap_or(false)
 }
 
 /// The visible and clickable expressions: one that does not compile is skipped (the original prints the error and goes on).
-pub fn eval_pass(expr: &str, buyer: Option<&Buyer>) -> bool {
-    eval(expr, buyer).unwrap_or(true)
-}
-
-impl Parser<'_> {
-    fn ws(&mut self) {
-        while self.i < self.s.len() && self.s[self.i].is_whitespace() {
-            self.i += 1;
-        }
-    }
-
-    fn at_end(&mut self) -> bool {
-        self.ws();
-        self.i >= self.s.len() || (self.s[self.i] == ';' && self.s[self.i + 1..].iter().all(|c| c.is_whitespace()))
-    }
-
-    fn eat(&mut self, tok: &str) -> bool {
-        self.ws();
-        let t: Vec<char> = tok.chars().collect();
-        if self.s[self.i..].starts_with(&t) {
-            self.i += t.len();
-            true
-        } else {
-            false
-        }
-    }
-
-    fn peek_is(&mut self, tok: &str) -> bool {
-        let save = self.i;
-        let r = self.eat(tok);
-        self.i = save;
-        r
-    }
-
-    fn expr(&mut self) -> Option<Val> {
-        let c = self.or()?;
-        if self.peek_is("?") && !self.peek_is("??") {
-            self.eat("?");
-            let a = self.expr()?;
-            if !self.eat(":") {
-                return None;
-            }
-            let b = self.expr()?;
-            return Some(if c.truthy() { a } else { b });
-        }
-        Some(c)
-    }
-
-    fn or(&mut self) -> Option<Val> {
-        let mut l = self.and()?;
-        while self.eat("||") {
-            let r = self.and()?;
-            l = Val::Num(if l.truthy() || r.truthy() { 1.0 } else { 0.0 });
-        }
-        Some(l)
-    }
-
-    fn and(&mut self) -> Option<Val> {
-        let mut l = self.eq()?;
-        while self.eat("&&") {
-            let r = self.eq()?;
-            l = Val::Num(if l.truthy() && r.truthy() { 1.0 } else { 0.0 });
-        }
-        Some(l)
-    }
-
-    fn eq(&mut self) -> Option<Val> {
-        let mut l = self.rel()?;
-        loop {
-            let neg = if self.eat("==") {
-                false
-            } else if self.eat("!=") {
-                true
-            } else {
-                return Some(l);
-            };
-            let r = self.rel()?;
-            let same = if l.numeric() && r.numeric() { l.num() == r.num() } else { l.text() == r.text() };
-            l = Val::Num(if same != neg { 1.0 } else { 0.0 });
-        }
-    }
-
-    fn rel(&mut self) -> Option<Val> {
-        let mut l = self.add()?;
-        loop {
-            let op = if self.eat("<=") {
-                "<="
-            } else if self.eat(">=") {
-                ">="
-            } else if self.eat("<") {
-                "<"
-            } else if self.eat(">") {
-                ">"
-            } else {
-                return Some(l);
-            };
-            let r = self.add()?;
-            let (a, b) = (l.num(), r.num());
-            let v = match op {
-                "<=" => a <= b,
-                ">=" => a >= b,
-                "<" => a < b,
-                _ => a > b,
-            };
-            l = Val::Num(if v { 1.0 } else { 0.0 });
-        }
-    }
-
-    fn add(&mut self) -> Option<Val> {
-        let mut l = self.mul()?;
-        loop {
-            if self.eat("+") {
-                let r = self.mul()?;
-                l = Val::Num(l.num() + r.num());
-            } else if self.eat("-") {
-                let r = self.mul()?;
-                l = Val::Num(l.num() - r.num());
-            } else {
-                return Some(l);
-            }
-        }
-    }
-
-    fn mul(&mut self) -> Option<Val> {
-        let mut l = self.unary()?;
-        loop {
-            if self.eat("*") {
-                let r = self.unary()?;
-                l = Val::Num(l.num() * r.num());
-            } else if self.eat("/") {
-                let r = self.unary()?;
-                l = Val::Num(if r.num() == 0.0 { 0.0 } else { l.num() / r.num() });
-            } else if self.eat("%") {
-                let r = self.unary()?;
-                l = Val::Num(if r.num() == 0.0 { 0.0 } else { l.num() % r.num() });
-            } else {
-                return Some(l);
-            }
-        }
-    }
-
-    fn unary(&mut self) -> Option<Val> {
-        if self.peek_is("!") && !self.peek_is("!=") {
-            self.eat("!");
-            let v = self.unary()?;
-            return Some(Val::Num(if v.truthy() { 0.0 } else { 1.0 }));
-        }
-        if self.eat("-") {
-            let v = self.unary()?;
-            return Some(Val::Num(-v.num()));
-        }
-        self.primary()
-    }
-
-    fn primary(&mut self) -> Option<Val> {
-        self.ws();
-        let c = *self.s.get(self.i)?;
-        if c == '(' {
-            self.i += 1;
-            let v = self.expr()?;
-            return self.eat(")").then_some(v);
-        }
-        if c == '\'' {
-            self.i += 1;
-            let start = self.i;
-            while self.i < self.s.len() && self.s[self.i] != '\'' {
-                self.i += 1;
-            }
-            let t: String = self.s[start..self.i].iter().collect();
-            self.i += 1;
-            return Some(Val::Str(t));
-        }
-        if c.is_ascii_digit() || c == '.' {
-            let start = self.i;
-            while self.i < self.s.len() && (self.s[self.i].is_ascii_digit() || self.s[self.i] == '.') {
-                self.i += 1;
-            }
-            let t: String = self.s[start..self.i].iter().collect();
-            return t.parse().ok().map(Val::Num);
-        }
-        if c.is_ascii_alphabetic() || c == '_' {
-            let start = self.i;
-            while self.i < self.s.len() && (self.s[self.i].is_ascii_alphanumeric() || self.s[self.i] == '_' || self.s[self.i] == '.') {
-                self.i += 1;
-            }
-            let name: String = self.s[start..self.i].iter().collect::<String>().to_ascii_lowercase();
-            if self.peek_is("(") {
-                self.eat("(");
-                let mut args = Vec::new();
-                if !self.eat(")") {
-                    loop {
-                        args.push(self.expr()?);
-                        if self.eat(",") {
-                            continue;
-                        }
-                        if self.eat(")") {
-                            break;
-                        }
-                        return None;
-                    }
-                }
-                return Some(self.call(&name, &args));
-            }
-            return Some(match name.as_str() {
-                "true" => Val::Num(1.0),
-                "false" => Val::Num(0.0),
-                "math.pi" => Val::Num(std::f64::consts::PI),
-                _ => Val::Num(0.0),
-            });
-        }
-        None
-    }
-
-    fn call(&self, name: &str, args: &[Val]) -> Val {
-        let a = |i: usize| args.get(i).map_or(0.0, Val::num);
-        match name {
-            "papi" => {
-                let raw = args.first().map(Val::text).unwrap_or_default();
-                Val::Parse(match self.buyer {
-                    Some(b) => player_placeholders(&raw, b),
-                    None => raw,
-                })
-            }
-            "math.abs" => Val::Num(a(0).abs()),
-            "math.floor" => Val::Num(a(0).floor()),
-            "math.ceil" => Val::Num(a(0).ceil()),
-            "math.round" => Val::Num(a(0).round()),
-            "math.sqrt" => Val::Num(a(0).sqrt()),
-            "math.min" => Val::Num(a(0).min(a(1))),
-            "math.max" => Val::Num(a(0).max(a(1))),
-            "math.pow" => Val::Num(a(0).powf(a(1))),
-            _ => Val::Num(0.0),
-        }
-    }
+pub fn eval_pass(expr_text: &str, buyer: Option<&Buyer>) -> bool {
+    eval(expr_text, buyer).unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -1660,7 +1421,7 @@ mod tests {
         for (i, s) in inv {
             slots[i] = Some(s);
         }
-        Buyer { uuid: 7, name: "Alex".into(), world: "world".into(), levels, inv: slots, perms: BTreeSet::new(), op: false }
+        Buyer { uuid: 7, name: "Alex".into(), world: "world".into(), levels, inv: slots, perms: BTreeSet::new(), op: false, money: 0.0 }
     }
 
     fn item(cost: Vec<Action>, result: Vec<Action>) -> ShopItem {
@@ -1851,6 +1612,47 @@ mod tests {
     }
 
     #[test]
+    fn money_is_taken_from_the_buyer_and_kept_in_the_storage() {
+        let mut it = item(vec![Action::Money { money: 5.0 }], vec![Action::Experience { exp: 1 }]);
+        let mut st = Storage::default();
+        let mut rich = buyer(vec![], 0);
+        rich.money = 12.0;
+        let o = it.click(&mut st, &rich, false, false, &NoShops);
+        assert!(o.done);
+        assert_eq!(o.money, 7.0);
+        assert_eq!(st.balance, 5.0);
+        let mut poor = buyer(vec![], 0);
+        poor.money = 4.99;
+        assert!(!it.click(&mut st, &poor, false, false, &NoShops).done);
+    }
+
+    #[test]
+    fn shift_click_buys_as_often_as_the_balance_allows() {
+        let mut it = item(vec![Action::Money { money: 5.0 }], vec![Action::Experience { exp: 1 }]);
+        it.max_repeats_on_shift_click = true;
+        let mut st = Storage::default();
+        let mut rich = buyer(vec![], 0);
+        rich.money = 17.0;
+        let o = it.click(&mut st, &rich, true, false, &NoShops);
+        assert!(o.done);
+        assert_eq!((o.money, o.levels), (2.0, 3));
+    }
+
+    #[test]
+    fn a_money_result_pays_out_of_a_limited_balance() {
+        let mut it = item(vec![Action::Experience { exp: 1 }], vec![Action::Money { money: 5.0 }]);
+        let mut st = Storage { unlimited: false, balance: 7.0, ..Storage::default() };
+        let mut b = buyer(vec![], 3);
+        b.money = 1.0;
+        let o = it.click(&mut st, &b, false, false, &NoShops);
+        assert!(o.done);
+        assert_eq!((o.money, st.balance), (6.0, 2.0));
+        // Not enough in the shop's balance for another.
+        let again = it.click(&mut st, &b, false, false, &NoShops);
+        assert!(!again.done);
+    }
+
+    #[test]
     fn money_cannot_be_paid_without_an_economy() {
         let mut it = item(vec![Action::Money { money: 5.0 }], vec![]);
         let mut st = Storage::default();
@@ -1916,7 +1718,9 @@ mod tests {
         assert!(eval_bool("`papi('<player>') == 'Alex'`", Some(&b)));
         assert!(!eval_bool("`papi('<player>') == 'Bob'`", Some(&b)));
         assert!(eval_bool("`(2 > 1) ? 1 : 0`", Some(&b)));
-        assert!(!eval_bool("js`true`", Some(&b)));
+        assert!(eval_bool("js`true`", Some(&b)), "an unknown prefix compiles as Molang, as in Citizens");
+        assert!(eval_bool("`v.a = 3; v.a * 2 == 6`", Some(&b)));
+        assert!(eval_bool("`player.level >= 0`", Some(&b)));
         assert!(!eval_bool("1 == 1", Some(&b)), "not wrapped in backticks");
         assert!(eval_pass("1 == 1", Some(&b)), "a visible expression that does not compile is skipped");
         assert!(!eval_pass("`0`", Some(&b)));

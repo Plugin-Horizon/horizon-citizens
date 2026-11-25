@@ -211,9 +211,77 @@ fn held_item_id(host: &dyn ServerHost, player: PlayerRef) -> Option<String> {
     Some(stack.item().id(host))
 }
 
-/// What a command's price is charged against: the experience level and the main inventory (slots 0 to 35).
-fn cost_state(host: &dyn ServerHost, p: PlayerRef) -> core::world::PlayerCost {
+/// Whether a PlaceholderAPI mod answers (set each tick; `papi(...)` in an expression asks it).
+static PAPI_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `Placeholders.replace`: PlaceholderAPI's `%...%` for a player, the text itself without that mod.
+fn papi_text(player: Option<u128>, text: &str) -> String {
+    #[cfg(feature = "placeholderapi")]
+    {
+        if PAPI_ON.load(std::sync::atomic::Ordering::Relaxed) {
+            return placeholderapi::set_placeholders(player, text);
+        }
+    }
+    let _ = player;
+    text.to_owned()
+}
+
+/// Whether the PlaceholderAPI mod is installed.
+fn papi_installed(host: &dyn ServerHost) -> bool {
+    let mut on = false;
+    mod_api::if_installed!(host, placeholderapi, {
+        on = true;
+    });
+    on
+}
+
+/// Whether an economy provider answers (the vault mod with a registered economy).
+fn economy_on(host: &dyn ServerHost) -> bool {
+    let mut on = false;
+    mod_api::if_installed!(host, vault, {
+        on = vault::economy().is_some();
+    });
+    on
+}
+
+/// A player's balance in the economy (0 without one).
+fn balance_of(host: &dyn ServerHost, uuid: u128) -> f64 {
+    let mut b = 0.0;
+    mod_api::if_installed!(host, vault, {
+        b = vault::balance(uuid).to_f64();
+    });
+    let _ = uuid;
+    b
+}
+
+/// `Economy.format` for the shop descriptions.
+fn format_money(amount: f64) -> String {
+    #[cfg(feature = "vault")]
+    {
+        if let Some(m) = vault::Money::from_f64(amount) {
+            return vault::format(m);
+        }
+    }
+    core::shop::java_double(amount)
+}
+
+/// Takes (`delta` below 0) or gives (above 0) money in the economy, as `Citizens`.
+fn money_move(host: &dyn ServerHost, uuid: u128, delta: f64) {
+    mod_api::if_installed!(host, vault, {
+        if let Some(m) = vault::Money::from_f64(delta.abs()) {
+            let r = if delta < 0.0 { vault::withdraw("Citizens", uuid, m) } else { vault::deposit("Citizens", uuid, m) };
+            if !matches!(r.kind, vault::ResponseType::Success) {
+                eprintln!("[citizens] economy refused {delta}: {}", r.error);
+            }
+        }
+    });
+    let _ = (uuid, delta);
+}
+
+/// What a command's price is charged against: the experience level, the money and the main inventory (slots 0 to 35).
+fn cost_state(host: &dyn ServerHost, p: PlayerRef, uuid: u128) -> core::world::PlayerCost {
     core::world::PlayerCost {
+        money: balance_of(host, uuid),
         levels: p.experience(host).map_or(0, |x| x.level),
         slots: p
             .inventory_slots(host)
@@ -287,6 +355,7 @@ fn shop_state(host: &mut dyn ServerHost, p: PlayerRef, wanted: &[String], cfg: &
         inv,
         perms,
         op: info.view.permission >= cfg.command_level,
+        money: balance_of(&*host, info.view.uuid),
     })
 }
 
@@ -626,6 +695,7 @@ impl Citizens {
             saves.npcs.len(),
             path.display()
         );
+        core::expr::set_papi(papi_text);
         api::install(core::world::World::new(st.cfg.clone(), saves, Some(path)));
     }
 
@@ -677,7 +747,12 @@ impl Citizens {
                         let _ = host.commands().run_command(&fallback);
                     }
                 }
-                core::world::Op::Charge { player, levels, slots } => charge(host, player, levels, &slots),
+                core::world::Op::Charge { player, levels, slots, money } => {
+                    charge(host, player, levels, &slots);
+                    if money > 0.0 {
+                        money_move(&*host, player, -money);
+                    }
+                }
                 core::world::Op::OpenMenu { player, title, rows, items, in_place } => {
                     let stacks: Vec<Option<ItemStack>> =
                         items.iter().map(|i| i.as_ref().and_then(|s| item_stack_of(&*host, s))).collect();
@@ -686,8 +761,20 @@ impl Citizens {
                     let window = host.open_menu(player, rows, title, stacks, replace).ok().flatten();
                     api::with_world(|w| w.menu_opened(player, window));
                 }
+                core::world::Op::OpenHopper { player, title, items } => {
+                    let stacks: Vec<Option<ItemStack>> =
+                        items.iter().map(|i| i.as_ref().and_then(|s| item_stack_of(&*host, s))).collect();
+                    let title = plain(&*host, &title);
+                    let window = host.open_hopper_menu(player, title, stacks, MenuReplace::CloseFirst).ok().flatten();
+                    api::with_world(|w| w.menu_opened(player, window));
+                }
                 core::world::Op::CloseMenu { player } => host.close_menu(player),
-                core::world::Op::ShopApply { player, levels, slots } => shop_apply(host, player, levels, &slots),
+                core::world::Op::ShopApply { player, levels, slots, money } => {
+                    shop_apply(host, player, levels, &slots);
+                    if money != 0.0 {
+                        money_move(&*host, player, money);
+                    }
+                }
                 core::world::Op::SetMenuItems { player, window, items } => {
                     let stacks: Vec<Option<ItemStack>> =
                         items.iter().map(|i| i.as_ref().and_then(|s| item_stack_of(&*host, s))).collect();
@@ -988,7 +1075,7 @@ impl Hooks for Citizens {
         let held = held_item_id(&*host, player);
         let wanted = api::with_world(|w| w.command_perms(entity)).unwrap_or_default();
         let granted: std::collections::BTreeSet<String> = wanted.into_iter().filter(|n| holds(host, player, n)).collect();
-        let cost = cost_state(&*host, player);
+        let cost = cost_state(&*host, player, info.view.uuid);
         if api::with_world(|w| w.has_shops()).unwrap_or(false) {
             let cfg = lock(&self.state).cfg.clone();
             prime_shop(host, player.uuid(), &cfg);
@@ -1020,7 +1107,7 @@ impl Hooks for Citizens {
         };
         let wanted = api::with_world(|w| w.command_perms(entity)).unwrap_or_default();
         let granted: std::collections::BTreeSet<String> = wanted.into_iter().filter(|n| holds(host, player, n)).collect();
-        let cost = cost_state(&*host, player);
+        let cost = cost_state(&*host, player, info.view.uuid);
         let refused = api::with_world(|w| {
             w.held_perms = granted;
             w.player_cost = Some(cost);
@@ -1123,7 +1210,30 @@ impl Hooks for Citizens {
                 Some((id, pos, done))
             })
             .collect();
+        PAPI_ON.store(papi_installed(&*host), std::sync::atomic::Ordering::Relaxed);
+        let economy = economy_on(&*host);
+        // Health and motion of the NPCs that run a behavior tree (their expression scope).
+        let tracked = api::with_world(|w| w.behavior_entities()).unwrap_or_default();
+        let stats: Vec<(i32, core::world::LiveStats)> = tracked
+            .into_iter()
+            .filter_map(|(id, e)| {
+                let ent = host.entity(e)?;
+                Some((
+                    id,
+                    core::world::LiveStats {
+                        health: host.living(ent).and_then(|l| l.health(&*host)).map_or(0.0, f64::from),
+                        max_health: host.living(ent).and_then(|l| l.max_health(&*host)).map_or(0.0, f64::from),
+                        velocity: ent.velocity(&*host).unwrap_or([0.0; 3]),
+                    },
+                ))
+            })
+            .collect();
         api::with_world(|w| {
+            w.economy = economy;
+            w.money_fmt = economy.then_some(format_money as fn(f64) -> String);
+            for (id, st) in stats {
+                w.set_live_stats(id, st);
+            }
             for (id, pos, done) in reports {
                 w.nav_report(id, pos, done);
             }
@@ -1167,7 +1277,11 @@ impl Hooks for Citizens {
                 if let Some((_, st)) = held.iter().find(|(i, _)| *i == inv_slot) {
                     let data = stack_data_of(&*host, st);
                     if api::with_world(|w| w.menu_deposit(uuid, data)).unwrap_or(false) {
-                        let _ = p.set_inventory_slot(host, inv_slot, None);
+                        // A hopper slot takes one; the rest of the stack stays.
+                        let left = api::with_world(|w| w.take_deposit_left()).unwrap_or(0);
+                        let mut rest = st.clone();
+                        let keep = (left > 0 && rest.set_count(left.clamp(1, 99) as u32).is_ok()).then_some(rest);
+                        let _ = p.set_inventory_slot(host, inv_slot, keep);
                     }
                 }
             }

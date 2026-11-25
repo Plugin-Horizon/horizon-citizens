@@ -78,6 +78,36 @@ fn profile_snbt(p: &Profile) -> Option<String> {
     }
 }
 
+/// `SkinTrait.setSkinPatch`: the texture, cape and elytra locations and the model of a mannequin, as the
+/// profile's patch fields. Applied only with a body texture (`onSpawn`). Read from the trait's own keys
+/// (`skintrait.body`, `cape`, `elytra`, `modelType`) and from what `/npc mannequin --skin_patch_*` saves.
+fn skin_patch(npc: &NpcData) -> Option<String> {
+    let get = |a: &str, b: &str| {
+        npc.map
+            .at(&["traits", "skintrait", a])
+            .and_then(Node::text)
+            .or_else(|| npc.map.at(&["traits", "mannequin", b]).and_then(Node::text))
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty() && v != "null")
+    };
+    let key = |v: String| if v.contains(':') { v } else { format!("minecraft:{v}") };
+    let body = get("body", "skin_patch_body")?;
+    let mut out = format!("texture:{}", quoted(&key(body.to_ascii_lowercase())));
+    if let Some(c) = get("cape", "skin_patch_cape") {
+        out.push_str(&format!(",cape:{}", quoted(&key(c.to_ascii_lowercase()))));
+    }
+    if let Some(e) = get("elytra", "skin_patch_elytra") {
+        out.push_str(&format!(",elytra:{}", quoted(&key(e.to_ascii_lowercase()))));
+    }
+    if let Some(m) = get("modelType", "skin_patch_type") {
+        let m = m.to_ascii_lowercase();
+        if m == "wide" || m == "slim" {
+            out.push_str(&format!(",model:\"{m}\""));
+        }
+    }
+    Some(out)
+}
+
 /// `minecraft:mannequin` for `PLAYER`, else the Bukkit type in lower case (`SNOW_GOLEM` ->
 /// `minecraft:snow_golem`), with Bukkit's older names mapped.
 pub fn entity_kind(bukkit: &str) -> String {
@@ -128,7 +158,12 @@ pub fn npc_snbt(npc: &NpcData, uuid: u128, loc: &Location, cfg: &Config) -> Stri
         Nameplate::Hidden => {}
     }
     if kind == "minecraft:mannequin" {
-        if let Some(p) = profile_snbt(&profile_for(npc, uuid, cfg)) {
+        let profile = match (profile_snbt(&profile_for(npc, uuid, cfg)), skin_patch(npc)) {
+            (Some(p), Some(patch)) => Some(format!("{},{patch}}}", &p[..p.len() - 1])),
+            (None, Some(patch)) => Some(format!("{{{patch}}}")),
+            (p, None) => p,
+        };
+        if let Some(p) = profile {
             parts.push(format!("profile:{p}"));
         }
         let flag = |k: &str| npc.map.at(&["traits", "mannequin", k]).and_then(Node::as_bool).unwrap_or(true);
@@ -448,6 +483,34 @@ mod tests {
         assert!(cmd.contains("CustomNameVisible:1b"));
         assert!(cmd.contains("immovable:1b,hide_description:1b"));
         assert!(!cmd.contains("NoAI"));
+    }
+
+    fn mannequin_at_origin() -> (NpcData, Location) {
+        let n = NpcData::new(3, 8, "Bob", "PLAYER");
+        let loc = Location { world: "world".into(), x: 0.0, y: 64.0, z: 0.0, yaw: 0.0, pitch: 0.0, body_yaw: 0.0 };
+        (n, loc)
+    }
+
+    #[test]
+    fn a_skin_patch_goes_into_the_profile() {
+        let (mut n, loc) = mannequin_at_origin();
+        n.map.put(&["traits", "skintrait", "body"], Node::str("mypack:entity/bob"));
+        n.map.put(&["traits", "skintrait", "cape"], Node::str("mypack:cape"));
+        n.map.put(&["traits", "skintrait", "modelType"], Node::str("SLIM"));
+        let s = npc_snbt(&n, 8, &loc, &Config::default());
+        assert!(s.contains("texture:\"mypack:entity/bob\",cape:\"mypack:cape\",model:\"slim\""), "{s}");
+        assert!(s.contains("name:\"Bob\""), "the name stays in the same profile: {s}");
+    }
+
+    #[test]
+    fn a_patch_made_by_the_mannequin_command_counts_and_needs_a_body() {
+        let (mut n, loc) = mannequin_at_origin();
+        n.map.put(&["traits", "mannequin", "skin_patch_cape"], Node::str("mypack:cape"));
+        let s = npc_snbt(&n, 8, &loc, &Config::default());
+        assert!(!s.contains("cape:"), "without a body there is no patch: {s}");
+        n.map.put(&["traits", "mannequin", "skin_patch_body"], Node::str("bodyonly"));
+        let s = npc_snbt(&n, 8, &loc, &Config::default());
+        assert!(s.contains("texture:\"minecraft:bodyonly\",cape:\"mypack:cape\""), "{s}");
     }
 
     #[test]

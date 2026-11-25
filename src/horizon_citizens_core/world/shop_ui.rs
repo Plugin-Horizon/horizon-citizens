@@ -39,6 +39,8 @@ pub struct ShopPlayer {
     /// The wanted nodes ([`World::shop_wanted_nodes`]) the player holds.
     pub perms: BTreeSet<String>,
     pub op: bool,
+    /// The player's balance in the economy (0 without one).
+    pub money: f64,
 }
 
 const NO_PERMISSION: &str = "You don't have permission to execute that command.";
@@ -120,6 +122,7 @@ enum PromptFor {
     ItemsFilter,
     StorageLimit,
     ActExp(bool),
+    ActMoney(bool),
     ActOpenShop(bool),
     ActCondition(bool),
 }
@@ -220,6 +223,7 @@ pub(super) struct Snap {
     shops: Vec<SnapShop>,
     ids: Vec<(i32, String)>,
     global: String,
+    money_fmt: Option<fn(f64) -> String>,
 }
 
 struct SnapShop {
@@ -250,6 +254,13 @@ impl Snap {
 }
 
 impl Lookup for Snap {
+    fn format_money(&self, amount: f64) -> String {
+        match self.money_fmt {
+            Some(f) => f(amount),
+            None => crate::horizon_citizens_core::shop::java_double(amount),
+        }
+    }
+
     fn shop_name(&self, name: &str) -> Option<String> {
         self.find(name).map(|s| s.name.clone())
     }
@@ -276,7 +287,7 @@ impl World {
             .iter()
             .filter_map(|n| n.uuid().map(|u| (n.id, crate::horizon_citizens_core::ids::format_uuid(u))))
             .collect();
-        Snap { shops, ids, global: self.cfg.shops.global_view_permission.clone() }
+        Snap { shops, ids, global: self.cfg.shops.global_view_permission.clone(), money_fmt: self.money_fmt }
     }
 
     fn npc_uuid_text(&self, id: i32) -> Option<String> {
@@ -426,6 +437,7 @@ impl World {
             inv,
             perms: p.perms,
             op: p.op,
+            money: p.money,
         }
     }
 
@@ -840,7 +852,8 @@ impl World {
         r.put(50, icon("minecraft:emerald_block", "&aSave", &[]), Act::ISave);
         let mut pos = 0usize;
         for kind in Kind::ALL {
-            let Some((id, name)) = kind.button() else { continue };
+            let button = if kind == Kind::Money && self.economy { Some(Kind::money_button()) } else { kind.button() };
+            let Some((id, name)) = button else { continue };
             let (row, col) = (pos / 3, pos % 3);
             for (cost, list, base_col, suffix) in [(true, &m.cost, 0usize, "Cost"), (false, &m.result, 6usize, "Result")] {
                 let old = list.iter().find(|a| a.kind() == kind);
@@ -1199,9 +1212,9 @@ impl World {
                 self.present(s, false);
             }
             Kind::Experience => self.prompt(s, PromptFor::ActExp(cost), "Enter the experience levels"),
+            Kind::Money => self.prompt(s, PromptFor::ActMoney(cost), "Enter the amount of money"),
             Kind::OpenShop => self.prompt(s, PromptFor::ActOpenShop(cost), "Enter the name of the shop to open"),
             Kind::Condition => self.prompt(s, PromptFor::ActCondition(cost), "Enter the condition"),
-            Kind::Money => {}
         }
     }
 
@@ -1221,9 +1234,17 @@ impl World {
             *last = Some((page, slot));
         }
         let Some(o) = outcome else { return };
+        let bought = o.done;
         self.set_storage(&src, storage);
         self.shops_changed();
         self.apply_outcome(player, &buyer, o);
+        if bought {
+            // `NPCShopPurchaseEvent`: other mods hear which shop item sold.
+            let key = match &shop {
+                Target::Npc(k) | Target::Global(k) => k.clone(),
+            };
+            self.events.push(super::NpcEvent::ShopPurchase { shop: key, player, player_name: buyer.name.clone(), page, slot });
+        }
         // An open-shop action closed the menu; else the display shows the new counts.
         if self.shop_ui.pending.iter().any(|(_, p, _)| *p == player) {
             s.dead = true;
@@ -1246,11 +1267,13 @@ impl World {
                     slots.push((i as u32, now.clone()));
                 }
             }
-            if levels.is_some() || !slots.is_empty() {
-                self.ops.push(Op::ShopApply { player, levels, slots });
+            let money = o.money - before.money;
+            if levels.is_some() || !slots.is_empty() || money != 0.0 {
+                self.ops.push(Op::ShopApply { player, levels, slots, money });
                 if let Some(p) = self.shop_player.get_mut(&player) {
                     p.levels = o.levels;
                     p.inv = o.inv.clone();
+                    p.money = o.money;
                 }
             }
         }
@@ -1562,6 +1585,12 @@ impl World {
                 self.change_parent_action(s, *cost, Kind::Experience, Some(Action::Experience { exp: n }));
                 true
             }
+            PromptFor::ActMoney(cost) => {
+                // `filteredStringSetter`: a number that is not negative, else the setter refuses.
+                let Some(n) = v.as_deref().and_then(|t| t.trim().parse::<f64>().ok()).filter(|n| *n >= 0.0 && n.is_finite()) else { return false };
+                self.change_parent_action(s, *cost, Kind::Money, Some(Action::Money { money: n }));
+                true
+            }
             PromptFor::ActOpenShop(cost) => {
                 // An empty or unknown shop name removes the action.
                 let name = v.filter(|n| self.shop_find(n).is_some());
@@ -1600,7 +1629,7 @@ mod tests {
         for (i, s) in inv {
             slots[i] = Some(s);
         }
-        w.shop_player.insert(0xA1, ShopPlayer { name: "Alex".into(), world: "world".into(), levels, inv: slots, perms: BTreeSet::new(), op: true });
+        w.shop_player.insert(0xA1, ShopPlayer { name: "Alex".into(), world: "world".into(), levels, inv: slots, perms: BTreeSet::new(), op: true, money: 0.0 });
     }
 
     fn shop_with_apple_for_xp(w: &mut World) -> Target {

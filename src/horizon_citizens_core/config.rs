@@ -258,6 +258,17 @@ pub struct Talk {
     /// `npc.chat.options.multiple-targets-format`: four parts split by `|` (first, further, last,
     /// "and others"), `<target>` filled in.
     pub multiple_targets_format: String,
+    /// `npc.chat.format.to-target` (`with-target` in older configs): the line a targeted player gets.
+    pub to_target: String,
+    /// `npc.chat.format.with-target-to-bystanders` and `with-targets-to-bystanders`.
+    pub with_target_to_bystanders: String,
+    pub with_targets_to_bystanders: String,
+    /// `npc.chat.options.bystanders-hear-targeted-chat`.
+    pub bystanders_hear_targeted_chat: bool,
+    /// `npc.chat.options.max-number-of-targets-to-show`.
+    pub max_targets: usize,
+    /// `npc.chat.options.range`: how far bystanders are, in blocks.
+    pub range: f64,
 }
 
 impl Default for Talk {
@@ -265,6 +276,12 @@ impl Default for Talk {
         Talk {
             format: "[<npc>]: <text>".into(),
             multiple_targets_format: "<target>|, <target>| & <target>| & others".into(),
+            to_target: "<npc>: <text>".into(),
+            with_target_to_bystanders: "[<npc>] -> [<target>]: <text>".into(),
+            with_targets_to_bystanders: "[<npc>] -> [<targets>]: <text>".into(),
+            bystanders_hear_targeted_chat: false,
+            max_targets: 2,
+            range: 5.0,
         }
     }
 }
@@ -363,6 +380,27 @@ impl Config {
         }
         if let Some(v) = text_of("npc.chat.format.no-targets") {
             cfg.talk.format = v;
+        }
+        if let Some(v) = text_of("npc.chat.format.to-target").or_else(|| text_of("npc.chat.format.with-target")) {
+            cfg.talk.to_target = v;
+        }
+        if let Some(v) = text_of("npc.chat.format.with-target-to-bystanders") {
+            cfg.talk.with_target_to_bystanders = v;
+        }
+        if let Some(v) = text_of("npc.chat.format.with-targets-to-bystanders") {
+            cfg.talk.with_targets_to_bystanders = v;
+        }
+        if let Some(v) = boolean("npc.chat.options.bystanders-hear-targeted-chat") {
+            cfg.talk.bystanders_hear_targeted_chat = v;
+        }
+        if let Some(v) = float("npc.chat.options.max-number-of-targets-to-show") {
+            cfg.talk.max_targets = v.max(0.0) as usize;
+        }
+        if let Some(v) = float("npc.chat.options.range") {
+            cfg.talk.range = v;
+        }
+        if let Some(v) = text_of("npc.chat.options.multiple-targets-format") {
+            cfg.talk.multiple_targets_format = v;
         }
         if let Some(v) = text_of("npc.defaults.shops.global-view-permission").or_else(|| text_of("npc.shops.global-view-permission")) {
             cfg.shops.global_view_permission = v;
@@ -491,6 +529,14 @@ pub const CITIZENS_CONFIG_KEYS: &[&str] = &[
     "npc.selection.item",
     "npc.selection.message",
     "npc.chat.format.no-targets",
+    "npc.chat.format.to-target",
+    "npc.chat.format.with-target",
+    "npc.chat.format.with-target-to-bystanders",
+    "npc.chat.format.with-targets-to-bystanders",
+    "npc.chat.options.bystanders-hear-targeted-chat",
+    "npc.chat.options.max-number-of-targets-to-show",
+    "npc.chat.options.range",
+    "npc.chat.options.multiple-targets-format",
     "storage.file",
     "npc.defaults.shops.global-view-permission",
     "npc.shops.global-view-permission",

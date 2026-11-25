@@ -206,14 +206,25 @@ impl HologramLine {
 }
 
 /// The equipment slots of Citizens' `equipment` trait, with the slot names the game uses.
-pub const EQUIPMENT_SLOTS: [(&str, &str); 6] = [
+pub const EQUIPMENT_SLOTS: [(&str, &str); 8] = [
     ("hand", "mainhand"),
     ("off_hand", "offhand"),
     ("helmet", "head"),
     ("chestplate", "chest"),
     ("leggings", "legs"),
     ("boots", "feet"),
+    ("body", "body"),
+    ("saddle", "saddle"),
 ];
+
+/// An NPC's cosmetic item of one equipment slot (`Equipment.getCosmetic`): the slot has none (the real item
+/// shows), is enabled with nothing in it (the slot shows empty), or shows this item.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Cosmetic {
+    Off,
+    Empty,
+    Item(StackData),
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Equipped {
@@ -383,6 +394,13 @@ pub const NPC_READ_PATHS: &[&str] = &[
     "traits.skintrait.textureRaw",
     "traits.skintrait.signature",
     "traits.skintrait.skinName",
+    "traits.skintrait.body",
+    "traits.skintrait.cape",
+    "traits.skintrait.elytra",
+    "traits.skintrait.modelType",
+    "traits.saddle",
+    "traits.behavior.tree.**",
+    "traits.behavior.memory.**",
     "traits.lookclose.enabled",
     "traits.lookclose.range",
     "traits.lookclose.enableRandomLook",
@@ -908,11 +926,9 @@ impl NpcData {
                     !(t.is_empty() || t == "null" || t.parse::<f64>().is_ok_and(|x| x <= 0.0))
                 }
             };
-            // Only what needs an economy is still not run (cost).
-            let unenforced = ["cost"]
-                .into_iter()
-                .find(|k| set(k))
-                .map(str::to_owned);
+            // Every limit and price is enforced now (the money price through the economy provider).
+            let _ = &set;
+            let unenforced: Option<String> = None;
             let perms: Vec<String> = ["permissions", "perms"]
                 .into_iter()
                 .filter_map(|k| m.get(k))
@@ -1048,6 +1064,52 @@ impl NpcData {
         }
     }
 
+    /// The commandtrait's own `cost`, `experienceCost` and `itemRequirements` (charged once per click, before
+    /// the commands): -1 when unset.
+    pub fn trait_cost(&self) -> f64 {
+        f64_at(&self.map, &["traits", "commandtrait", "cost"]).unwrap_or(-1.0)
+    }
+
+    pub fn trait_experience_cost(&self) -> i64 {
+        self.map.at(&["traits", "commandtrait", "experienceCost"]).and_then(Node::as_i64).unwrap_or(-1)
+    }
+
+    pub fn trait_item_cost(&self) -> Vec<CostItem> {
+        match self.map.at(&["traits", "commandtrait", "itemRequirements"]) {
+            Some(n) if n.is_seq() => n.items().iter().filter_map(cost_item).collect(),
+            // The map form `PersistenceLoader` writes a collection in.
+            Some(n) if n.is_map() => n.entries().iter().filter_map(|e| cost_item(&e.value)).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn set_trait_cost(&mut self, cost: f64) {
+        self.map.map_at(&["traits", "commandtrait"]).set("cost", Node::float(cost));
+        self.add_trait_name("commandtrait");
+    }
+
+    pub fn set_trait_experience_cost(&mut self, cost: i64) {
+        self.map.map_at(&["traits", "commandtrait"]).set("experienceCost", Node::int(cost));
+        self.add_trait_name("commandtrait");
+    }
+
+    /// Sets the `executionmode` (LINEAR is the default and is saved by its name as Citizens does).
+    pub fn set_execution_mode(&mut self, mode: ExecutionMode) {
+        let name = match mode {
+            ExecutionMode::Linear => "LINEAR",
+            ExecutionMode::Random => "RANDOM",
+            ExecutionMode::Sequential => "SEQUENTIAL",
+            ExecutionMode::Cycle => "CYCLE",
+        };
+        self.map.map_at(&["traits", "commandtrait"]).set("executionmode", Node::str(name));
+        self.add_trait_name("commandtrait");
+    }
+
+    pub fn set_hide_command_errors(&mut self, on: bool) {
+        self.map.map_at(&["traits", "commandtrait"]).set("hideErrorMessages", Node::bool(on));
+        self.add_trait_name("commandtrait");
+    }
+
     /// `hideErrorMessages` of the `commandtrait`.
     pub fn hide_command_errors(&self) -> bool {
         self.map
@@ -1153,8 +1215,24 @@ impl NpcData {
 
     pub fn equipment(&self) -> Vec<Equipped> {
         let mut out = Vec::new();
+        // An enderman holds a block, not equipment (`carried_block`).
+        if self.kind().eq_ignore_ascii_case("ENDERMAN") {
+            return out;
+        }
         for (citizens, slot) in EQUIPMENT_SLOTS {
-            let Some(m) = self.map.at(&["traits", "equipment", citizens]) else {
+            let real = self.map.at(&["traits", "equipment", citizens]);
+            let key = format!("cosmetic_{citizens}");
+            // A cosmetic item shows in place of the real one; an enabled empty one hides it.
+            let shown = match self.map.at(&["traits", "equipment", key.as_str()]) {
+                Some(c) => {
+                    if stack_of(c).is_none() {
+                        continue;
+                    }
+                    Some(c)
+                }
+                None => real,
+            };
+            let Some(m) = shown else {
                 continue;
             };
             if let Some((item, count, components)) = stack_of(m) {
@@ -1166,10 +1244,61 @@ impl NpcData {
                 });
             }
         }
+        // The `saddle` trait of a pig or strider: the saddle slot.
+        if self.saddle() && !out.iter().any(|e| e.slot == "saddle") {
+            out.push(Equipped { slot: "saddle", item: "saddle".to_owned(), count: 1, components: Vec::new() });
+        }
         out
     }
-    /// The Citizens inventory (`traits.inventory`, the items an NPC carries, not shown): what
-    /// Sentinel's autoswitch reads. Empty stacks are skipped; `index` is the place in the list.
+
+    /// The `saddle` trait (`traits.saddle`).
+    pub fn saddle(&self) -> bool {
+        self.map.at(&["traits", "saddle"]).and_then(bool_of).unwrap_or(false)
+    }
+
+    pub fn set_saddle(&mut self, on: bool) {
+        self.map.put(&["traits", "saddle"], Node::bool(on));
+        self.add_trait_name("saddle");
+    }
+
+    /// The block an enderman carries (`traits.equipment.hand`, `Equipment` slot 0), as an item id.
+    pub fn carried_block(&self) -> Option<String> {
+        let m = self.map.at(&["traits", "equipment", "hand"])?;
+        let (item, _, _) = stack_of(m)?;
+        Some(if item.contains(':') { item } else { format!("minecraft:{item}") })
+    }
+
+    /// The cosmetic item of an equipment slot (`cosmetic_<slot>`).
+    pub fn cosmetic(&self, citizens_slot: &str) -> Cosmetic {
+        let key = format!("cosmetic_{citizens_slot}");
+        match self.map.at(&["traits", "equipment", key.as_str()]) {
+            None => Cosmetic::Off,
+            Some(m) => match StackData::from_node(m) {
+                Some(s) => Cosmetic::Item(s),
+                None => Cosmetic::Empty,
+            },
+        }
+    }
+
+    pub fn set_cosmetic(&mut self, citizens_slot: &str, c: &Cosmetic) {
+        let key = format!("cosmetic_{citizens_slot}");
+        match c {
+            Cosmetic::Off => {
+                self.map.drop_path(&["traits", "equipment", key.as_str()]);
+            }
+            Cosmetic::Empty => {
+                let mut m = Node::map();
+                m.set("type", Node::str("air"));
+                m.set("amount", Node::int(1));
+                self.map.put(&["traits", "equipment", key.as_str()], m);
+                self.add_trait_name("equipment");
+            }
+            Cosmetic::Item(s) => {
+                self.map.put(&["traits", "equipment", key.as_str()], s.to_node());
+                self.add_trait_name("equipment");
+            }
+        }
+    }
     pub fn inventory(&self) -> Vec<InventoryItem> {
         let Some(items) = self.map.at(&["traits", "inventory"]).and_then(Node::as_seq) else {
             return Vec::new();
@@ -1574,7 +1703,8 @@ uuid: 00000000-0000-4000-8000-0000000000aa
         assert_eq!(c[1].perms, vec!["some.node".to_owned()]);
         assert_eq!(c[1].n, 2);
         assert_eq!(c[1].id, 1);
-        assert_eq!(c[1].unenforced.as_deref(), Some("cost"));
+        assert_eq!(c[1].unenforced, None);
+        assert_eq!(c[1].cost, 5.0);
         assert_eq!(n.execution_mode(), ExecutionMode::Linear);
         n.map
             .map_at(&["traits", "commandtrait"])

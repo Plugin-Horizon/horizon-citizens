@@ -7,6 +7,12 @@ api = "0.2"
 side = "server"
 capabilities = ["registries"]
 
+# The economy (the vault mod) charges command and shop prices; PlaceholderAPI fills `papi(...)` in expressions. Both are
+# optional: the launcher adds the Cargo alias and feature for each; do not declare them in Cargo.toml.
+[dependencies]
+vault = { version = "^0.1", optional = true }
+placeholderapi = { version = "^0.1", optional = true }
+
 [native]
 # Development build of arismoko/horizon main plus mod API additions (see README).
 game = "26.3"

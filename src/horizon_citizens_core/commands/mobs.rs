@@ -268,7 +268,7 @@ const MOBS: &[Mob] = &[
             o("skin_patch_cape", V::Any),
             o("skin_patch_elytra", V::Any),
         ],
-        live: true, noeffect: &["skin_patch_type", "skin_patch_body", "skin_patch_cape", "skin_patch_elytra"], ..m!("mannequin", [], "mannequin --hide_description [true|false] --immovable [true|false] --description [description] --main_hand [LEFT|RIGHT] --skin_patch_type [type] --skin_patch_body [location] --skin_patch_cape [location] --skin_patch_elytra [location]")
+        live: true, ..m!("mannequin", [], "mannequin --hide_description [true|false] --immovable [true|false] --description [description] --main_hand [LEFT|RIGHT] --skin_patch_type [type] --skin_patch_body [location] --skin_patch_cape [location] --skin_patch_elytra [location]")
     },
     Mob { kinds: &["*MINECART"], opts: &[o("offset", V::Int(-IMAX, IMAX))], live: true, ..m!("minecart", [], "minecart (--offset offset)") },
     Mob {
@@ -1034,10 +1034,17 @@ fn speak(w: &mut World, sender: &Sender, id: i32, tail: &str) -> Res {
     if heard.is_empty() {
         return Ok(err(w, M_NO_TARGET, &[&dec2(range)]));
     }
-    let text = w.cfg.talk.format.replace("<npc>", &npc_name).replace("<text>", &message.join(" "));
+    // A named target is the recipient of a targeted line; without one the line goes to everyone in range.
+    let targeted = opt("target").is_some();
+    let template = if targeted { w.cfg.talk.to_target.clone() } else { w.cfg.talk.format.clone() };
+    let said = message.join(" ");
+    let text = template.replace("<npc>", &npc_name).replace("<text>", &said);
     let legacy = w.cfg.messages.format(&text);
-    for player in heard {
-        w.push_op(Op::Tell { player, legacy: legacy.clone() });
+    for player in &heard {
+        w.push_op(Op::Tell { player: *player, legacy: legacy.clone() });
+    }
+    if targeted {
+        w.say_to_bystanders(id, &said, &heard);
     }
     let _ = sender;
     Ok(Vec::new())

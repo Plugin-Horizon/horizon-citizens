@@ -18,7 +18,9 @@ use crate::horizon_citizens_core::text;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
+mod behave;
 mod shop_ui;
+pub use behave::LiveStats;
 pub use shop_ui::{ShopPlayer, Src, Target};
 
 /// Nodes that skip a command's cooldown, global cooldown and use limit (Citizens' `ignoreerrors`).
@@ -42,6 +44,8 @@ pub const COST_IGNORE: [&str; 4] = [
 pub struct PlayerCost {
     pub levels: i32,
     pub slots: Vec<(u32, String, u32)>,
+    /// The balance in the economy (0 without one).
+    pub money: f64,
 }
 
 /// `ItemAction.takeItems`: the slots (and the counts they keep, 0 = emptied) that pay `costs`, or
@@ -74,6 +78,27 @@ fn text_fill(s: &str, player: &str, npc: &str) -> String {
     s.replace("<player>", player).replace("<npc>", &text::strip(npc))
 }
 
+/// The command that shows (or clears) the block an enderman carries.
+fn carried_command(uuid: u128, block: Option<&str>) -> String {
+    let id = crate::horizon_citizens_core::ids::format_uuid(uuid);
+    match block {
+        Some(b) => {
+            let b = if b.contains(':') { b.to_owned() } else { format!("minecraft:{b}") };
+            format!("data merge entity {id} {{carriedBlockState:{{Name:\"{b}\"}}}}")
+        }
+        None => format!("data remove entity {id} carriedBlockState"),
+    }
+}
+
+/// What a click costs: money, experience levels (-1 unset) and item stacks. `global` is the commandtrait's own
+/// price (charged once per click), else one command's.
+pub struct Price {
+    pub money: f64,
+    pub exp: i64,
+    pub items: Vec<CostItem>,
+    pub global: bool,
+}
+
 /// Something for the game to do, at the next tick, outside every player's hook.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
@@ -91,7 +116,7 @@ pub enum Op {
     Rotate { dimension: String, entity: u32, yaw: f32, pitch: f32, fallback: String },
     /// A command's price, paid: take `levels` experience levels and set each slot to the count it
     /// keeps (0 empties it). Sent only after every check of the command passed.
-    Charge { player: u128, levels: i32, slots: Vec<(u32, u32)> },
+    Charge { player: u128, levels: i32, slots: Vec<(u32, u32)>, money: f64 },
     /// `NMS.setShouldJump`: the mob's jump control fires on its next tick.
     Jump { entity: u32 },
     /// Seat a rider on a vehicle entity (`Entity.startRiding`): the player `player`, else the entity `rider`.
@@ -102,10 +127,12 @@ pub enum Op {
     /// [`World::menu_opened`].
     /// `in_place` swaps the screen the player has open without the client centring the mouse.
     OpenMenu { player: u128, title: String, rows: u8, items: Vec<Option<StackData>>, in_place: bool },
+    /// Open a hopper menu (five slots) for a player; the glue answers with [`World::menu_opened`] as for `OpenMenu`.
+    OpenHopper { player: u128, title: String, items: Vec<Option<StackData>> },
     /// Close the player's open menu (a chat prompt of a shop editor, an open-shop action).
     CloseMenu { player: u128 },
     /// A shop purchase went through: set the experience level, and each slot (`Inventory` numbers 0-35) to the stack.
-    ShopApply { player: u128, levels: Option<i32>, slots: Vec<(u32, Option<StackData>)> },
+    ShopApply { player: u128, levels: Option<i32>, slots: Vec<(u32, Option<StackData>)>, money: f64 },
     /// Replace everything an open menu shows (`menu_set_items`).
     SetMenuItems { player: u128, window: i32, items: Vec<Option<StackData>> },
     /// A command line run as the NPC's own entity (`entity_run_command`) at this operator level.
@@ -146,6 +173,10 @@ pub enum MenuKind {
     Equipment,
     /// `NPCConfigurator`: one button, edit the name through the chat.
     Config,
+    /// `SaddleEquipperGUI` (a pig or strider): a hopper with the saddle slot.
+    Saddle,
+    /// `EndermanEquipperGUI`: a hopper with the carried block's slot.
+    Enderman,
 }
 
 /// A chat line a player's next lines go to (the original's chat-based editors).
@@ -158,8 +189,8 @@ pub enum ChatEdit {
 }
 
 /// The equipment slots of the menu's row 1 (`GenericEquipperGUI`): hand, off hand, helmet, chestplate,
-/// leggings, boots; the two last cells (body, saddle) are unused here.
-const EQUIPMENT_MENU: [&str; 6] = ["hand", "off_hand", "helmet", "chestplate", "leggings", "boots"];
+/// leggings, boots, body, saddle; row 2 holds the cosmetic item of each.
+const EQUIPMENT_MENU: [&str; 8] = ["hand", "off_hand", "helmet", "chestplate", "leggings", "boots", "body", "saddle"];
 
 /// The equipment cell an item goes to: by its name's ending, the shield or elytra, else the hand.
 fn equipment_cell_for(id: &str) -> usize {
@@ -174,6 +205,10 @@ fn equipment_cell_for(id: &str) -> usize {
         5
     } else if name == "shield" {
         1
+    } else if name.ends_with("_horse_armor") || name.ends_with("_wolf_armor") || name.ends_with("_nautilus_armor") || name.ends_with("_carpet") || name == "wolf_armor" {
+        6
+    } else if name == "saddle" {
+        7
     } else {
         0
     }
@@ -200,39 +235,72 @@ struct MenuSession {
     window: Option<i32>,
     slots: Vec<Option<StackData>>,
     chances: Vec<f64>,
+    /// The equipment menu: which slots have no cosmetic item (shown as "No cosmetic").
+    cosmetic_off: [bool; 8],
+    /// A hopper menu (five slots) instead of a chest of `rows` rows.
+    hopper: bool,
 }
 
 impl MenuSession {
+    /// A chest menu of `rows` rows.
+    fn chest(npc: i32, kind: MenuKind, rows: u8, slots: Vec<Option<StackData>>, chances: Vec<f64>) -> MenuSession {
+        MenuSession { npc, kind, rows, window: None, slots, chances, cosmetic_off: [false; 8], hopper: false }
+    }
+
+    /// The number of the menu's own slots.
+    fn size(&self) -> usize {
+        if self.hopper { 5 } else { usize::from(self.rows) * 9 }
+    }
+
     /// `DropsTrait.DropsGUI`: items live in rows 0, 2 and 4; rows 1 and 3 hold the chance barriers.
     fn is_item_slot(&self, slot: usize) -> bool {
         match self.kind {
             MenuKind::Inventory => true,
             MenuKind::Drops => (slot / 9) % 2 == 0,
-            MenuKind::Equipment => (9..9 + EQUIPMENT_MENU.len()).contains(&slot),
+            MenuKind::Equipment => (9..9 + EQUIPMENT_MENU.len()).contains(&slot) || ((18..18 + EQUIPMENT_MENU.len()).contains(&slot) && !self.cosmetic_off[slot - 18]),
             MenuKind::Config => false,
+            MenuKind::Saddle | MenuKind::Enderman => slot == 1,
         }
     }
 
     fn shown(&self) -> Vec<Option<StackData>> {
         let mut out = self.slots.clone();
+        let unused = || {
+            let mut b = StackData::new("minecraft:barrier", 1);
+            b.meta.display_name = Some("Unused".to_owned());
+            Some(b)
+        };
         if self.kind == MenuKind::Config {
             let mut b = StackData::new("minecraft:name_tag", 1);
             b.meta.display_name = Some("Edit name".to_owned());
             out[0] = Some(b);
             return out;
         }
+        if matches!(self.kind, MenuKind::Saddle | MenuKind::Enderman) {
+            let (icon, lore) = if self.kind == MenuKind::Saddle { ("minecraft:saddle", "Place a saddle here ->") } else { ("minecraft:ender_pearl", "Place a block to hold here ->") };
+            let mut b = StackData::new(icon, 1);
+            b.meta.lore = vec![lore.to_owned()];
+            out[0] = Some(b);
+            for cell in out.iter_mut().skip(2) {
+                *cell = unused();
+            }
+            return out;
+        }
         if self.kind == MenuKind::Equipment {
-            let labels = ["Place in hand item below", "Place offhand item below", "Place helmet below", "Place chestplate below", "Place leggings below", "Place boots below"];
-            let icons = ["minecraft:diamond_sword", "minecraft:shield", "minecraft:diamond_helmet", "minecraft:diamond_chestplate", "minecraft:diamond_leggings", "minecraft:diamond_boots"];
+            let labels = ["Place in hand item below", "Place offhand item below", "Place helmet below", "Place chestplate below", "Place leggings below", "Place boots below", "Place body item below", "Place saddle item below"];
+            let icons = ["minecraft:diamond_sword", "minecraft:shield", "minecraft:diamond_helmet", "minecraft:diamond_chestplate", "minecraft:diamond_leggings", "minecraft:diamond_boots", "minecraft:elytra", "minecraft:saddle"];
             for (i, cell) in out.iter_mut().enumerate() {
-                if i < 6 {
+                if i < 8 {
                     let mut b = StackData::new(icons[i], 1);
-                    b.meta.display_name = Some(labels[i].to_owned());
+                    b.meta.lore = vec![labels[i].to_owned()];
+                    *cell = Some(b);
+                } else if (18..26).contains(&i) && self.cosmetic_off[i - 18] {
+                    let mut b = StackData::new("minecraft:barrier", 1);
+                    b.meta.display_name = Some("No cosmetic".to_owned());
+                    b.meta.lore = vec!["Click to enable cosmetic for this equipment".to_owned()];
                     *cell = Some(b);
                 } else if !self.is_item_slot(i) {
-                    let mut b = StackData::new("minecraft:barrier", 1);
-                    b.meta.display_name = Some("Unused".to_owned());
-                    *cell = Some(b);
+                    *cell = unused();
                 }
             }
             return out;
@@ -265,6 +333,9 @@ pub enum NpcEvent {
     Selected { npc: i32, player: u128 },
     /// A waypoint or `navigate_to` goal was reached.
     NavigationComplete { npc: i32 },
+    /// A shop item was bought (`NPCShopPurchaseEvent`): the shop's key (a global name, or an NPC's UUID), the buyer,
+    /// and the page and slot of the item.
+    ShopPurchase { shop: String, player: u128, player_name: String, page: usize, slot: usize },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -400,6 +471,19 @@ pub struct World {
     pub stopping: bool,
     /// Creates and removes, newest last, for `/npc undo`.
     history: Vec<Hist>,
+    /// What the last deposit into a menu left with the player.
+    deposit_left: i64,
+    /// Players in the equipment editor of an NPC (`/npc equip` for a sheep or a horse): their next right click on it equips.
+    pub equip_editors: HashMap<u128, i32>,
+    /// Whether an economy provider answers (the glue sets it): shop money buttons, command and NPC costs.
+    pub economy: bool,
+    /// `Economy.format`, the glue's, for shop descriptions.
+    pub money_fmt: Option<fn(f64) -> String>,
+    /// The behavior trees of the NPCs that have the `behavior` trait.
+    behaviors: BTreeMap<i32, behave::BehaviorRun>,
+    signals: crate::horizon_citizens_core::behavior::Signals,
+    /// Health and motion the glue read for NPCs with a behavior tree.
+    live_stats: HashMap<i32, behave::LiveStats>,
 }
 
 /// One step `/npc undo` can take back.
@@ -471,6 +555,13 @@ impl World {
             rng: Rng::new(0x5EED_C17E),
             stopping: false,
             history: Vec::new(),
+            deposit_left: 0,
+            equip_editors: HashMap::new(),
+            economy: false,
+            money_fmt: None,
+            behaviors: BTreeMap::new(),
+            signals: crate::horizon_citizens_core::behavior::Signals::default(),
+            live_stats: HashMap::new(),
         }
     }
 
@@ -789,7 +880,11 @@ impl World {
         if !npc.is_player() {
             sets.push(EntitySet::NavigationTicks(true));
         }
+        let carried = npc.uuid().zip(npc.carried_block()).filter(|_| kind == "minecraft:enderman");
         self.ops.extend(sets.into_iter().map(|set| Op::Entity { entity, set }));
+        if let Some((uuid, block)) = carried {
+            self.ops.push(Op::Console(carried_command(uuid, Some(&block))));
+        }
     }
 
     /// An NPC's saved settings changed: send them to its entity again.
@@ -912,6 +1007,41 @@ impl World {
             player: player.uuid,
             legacy,
         });
+        let id = npc.id;
+        self.say_to_bystanders(id, &lines[pick], &[player.uuid]);
+    }
+
+    /// `CitizensNPC.speak` for the players who were not addressed (`talkToBystanders`): with no recipients everyone
+    /// within `npc.chat.options.range` hears the line; with recipients, bystanders hear it only when
+    /// `bystanders-hear-targeted-chat` is on, in the bystander format (the list of several names is cut by
+    /// `multiple-targets-format` and `max-number-of-targets-to-show`).
+    pub fn say_to_bystanders(&mut self, id: i32, message: &str, targets: &[u128]) {
+        let cfg = self.cfg.talk.clone();
+        if !targets.is_empty() && !cfg.bystanders_hear_targeted_chat {
+            return;
+        }
+        let (Some(at), Some(dim)) = (self.current_location(id), self.dimension_of(id)) else { return };
+        let name = self.saves.get(id).map(NpcData::name).unwrap_or_default();
+        let template = match targets.len() {
+            0 => cfg.format.clone(),
+            1 => cfg.with_target_to_bystanders.replace("<target>", &self.player_name(targets[0])),
+            _ => {
+                let names: Vec<String> = targets.iter().map(|t| self.player_name(*t)).collect();
+                let list = text::format_targets(&cfg.multiple_targets_format, &names, cfg.max_targets).unwrap_or_default();
+                cfg.with_targets_to_bystanders.replace("<targets>", &list)
+            }
+        };
+        let line = template.replace("<npc>", &text::strip(&name)).replace("<text>", message);
+        let legacy = self.cfg.messages.format(&line);
+        let near: Vec<u128> = self
+            .online
+            .iter()
+            .filter(|p| p.dimension == dim && !targets.contains(&p.uuid) && look::dist2([at.x, at.y, at.z], p.pos) <= cfg.range * cfg.range)
+            .map(|p| p.uuid)
+            .collect();
+        for player in near {
+            self.ops.push(Op::Tell { player, legacy: legacy.clone() });
+        }
     }
 
     pub fn on_click(&mut self, entity: u32, player: &PlayerView, hand: Hand, holding: Option<&str>) -> bool {
@@ -940,6 +1070,11 @@ impl World {
             });
             return true;
         }
+        if hand == Hand::Right && self.equip_editors.get(&player.uuid) == Some(&id) {
+            // The equipment editor's `Equipper`: this click equips the NPC instead of talking to it.
+            self.equipper_click(player, &npc, id, holding);
+            return true;
+        }
         if hand == Hand::Right {
             self.talk(player, &npc);
         }
@@ -962,10 +1097,62 @@ impl World {
             self.shop_right_click(player.uuid, id);
         }
         let commands: Vec<_> = npc.commands().into_iter().filter(|c| c.hand.matches(hand, player.sneaking)).collect();
+        if npc.has_trait("commandtrait") {
+            // `CommandTrait.dispatch`: the trait's own price is charged first; a click that cannot pay stops here.
+            let em = self.cfg.commands.error_messages.clone();
+            let price = Price { money: npc.trait_cost(), exp: npc.trait_experience_cost(), items: npc.trait_item_cost(), global: true };
+            let mut sent = BTreeSet::new();
+            match self.check_charge(player, &npc, &price, &em, &mut sent) {
+                Some((levels, slots, money)) => self.pay(player.uuid, levels, slots, money),
+                None => return true,
+            }
+        }
         if !commands.is_empty() {
             self.run_commands(player, hand, &npc, id, commands);
         }
         true
+    }
+
+    /// `SheepEquipper` and `HorseEquipper`: a right click in the equipment editor. Shears toggle the sheared state,
+    /// a dye colours the wool (and is used up), anything else makes the wool white; a horse-like NPC opens its inventory.
+    fn equipper_click(&mut self, player: &PlayerView, npc: &NpcData, id: i32, holding: Option<&str>) {
+        let kind = npc.kind().to_ascii_uppercase();
+        let say = |w: &World, t: &str| crate::horizon_citizens_core::commands::say(w, t);
+        let lines: Vec<String>;
+        if kind == "SHEEP" {
+            let held = holding.unwrap_or("").trim_start_matches("minecraft:").to_owned();
+            let name = text::strip(&npc.name());
+            if held == "shears" {
+                let now = npc.map.at(&["traits", "sheeptrait", "sheared"]).and_then(Node::as_bool).unwrap_or(false);
+                if let Some(n) = self.saves.get_mut(id) {
+                    n.map.put(&["traits", "sheeptrait", "sheared"], Node::bool(!now));
+                    n.add_trait_name("sheeptrait");
+                }
+                lines = say(self, &if now { format!("{name} is no longer sheared.") } else { format!("{name} is now sheared.") });
+            } else {
+                let colour = held.strip_suffix("_dye").map(str::to_ascii_uppercase).unwrap_or_else(|| "WHITE".to_owned());
+                if let Some(n) = self.saves.get_mut(id) {
+                    n.map.put(&["traits", "sheeptrait", "color"], Node::str(&colour));
+                    n.add_trait_name("sheeptrait");
+                }
+                if held.ends_with("_dye") {
+                    self.ops.push(Op::Console(format!("clear {} minecraft:{held} 1", player.name)));
+                }
+                lines = say(self, &format!("{name} is now {}.", colour.to_ascii_lowercase().replace('_', " ")));
+            }
+            self.mark_dirty();
+            self.respawn(id);
+        } else {
+            // A horse-like NPC: its inventory (the engine has no call that opens the mount's own screen).
+            if let Some(n) = self.saves.get_mut(id) {
+                n.add_trait_name("inventory");
+            }
+            self.open_inventory(player.uuid, id);
+            return;
+        }
+        for legacy in lines {
+            self.ops.push(Op::Tell { player: player.uuid, legacy });
+        }
     }
 
     /// The permissions the commands of the NPC behind `entity` ask (and the `ignoreerrors` nodes), for the
@@ -975,7 +1162,7 @@ impl World {
             return Vec::new();
         };
         let mut v: Vec<String> = npc.commands().into_iter().flat_map(|c| c.perms).collect();
-        if !v.is_empty() || !npc.commands().is_empty() {
+        if !v.is_empty() || !npc.commands().is_empty() || npc.has_trait("commandtrait") {
             v.extend(IGNORE_ERRORS.iter().map(|s| (*s).to_owned()));
             v.extend(COST_IGNORE.iter().map(|s| (*s).to_owned()));
         }
@@ -996,45 +1183,77 @@ impl World {
         self.ops.push(Op::Tell { player: player.uuid, legacy: text });
     }
 
-    /// `CommandTrait.chargeCommandCosts` for `experienceCost` (levels) and `itemCost`: the levels and
-    /// slots a command's price takes, or `None` (after the error message) when the player cannot pay.
-    /// A player holding the matching `ignoreerrors` node pays nothing.
+    /// `CommandTrait.chargeCommandCosts` / `chargeGlobalCommandCosts`: what a price takes from the player (levels,
+    /// the slots and the counts they keep, the money), or `None` after the error messages when the player
+    /// cannot pay. Every part that cannot be paid says so, as the original's transactions do.
     fn check_charge(
         &mut self,
         player: &PlayerView,
         npc: &NpcData,
-        c: &NpcCommand,
+        price: &Price,
         em: &crate::horizon_citizens_core::config::ErrorMessages,
         sent: &mut BTreeSet<String>,
-    ) -> Option<(i32, Vec<(u32, u32)>)> {
+    ) -> Option<(i32, Vec<(u32, u32)>, f64)> {
         let held = |n: &str| self.held_perms.contains(n);
         if held(COST_IGNORE[0]) {
-            return Some((0, Vec::new()));
+            return Some((0, Vec::new(), 0.0));
         }
-        let pay_xp = c.experience_cost != -1 && !held(COST_IGNORE[2]);
-        let pay_items = !c.item_cost.is_empty() && !held(COST_IGNORE[3]);
+        let pay_money = price.money > 0.0 && !held(COST_IGNORE[1]);
+        let pay_xp = if price.global { price.exp > 0 } else { price.exp != -1 } && !held(COST_IGNORE[2]);
+        let pay_items = !price.items.is_empty() && !held(COST_IGNORE[3]);
         let have = self.player_cost.clone().unwrap_or_default();
+        let mut possible = true;
         let mut levels = 0;
-        if pay_xp {
-            if i64::from(have.levels) < c.experience_cost {
-                self.command_error(player, npc, "missing_experience", &em.not_enough_experience, 0, c.experience_cost, sent);
-                return None;
-            }
-            levels = c.experience_cost as i32;
-        }
+        let mut money = 0.0;
         let mut slots = Vec::new();
+        if pay_money {
+            if have.money < price.money {
+                let shown = if price.money == price.money.trunc() { format!("{}", price.money as i64) } else { price.money.to_string() };
+                let msg = em.not_enough_money.replace("{0}", &shown);
+                self.command_error(player, npc, "missing_money", &msg, 0, 0, sent);
+                possible = false;
+            } else {
+                money = price.money;
+            }
+        }
+        if pay_xp {
+            if i64::from(have.levels) < price.exp {
+                self.command_error(player, npc, "missing_experience", &em.not_enough_experience, 0, price.exp, sent);
+                possible = false;
+            } else {
+                levels = price.exp as i32;
+            }
+        }
         if pay_items {
-            match plan_item_charge(&have.slots, &c.item_cost) {
+            match plan_item_charge(&have.slots, &price.items) {
                 Some(plan) => slots = plan,
                 None => {
-                    let first = &c.item_cost[0];
+                    let first = &price.items[0];
                     let msg = em.missing_item.replace("{1}", &first.amount.to_string()).replace("{0}", &first.name);
                     self.command_error(player, npc, "missing_item", &msg, 0, 0, sent);
-                    return None;
+                    possible = false;
                 }
             }
         }
-        Some((levels, slots))
+        possible.then_some((levels, slots, money))
+    }
+
+    /// `Transaction.run` of a charge: the rest of this click sees what is left, and the glue takes it.
+    fn pay(&mut self, player: u128, levels: i32, slots: Vec<(u32, u32)>, money: f64) {
+        if levels <= 0 && slots.is_empty() && money <= 0.0 {
+            return;
+        }
+        if let Some(pc) = self.player_cost.as_mut() {
+            pc.levels -= levels;
+            pc.money -= money;
+            for (slot, keep) in &slots {
+                if let Some(e) = pc.slots.iter_mut().find(|e| e.0 == *slot) {
+                    e.2 = *keep;
+                }
+            }
+            pc.slots.retain(|e| e.2 > 0);
+        }
+        self.ops.push(Op::Charge { player, levels, slots, money });
     }
 
     /// `commandtrait`: which commands of a click run (execution mode, `perms`, `cooldown`,
@@ -1070,13 +1289,10 @@ impl World {
         };
         let sequential = matches!(mode, ExecutionMode::Sequential | ExecutionMode::Cycle);
         for c in list {
-            if let Some(why) = &c.unenforced {
-                eprintln!("[citizens] NPC {id}: command {} skipped ({why} is not enforced on Horizon yet)", c.key);
-                continue;
-            }
             let em = self.cfg.commands.error_messages.clone();
             // `chargeCommandCosts`: the price is checked first; one that cannot be paid stops the click.
-            let (charge_levels, charge_slots) = match self.check_charge(player, npc, &c, &em, &mut sent) {
+            let price = Price { money: c.cost, exp: c.experience_cost, items: c.item_cost.clone(), global: false };
+            let (charge_levels, charge_slots, charge_money) = match self.check_charge(player, npc, &price, &em, &mut sent) {
                 Some(plan) => plan,
                 None => break,
             };
@@ -1133,19 +1349,7 @@ impl World {
                 let who = if mode == ExecutionMode::Cycle { 0 } else { player.uuid };
                 self.cmd_last_id.insert((who, id), c.id);
             }
-            if charge_levels > 0 || !charge_slots.is_empty() {
-                // The rest of this click sees what is left.
-                if let Some(pc) = self.player_cost.as_mut() {
-                    pc.levels -= charge_levels;
-                    for (slot, keep) in &charge_slots {
-                        if let Some(e) = pc.slots.iter_mut().find(|e| e.0 == *slot) {
-                            e.2 = *keep;
-                        }
-                    }
-                    pc.slots.retain(|e| e.2 > 0);
-                }
-                self.ops.push(Op::Charge { player: player.uuid, levels: charge_levels, slots: charge_slots });
-            }
+            self.pay(player.uuid, charge_levels, charge_slots, charge_money);
             let line = text::fill_placeholders(&c.command, &player.name, &npc.name(), id);
             let line = line.trim_start_matches('/').to_owned();
             // `CommandTrait.NPCCommand.run`: `npc` swaps the clicker for the NPC when the NPC is a player.
@@ -1365,7 +1569,7 @@ impl World {
         let name = if name.chars().count() >= 19 { format!("{}~", name.chars().take(19).collect::<String>()) } else { name };
         let title = format!("{name}'s Inventory");
         let chances = vec![1.0; slots.len()];
-        self.start_menu(player, title, MenuSession { npc, kind: MenuKind::Inventory, rows, window: None, slots, chances });
+        self.start_menu(player, title, MenuSession::chest(npc, MenuKind::Inventory, rows, slots, chances));
     }
 
     /// `/npc drops`: five rows, the drops in rows 0 and 2 with a chance barrier under each.
@@ -1383,33 +1587,73 @@ impl World {
                 k += 1;
             }
         }
-        self.start_menu(player, "Add items for drops".into(), MenuSession { npc, kind: MenuKind::Drops, rows: 5, window: None, slots, chances });
+        self.start_menu(player, "Add items for drops".into(), MenuSession::chest(npc, MenuKind::Drops, 5, slots, chances));
     }
 
-    /// `/npc equip` with no arguments: the equipment menu. Click one of your stacks to put it on the NPC
-    /// (helmet, chestplate, leggings, boots, shield by its name, else the hand); click a worn stack to take it off.
+    /// `/npc equip` with no arguments: the equipment menu (`GenericEquipperGUI`). Click one of your stacks to put it on the
+    /// NPC (helmet, chestplate, leggings, boots, shield, horse armor, saddle by its name, else the hand); click a worn
+    /// stack to take it off. Row 2 holds each slot's cosmetic item: click "No cosmetic" to enable one, an empty
+    /// cosmetic cell to turn it off again, a cosmetic stack to take it.
     pub fn open_equipment(&mut self, player: u128, npc: i32) {
+        use crate::horizon_citizens_core::npc::Cosmetic;
         let Some(data) = self.saves.get(npc) else { return };
         let mut slots = vec![None; 27];
+        let mut off = [false; 8];
         for (i, name) in EQUIPMENT_MENU.iter().enumerate() {
             if let Some(n) = data.map.at(&["traits", "equipment", name]).and_then(StackData::from_node) {
                 slots[9 + i] = Some(n);
             }
+            match data.cosmetic(name) {
+                Cosmetic::Off => off[i] = true,
+                Cosmetic::Empty => {}
+                Cosmetic::Item(st) => slots[18 + i] = Some(st),
+            }
         }
-        self.start_menu(player, "NPC Equipment".into(), MenuSession { npc, kind: MenuKind::Equipment, rows: 3, window: None, slots, chances: vec![1.0; 27] });
+        let mut session = MenuSession::chest(npc, MenuKind::Equipment, 3, slots, vec![1.0; 27]);
+        session.cosmetic_off = off;
+        self.start_menu(player, "NPC Equipment".into(), session);
+    }
+
+    /// `SaddleEquipperGUI`: a hopper with the saddle slot of a pig or strider.
+    pub fn open_saddle(&mut self, player: u128, npc: i32) {
+        let Some(data) = self.saves.get(npc) else { return };
+        let mut slots = vec![None; 5];
+        if data.saddle() {
+            slots[1] = Some(StackData::new("minecraft:saddle", 1));
+        }
+        let mut s = MenuSession::chest(npc, MenuKind::Saddle, 1, slots, vec![1.0; 5]);
+        s.hopper = true;
+        self.start_menu(player, "NPC Equipment".into(), s);
+    }
+
+    /// `EndermanEquipperGUI`: a hopper with the block the enderman carries.
+    pub fn open_enderman(&mut self, player: u128, npc: i32) {
+        let Some(data) = self.saves.get(npc) else { return };
+        let mut slots = vec![None; 5];
+        if let Some(block) = data.carried_block() {
+            slots[1] = Some(StackData::new(&block, 1));
+        }
+        let mut s = MenuSession::chest(npc, MenuKind::Enderman, 1, slots, vec![1.0; 5]);
+        s.hopper = true;
+        self.start_menu(player, "NPC Equipment".into(), s);
     }
 
     /// `/npc configgui` (`NPCConfigurator`): a menu with the one button that renames the NPC.
     pub fn open_configgui(&mut self, player: u128, npc: i32) {
-        self.start_menu(player, "NPC Configurator".into(), MenuSession { npc, kind: MenuKind::Config, rows: 1, window: None, slots: vec![None; 9], chances: vec![1.0; 9] });
+        self.start_menu(player, "NPC Configurator".into(), MenuSession::chest(npc, MenuKind::Config, 1, vec![None; 9], vec![1.0; 9]));
     }
 
     fn start_menu(&mut self, player: u128, title: String, session: MenuSession) {
         let items = session.shown();
         let rows = session.rows;
+        let hopper = session.hopper;
         self.shop_ui.drop_session(player);
         self.menus.insert(player, session);
-        self.ops.push(Op::OpenMenu { player, title, rows, items, in_place: false });
+        if hopper {
+            self.ops.push(Op::OpenHopper { player, title, items });
+        } else {
+            self.ops.push(Op::OpenMenu { player, title, rows, items, in_place: false });
+        }
     }
 
     /// The glue opened the menu: its window id.
@@ -1448,9 +1692,38 @@ impl World {
         let Some(m) = self.menus.get_mut(&player).filter(|m| m.window == Some(window)) else {
             return MenuAction::Nothing;
         };
-        let size = usize::from(m.rows) * 9;
+        let size = m.size();
         let Ok(slot) = usize::try_from(slot) else { return MenuAction::Nothing };
         if slot >= size + 36 {
+            return MenuAction::Nothing;
+        }
+        if m.kind == MenuKind::Equipment && (18..26).contains(&slot) {
+            // `GenericEquipperGUI.setCosmetic`: the "No cosmetic" button enables one, an empty enabled cell turns it off.
+            let i = slot - 18;
+            if m.cosmetic_off[i] {
+                m.cosmetic_off[i] = false;
+                self.refresh_menu(player);
+                return MenuAction::Nothing;
+            }
+            if m.slots[slot].is_none() {
+                m.cosmetic_off[i] = true;
+                self.refresh_menu(player);
+                return MenuAction::Nothing;
+            }
+        }
+        if matches!(m.kind, MenuKind::Saddle | MenuKind::Enderman) && slot < size {
+            // The one slot hands its stack back and clears the setting.
+            if slot == 1 && m.slots[1].is_some() {
+                let (npc, kind) = (m.npc, m.kind);
+                let taken = m.slots[1].take();
+                self.refresh_menu(player);
+                if kind == MenuKind::Saddle {
+                    self.saddle_live(npc, false);
+                } else {
+                    self.carried_live(npc, None);
+                }
+                return taken.map_or(MenuAction::Nothing, MenuAction::Take);
+            }
             return MenuAction::Nothing;
         }
         if m.kind == MenuKind::Config {
@@ -1497,9 +1770,32 @@ impl World {
         if m.kind == MenuKind::Config {
             return false;
         }
+        if matches!(m.kind, MenuKind::Saddle | MenuKind::Enderman) {
+            // One saddle, or one block, into the hopper's slot; the rest of the stack stays with the player.
+            let ok = m.slots[1].is_none() && (m.kind == MenuKind::Enderman || stack.id == "minecraft:saddle");
+            if !ok {
+                return false;
+            }
+            let (npc, kind) = (m.npc, m.kind);
+            m.slots[1] = Some(StackData::new(&stack.id, 1));
+            self.deposit_left = stack.count - 1;
+            self.refresh_menu(player);
+            if kind == MenuKind::Saddle {
+                self.saddle_live(npc, true);
+            } else {
+                self.carried_live(npc, Some(&stack.id));
+            }
+            return true;
+        }
         let free = if m.kind == MenuKind::Equipment {
-            let cell = 9 + equipment_cell_for(&stack.id);
-            m.slots[cell].is_none().then_some(cell)
+            let c = equipment_cell_for(&stack.id);
+            if m.slots[9 + c].is_none() {
+                Some(9 + c)
+            } else if !m.cosmetic_off[c] && m.slots[18 + c].is_none() {
+                Some(18 + c)
+            } else {
+                None
+            }
         } else {
             (0..m.slots.len()).find(|i| m.is_item_slot(*i) && m.slots[*i].is_none())
         };
@@ -1508,6 +1804,39 @@ impl World {
         m.chances[i] = 1.0;
         self.refresh_menu(player);
         true
+    }
+
+    /// How much of the last deposited stack the menu left with the player (a hopper slot takes one).
+    pub fn take_deposit_left(&mut self) -> i64 {
+        std::mem::take(&mut self.deposit_left)
+    }
+
+    /// The saddle trait changed through a menu: saved, and shown on the entity at once.
+    fn saddle_live(&mut self, npc: i32, on: bool) {
+        let Some(n) = self.saves.get_mut(npc) else { return };
+        n.set_saddle(on);
+        let uuid = n.uuid();
+        self.mark_dirty();
+        if let Some(u) = uuid.filter(|_| self.is_out(npc)) {
+            let id = crate::horizon_citizens_core::ids::format_uuid(u);
+            let line = if on {
+                format!("data merge entity {id} {{equipment:{{saddle:{{id:\"minecraft:saddle\",count:1}}}}}}")
+            } else {
+                format!("data remove entity {id} equipment.saddle")
+            };
+            self.ops.push(Op::Console(line));
+        }
+    }
+
+    /// The block an enderman carries changed through a menu: saved (as the equipment trait's hand), and shown at once.
+    fn carried_live(&mut self, npc: i32, block: Option<&str>) {
+        let Some(n) = self.saves.get_mut(npc) else { return };
+        n.set_equipment("hand", block.map(|b| (b, 1)));
+        let uuid = n.uuid();
+        self.mark_dirty();
+        if let Some(u) = uuid.filter(|_| self.is_out(npc)) {
+            self.ops.push(Op::Console(carried_command(u, block)));
+        }
     }
 
     /// The menu was closed: the NPC keeps what it shows (`DropsGUI.onClose`, the inventory's close).
@@ -1525,6 +1854,7 @@ impl World {
                 m.slots.into_iter().enumerate().filter_map(|(i, s)| Some((i as i64, s?))).collect(),
             ),
             MenuKind::Equipment => {
+                use crate::horizon_citizens_core::npc::Cosmetic;
                 for (i, name) in EQUIPMENT_MENU.iter().enumerate() {
                     match &m.slots[9 + i] {
                         Some(st) => npc.map.put(&["traits", "equipment", name], st.to_node()),
@@ -1532,6 +1862,15 @@ impl World {
                             npc.map.drop_path(&["traits", "equipment", name]);
                         }
                     }
+                    let cosmetic = if m.cosmetic_off[i] {
+                        Cosmetic::Off
+                    } else {
+                        match &m.slots[18 + i] {
+                            Some(st) => Cosmetic::Item(st.clone()),
+                            None => Cosmetic::Empty,
+                        }
+                    };
+                    npc.set_cosmetic(name, &cosmetic);
                 }
                 npc.add_trait_name("equipment");
                 let id = m.npc;
@@ -1539,7 +1878,7 @@ impl World {
                 self.respawn(id);
                 return;
             }
-            MenuKind::Config => {}
+            MenuKind::Config | MenuKind::Saddle | MenuKind::Enderman => {}
             MenuKind::Drops => npc.set_drops(
                 m.slots
                     .into_iter()
@@ -1612,6 +1951,7 @@ impl World {
             }
         }
         self.walk();
+        self.behavior_tick();
         self.check_all_mounts();
         self.shop_tick();
         if self.tick % 5 == 0 {
@@ -2239,6 +2579,7 @@ mod tests {
         w.player_cost = Some(PlayerCost {
             levels,
             slots: slots.iter().map(|(s, n)| (*s, "minecraft:diamond".to_owned(), *n)).collect(),
+            money: 0.0,
         });
     }
 
@@ -2261,8 +2602,80 @@ mod tests {
         diamonds(&mut w, 7, &[]);
         assert!(w.on_click(10, &p, Hand::Right, None));
         let ops = w.take_ops();
-        assert!(ops.contains(&Op::Charge { player: 0xA1, levels: 5, slots: vec![] }));
+        assert!(ops.contains(&Op::Charge { player: 0xA1, levels: 5, slots: vec![], money: 0.0 }));
         assert!(ops.contains(&Op::Console("say paid".into())));
+    }
+
+    /// A command with a money `cost`, and the trait's own `cost` when `global`.
+    fn priced(w: &mut World, id: i32, cost: f64, global: bool) {
+        use crate::horizon_citizens_core::yaml::Node;
+        let npc = w.saves.get_mut(id).unwrap();
+        npc.add_command("say paid", Hand::Right, false, false);
+        if global {
+            npc.set_trait_cost(cost);
+            return;
+        }
+        let mut cmds = npc.map.map_at(&["traits", "commandtrait", "commands"]).clone();
+        if let Some(e) = cmds.get_mut("0").filter(|e| e.is_map()) {
+            e.set("cost", Node::float(cost));
+        }
+        npc.map.map_at(&["traits", "commandtrait"]).set("commands", cmds);
+    }
+
+    fn rich(w: &mut World, money: f64) {
+        w.player_cost = Some(PlayerCost { levels: 0, slots: vec![], money });
+    }
+
+    #[test]
+    fn money_cost_is_checked_against_the_balance_then_charged() {
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        priced(&mut w, id, 5.0, false);
+        w.take_ops();
+        let p = player(1.0, 1.0);
+        rich(&mut w, 3.0);
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        let ops = w.take_ops();
+        assert_eq!(tells(&ops), vec!["You need at least $5.".to_owned()]);
+        assert!(!ops.iter().any(|o| matches!(o, Op::Console(_) | Op::Charge { .. })));
+        rich(&mut w, 8.0);
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        let ops = w.take_ops();
+        assert!(ops.contains(&Op::Charge { player: 0xA1, levels: 0, slots: vec![], money: 5.0 }));
+        assert!(ops.contains(&Op::Console("say paid".into())));
+    }
+
+    #[test]
+    fn the_traits_own_cost_is_charged_once_per_click() {
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        priced(&mut w, id, 2.5, true);
+        w.take_ops();
+        let p = player(1.0, 1.0);
+        rich(&mut w, 1.0);
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        let ops = w.take_ops();
+        assert_eq!(tells(&ops), vec!["You need at least $2.5.".to_owned()]);
+        assert!(!ops.iter().any(|o| matches!(o, Op::Console(_))), "a click that cannot pay runs nothing");
+        rich(&mut w, 10.0);
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        let ops = w.take_ops();
+        assert!(ops.contains(&Op::Charge { player: 0xA1, levels: 0, slots: vec![], money: 2.5 }));
+        assert!(ops.contains(&Op::Console("say paid".into())));
+    }
+
+    #[test]
+    fn the_ignore_node_skips_a_money_cost() {
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        priced(&mut w, id, 5.0, false);
+        w.take_ops();
+        rich(&mut w, 0.0);
+        w.held_perms = ["citizens.npc.command.ignoreerrors.cost".to_owned()].into_iter().collect();
+        assert!(w.on_click(10, &player(1.0, 1.0), Hand::Right, None));
+        let ops = w.take_ops();
+        assert!(ops.contains(&Op::Console("say paid".into())));
+        assert!(!ops.iter().any(|o| matches!(o, Op::Charge { .. })));
     }
 
     #[test]
@@ -2275,7 +2688,7 @@ mod tests {
         diamonds(&mut w, 0, &[(2, 2), (5, 4)]);
         assert!(w.on_click(10, &p, Hand::Right, None));
         let ops = w.take_ops();
-        assert!(ops.contains(&Op::Charge { player: 0xA1, levels: 0, slots: vec![(2, 0), (5, 3)] }));
+        assert!(ops.contains(&Op::Charge { player: 0xA1, levels: 0, slots: vec![(2, 0), (5, 3)], money: 0.0 }));
         assert!(ops.contains(&Op::Console("say paid".into())));
         diamonds(&mut w, 0, &[(2, 2)]);
         assert!(w.on_click(10, &p, Hand::Right, None));
@@ -2772,5 +3185,122 @@ mod tests {
         let tps = consoles(&mut w).iter().filter(|c| c.contains(" tp ")).count();
         assert!(tps >= 8, "walks every tick: {tps}");
         assert!(w.is_navigating(1));
+    }
+    #[test]
+    fn cosmetic_equipment_shows_in_place_of_the_real_item() {
+        use crate::horizon_citizens_core::npc::Cosmetic;
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        w.open_equipment(0xA1, id);
+        w.take_ops();
+        w.menu_opened(0xA1, Some(2));
+        // The hand's cosmetic cell says "No cosmetic"; a click enables it.
+        assert_eq!(w.menu_click(0xA1, 2, 18, 0, false), MenuAction::Nothing);
+        assert!(w.menu_deposit(0xA1, StackData::new("minecraft:stick", 1)));
+        assert!(w.menu_deposit(0xA1, StackData::new("minecraft:blaze_rod", 1)), "the real hand is taken: the cosmetic one gets it");
+        w.menu_closed(0xA1, 2);
+        let n = w.saves.get(id).unwrap();
+        assert!(matches!(n.cosmetic("hand"), Cosmetic::Item(s) if s.id == "minecraft:blaze_rod"));
+        assert_eq!(n.cosmetic("boots"), Cosmetic::Off);
+        let shown = n.equipment();
+        assert_eq!(shown.len(), 1);
+        assert_eq!((shown[0].slot, shown[0].item.as_str()), ("mainhand", "blaze_rod"));
+    }
+
+    #[test]
+    fn an_enabled_empty_cosmetic_hides_the_real_item() {
+        use crate::horizon_citizens_core::npc::Cosmetic;
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        let n = w.saves.get_mut(id).unwrap();
+        n.set_equipment("helmet", Some(("iron_helmet", 1)));
+        assert_eq!(n.equipment().len(), 1);
+        n.set_cosmetic("helmet", &Cosmetic::Empty);
+        assert!(n.equipment().is_empty());
+        n.set_cosmetic("helmet", &Cosmetic::Off);
+        assert_eq!(n.equipment().len(), 1);
+    }
+
+    #[test]
+    fn the_saddle_hopper_toggles_the_saddle() {
+        let mut w = world();
+        let id = w.create("Piggy", "PIG", loc(0.0, 0.0), None);
+        let uuid = w.saves.get(id).unwrap().uuid();
+        w.on_entity_join("minecraft:overworld", 11, uuid, true);
+        w.take_ops();
+        w.open_saddle(0xA1, id);
+        assert!(w.take_ops().iter().any(|o| matches!(o, Op::OpenHopper { items, .. } if items.len() == 5)));
+        w.menu_opened(0xA1, Some(3));
+        assert!(!w.menu_deposit(0xA1, StackData::new("minecraft:stick", 1)), "only a saddle fits");
+        assert!(w.menu_deposit(0xA1, StackData::new("minecraft:saddle", 3)));
+        assert_eq!(w.take_deposit_left(), 2);
+        assert!(w.saves.get(id).unwrap().saddle());
+        assert!(consoles(&mut w).iter().any(|c| c.contains("data merge entity") && c.contains("saddle")));
+        assert!(matches!(w.menu_click(0xA1, 3, 1, 0, false), MenuAction::Take(s) if s.id == "minecraft:saddle"));
+        assert!(!w.saves.get(id).unwrap().saddle());
+    }
+
+    #[test]
+    fn the_enderman_hopper_sets_the_carried_block() {
+        let mut w = world();
+        let id = w.create("Ender", "ENDERMAN", loc(0.0, 0.0), None);
+        let uuid = w.saves.get(id).unwrap().uuid();
+        w.on_entity_join("minecraft:overworld", 12, uuid, true);
+        w.take_ops();
+        w.open_enderman(0xA1, id);
+        w.take_ops();
+        w.menu_opened(0xA1, Some(4));
+        assert!(w.menu_deposit(0xA1, StackData::new("minecraft:dirt", 1)));
+        assert_eq!(w.saves.get(id).unwrap().carried_block().as_deref(), Some("minecraft:dirt"));
+        assert!(consoles(&mut w).iter().any(|c| c.contains("carriedBlockState") && c.contains("minecraft:dirt")));
+        assert!(w.saves.get(id).unwrap().equipment().is_empty(), "no equipment NBT for an enderman");
+    }
+
+    #[test]
+    fn the_sheep_equipper_dyes_shears_and_whitens() {
+        let mut w = world();
+        let id = w.create("Dolly", "SHEEP", loc(0.0, 0.0), None);
+        let uuid = w.saves.get(id).unwrap().uuid();
+        w.on_entity_join("minecraft:overworld", 13, uuid, true);
+        w.take_ops();
+        w.equip_editors.insert(0xA1, id);
+        let p = player(1.0, 0.0);
+        assert!(w.on_click(13, &p, Hand::Right, Some("minecraft:red_dye")));
+        let colour = w.saves.get(id).unwrap().map.at(&["traits", "sheeptrait", "color"]).and_then(Node::text);
+        assert_eq!(colour.as_deref(), Some("RED"));
+        assert!(consoles(&mut w).iter().any(|c| c.starts_with("clear Alex minecraft:red_dye")));
+        assert!(w.on_click(13, &p, Hand::Right, Some("minecraft:shears")));
+        let sheared = w.saves.get(id).unwrap().map.at(&["traits", "sheeptrait", "sheared"]).and_then(Node::as_bool);
+        assert_eq!(sheared, Some(true));
+        assert!(w.on_click(13, &p, Hand::Right, None));
+        let colour = w.saves.get(id).unwrap().map.at(&["traits", "sheeptrait", "color"]).and_then(Node::text);
+        assert_eq!(colour.as_deref(), Some("WHITE"));
+    }
+
+    #[test]
+    fn bystanders_hear_a_targeted_line_when_the_setting_is_on() {
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        let mut a = player(1.0, 0.0);
+        a.uuid = 0xA1;
+        let mut b = player(2.0, 0.0);
+        b.uuid = 0xB2;
+        b.name = "Bea".into();
+        w.online = vec![a.clone(), b.clone()];
+        w.say_to_bystanders(id, "psst", &[a.uuid]);
+        assert!(w.take_ops().iter().all(|o| !matches!(o, Op::Tell { .. })), "off by default");
+        w.cfg.talk.bystanders_hear_targeted_chat = true;
+        w.say_to_bystanders(id, "psst", &[a.uuid]);
+        let told: Vec<(u128, String)> = w.take_ops().into_iter().filter_map(|o| if let Op::Tell { player, legacy } = o { Some((player, legacy)) } else { None }).collect();
+        assert_eq!(told.len(), 1);
+        assert_eq!(told[0].0, 0xB2);
+        assert!(told[0].1.contains("psst") && told[0].1.contains("Alex"), "{:?}", told[0].1);
+    }
+
+    #[test]
+    fn a_purchase_tells_other_mods() {
+        // The event carries the shop key, the buyer and the item's place.
+        let e = NpcEvent::ShopPurchase { shop: "bank".into(), player: 1, player_name: "Alex".into(), page: 0, slot: 4 };
+        assert_eq!(e.clone(), e);
     }
 }
