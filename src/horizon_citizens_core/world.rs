@@ -108,6 +108,8 @@ pub enum Op {
     ShopApply { player: u128, levels: Option<i32>, slots: Vec<(u32, Option<StackData>)> },
     /// Replace everything an open menu shows (`menu_set_items`).
     SetMenuItems { player: u128, window: i32, items: Vec<Option<StackData>> },
+    /// A command line run as the NPC's own entity (`entity_run_command`) at this operator level.
+    EntityCommand { entity: u32, line: String, level: u8 },
     /// A host call for an NPC's entity (disguise, pose, targetable, ranges, navigation ...).
     Entity { entity: u32, set: EntitySet },
     /// `/npc spectate`: the player's view follows this entity (`None`: back at themselves).
@@ -142,6 +144,17 @@ pub enum MenuKind {
     Drops,
     /// `GenericEquipperGUI`: three rows, the NPC's equipment in row 1.
     Equipment,
+    /// `NPCConfigurator`: one button, edit the name through the chat.
+    Config,
+}
+
+/// A chat line a player's next lines go to (the original's chat-based editors).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ChatEdit {
+    /// `/npc text`: each line typed is a line the NPC says (`TextEditor`).
+    Text(i32),
+    /// The configurator's name button: the next line is the new name.
+    Rename(i32),
 }
 
 /// The equipment slots of the menu's row 1 (`GenericEquipperGUI`): hand, off hand, helmet, chestplate,
@@ -196,11 +209,18 @@ impl MenuSession {
             MenuKind::Inventory => true,
             MenuKind::Drops => (slot / 9) % 2 == 0,
             MenuKind::Equipment => (9..9 + EQUIPMENT_MENU.len()).contains(&slot),
+            MenuKind::Config => false,
         }
     }
 
     fn shown(&self) -> Vec<Option<StackData>> {
         let mut out = self.slots.clone();
+        if self.kind == MenuKind::Config {
+            let mut b = StackData::new("minecraft:name_tag", 1);
+            b.meta.display_name = Some("Edit name".to_owned());
+            out[0] = Some(b);
+            return out;
+        }
         if self.kind == MenuKind::Equipment {
             let labels = ["Place in hand item below", "Place offhand item below", "Place helmet below", "Place chestplate below", "Place leggings below", "Place boots below"];
             let icons = ["minecraft:diamond_sword", "minecraft:shield", "minecraft:diamond_helmet", "minecraft:diamond_chestplate", "minecraft:diamond_leggings", "minecraft:diamond_boots"];
@@ -356,6 +376,8 @@ pub struct World {
     pub copiers: HashMap<u128, i32>,
     /// Players with the linear waypoint editor on: the NPC they edit.
     pub path_editors: HashMap<u128, i32>,
+    /// Players whose next chat lines go to a chat-based editor.
+    pub chat_edits: HashMap<u128, ChatEdit>,
     /// Where online players look (yaw, pitch), set by the host every tick.
     pub rotations: HashMap<u128, [f32; 2]>,
     /// `Text.cooldowns`: (NPC, player) -> the tick it may talk to that player again.
@@ -434,6 +456,7 @@ impl World {
             shop_player: HashMap::new(),
             copiers: HashMap::new(),
             path_editors: HashMap::new(),
+            chat_edits: HashMap::new(),
             rotations: HashMap::new(),
             talk_cd: HashMap::new(),
             warden_anger: HashMap::new(),
@@ -1128,8 +1151,13 @@ impl World {
             // `CommandTrait.NPCCommand.run`: `npc` swaps the clicker for the NPC when the NPC is a player.
             let npc_uuid = npc.uuid().filter(|_| c.npc && c.player && npc.kind().eq_ignore_ascii_case("PLAYER"));
             let op = if let Some(me) = npc_uuid {
-                let who = crate::horizon_citizens_core::ids::format_uuid(me);
-                Op::Console(format!("execute as {who} at {who} run {line}"))
+                if let Some(entity) = self.entity_of(id) {
+                    // The NPC's own entity runs it: no operator rights unless the command is `-o`.
+                    Op::EntityCommand { entity, line, level: if c.op { 4 } else { 0 } }
+                } else {
+                    let who = crate::horizon_citizens_core::ids::format_uuid(me);
+                    Op::Console(format!("execute as {who} at {who} run {line}"))
+                }
             } else if c.player || c.op {
                 if self.cfg.commands.player_commands_via_execute {
                     let who = crate::horizon_citizens_core::ids::format_uuid(player.uuid);
@@ -1371,6 +1399,11 @@ impl World {
         self.start_menu(player, "NPC Equipment".into(), MenuSession { npc, kind: MenuKind::Equipment, rows: 3, window: None, slots, chances: vec![1.0; 27] });
     }
 
+    /// `/npc configgui` (`NPCConfigurator`): a menu with the one button that renames the NPC.
+    pub fn open_configgui(&mut self, player: u128, npc: i32) {
+        self.start_menu(player, "NPC Configurator".into(), MenuSession { npc, kind: MenuKind::Config, rows: 1, window: None, slots: vec![None; 9], chances: vec![1.0; 9] });
+    }
+
     fn start_menu(&mut self, player: u128, title: String, session: MenuSession) {
         let items = session.shown();
         let rows = session.rows;
@@ -1420,6 +1453,19 @@ impl World {
         if slot >= size + 36 {
             return MenuAction::Nothing;
         }
+        if m.kind == MenuKind::Config {
+            // The name button: close the menu, the next chat line is the name.
+            if slot == 0 {
+                let npc = m.npc;
+                self.menus.remove(&player);
+                self.chat_edits.insert(player, ChatEdit::Rename(npc));
+                self.ops.push(Op::CloseMenu { player });
+                for legacy in crate::horizon_citizens_core::commands::say(self, "Enter the new name of the NPC in the chat.") {
+                    self.ops.push(Op::Tell { player, legacy });
+                }
+            }
+            return MenuAction::Nothing;
+        }
         if slot >= size {
             let p = slot - size;
             let inv_slot = if p < 27 { 9 + p } else { p - 27 };
@@ -1448,6 +1494,9 @@ impl World {
             return taken;
         }
         let Some(m) = self.menus.get_mut(&player) else { return false };
+        if m.kind == MenuKind::Config {
+            return false;
+        }
         let free = if m.kind == MenuKind::Equipment {
             let cell = 9 + equipment_cell_for(&stack.id);
             m.slots[cell].is_none().then_some(cell)
@@ -1490,6 +1539,7 @@ impl World {
                 self.respawn(id);
                 return;
             }
+            MenuKind::Config => {}
             MenuKind::Drops => npc.set_drops(
                 m.slots
                     .into_iter()
@@ -2277,11 +2327,11 @@ mod tests {
             }
             n.map.map_at(&["traits", "commandtrait"]).set("commands", cmds);
         }
-        let uuid = crate::horizon_citizens_core::ids::format_uuid(w.saves.get(id).unwrap().uuid().unwrap());
         w.take_ops();
         assert!(w.on_click(10, &player(1.0, 1.0), Hand::Right, None));
-        let cmds = consoles(&mut w);
-        assert_eq!(cmds, vec![format!("execute as {uuid} at {uuid} run spawn")]);
+        let ops = w.take_ops();
+        assert!(ops.contains(&Op::EntityCommand { entity: 10, line: "spawn".into(), level: 0 }), "{ops:?}");
+        assert!(!ops.iter().any(|o| matches!(o, Op::Console(c) if c.contains("execute as"))), "{ops:?}");
     }
 
     fn menu_ops(w: &mut World) -> Vec<Op> {

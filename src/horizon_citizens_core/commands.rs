@@ -17,7 +17,7 @@ use crate::horizon_citizens_core::yaml::Node;
 use crate::horizon_citizens_core::npc::{CommandSpec, Hand, Location, Nameplate, NpcData, Skin};
 use crate::horizon_citizens_core::saves::Saves;
 use crate::horizon_citizens_core::text;
-use crate::horizon_citizens_core::world::{Src, Target, DespawnReason, Sender, World};
+use crate::horizon_citizens_core::world::{ChatEdit, Src, Target, DespawnReason, Sender, World};
 
 // ---- messages (Citizens' en.json, `{n}` arguments, `[[x]]` highlights) ------------------------
 
@@ -326,6 +326,7 @@ const CMDS: &[Cmd] = &[
     cmd("warden", &[], "warden dig|emerge|roar|anger [entity uuid/player name] [anger]", 1, Some(4), "citizens.npc.warden"),
     cmd("disguise", &[], "disguise --type [type]", 1, Some(2), "citizens.npc.disguise"),
     cmd("spectate", &[], "spectate (-r(eset))", 1, Some(1), "citizens.npc.spectate"),
+    cmd("configgui", &[], "configgui", 1, Some(1), "citizens.npc.configgui"),
     cmd("inventory", &[], "inventory (player name/uuid)", 1, Some(2), "citizens.npc.inventory"),
     cmd("drops", &[], "drops", 1, Some(1), "citizens.npc.drops"),
     cmd("shop", &[], "shop (edit|show|delete|copyfrom) (name) (new_name)", 1, Some(4), "citizens.npc.shop"),
@@ -347,7 +348,7 @@ const CMDS: &[Cmd] = &[
 ];
 
 /// Citizens modifiers this port does not have (they answer "not supported", not "Too many arguments").
-const CITIZENS_ONLY: &[&str] = &["behavior", "cload", "pushable", "configgui", "eval", "fish", "nophysics", "target", "velocity", "vel", "donkey", "mule"];
+const CITIZENS_ONLY: &[&str] = &["behavior", "cload", "pushable", "eval", "fish", "nophysics", "target", "velocity", "vel", "donkey", "mule"];
 
 fn find_cmd(sub: &str) -> Option<&'static Cmd> {
     let sub = sub.to_ascii_lowercase();
@@ -550,6 +551,7 @@ const TAILS: &[(&str, &[&str])] = &[
     ("warden", &["anger", "dig", "emerge", "roar"]),
     ("disguise", &["--type"]),
     ("spectate", &["", "-r"]),
+    ("configgui", &[""]),
     ("inventory", &[""]),
     ("drops", &[""]),
     (
@@ -728,6 +730,7 @@ pub const NODES: &[&str] = &[
     "citizens.npc.warden",
     "citizens.npc.disguise",
     "citizens.npc.spectate",
+    "citizens.npc.configgui",
     "citizens.npc.inventory",
     "citizens.npc.drops",
     "citizens.npc.shop",
@@ -837,6 +840,7 @@ const PARENT_EDGES: &[(&str, &str)] = &[
     ("citizens.npc.*", "citizens.npc.warden"),
     ("citizens.npc.*", "citizens.npc.disguise"),
     ("citizens.npc.*", "citizens.npc.spectate"),
+    ("citizens.npc.*", "citizens.npc.configgui"),
     ("citizens.npc.*", "citizens.npc.shop"),
     ("citizens.*", "citizens.npc.shop"),
     ("citizens.npc.*", "citizens.npc.shopitem"),
@@ -974,6 +978,7 @@ const PARENT_EDGES: &[(&str, &str)] = &[
     ("citizens.*", "citizens.npc.warden"),
     ("citizens.*", "citizens.npc.disguise"),
     ("citizens.*", "citizens.npc.spectate"),
+    ("citizens.*", "citizens.npc.configgui"),
     ("citizens.*", "citizens.npc.inventory"),
     ("citizens.*", "citizens.npc.drops"),
     ("citizens.*", "citizens.npc.passive"),
@@ -1245,7 +1250,7 @@ fn err(w: &World, t: &str, args: &[&str]) -> Reply {
 }
 
 /// A line that is already filled in.
-fn say(w: &World, s: &str) -> Reply {
+pub(crate) fn say(w: &World, s: &str) -> Reply {
     render(w, false, s)
 }
 
@@ -1606,6 +1611,7 @@ fn npc(w: &mut World, sender: &Sender, rest: &str) -> Res {
         "warden" => warden(w, sender, &args),
         "disguise" => disguise(w, sender, &args),
         "spectate" => spectate(w, sender, &args),
+        "configgui" => configgui(w, sender),
         "inventory" => inventory(w, sender, &args),
         "drops" => drops(w, sender),
         "shop" => shop_cmd(w, sender, &args),
@@ -3549,7 +3555,13 @@ fn text_lines(w: &mut World, sender: &Sender, tail: &str) -> Res {
     let (op, rest) = tail.trim().split_once(' ').unwrap_or((tail.trim(), ""));
     let mut lines = npc_mut(w, id)?.talk_lines();
     let reply = match op {
-        "" | "list" => {
+        "" => {
+            // Citizens' text editor: the player's next chat lines are the NPC's lines.
+            let Some(who) = sender.uuid else { return Err(err(w, M_MUST_BE_INGAME, &[])) };
+            w.chat_edits.insert(who, ChatEdit::Text(id));
+            return Ok(say(w, "Entered the text editor. Type a line to add it, or ``list``, ``remove <line>``, ``clear``, ``exit``."));
+        }
+        "list" => {
             let mut out = say(w, &header(&format!("Text ({} lines)", lines.len())));
             for (i, l) in lines.iter().enumerate() {
                 out.extend(say(w, &format!("[[{i}]] {l}")));
@@ -4009,6 +4021,106 @@ fn spectate(w: &mut World, sender: &Sender, args: &Args) -> Res {
     };
     w.push_op(crate::horizon_citizens_core::world::Op::Camera { player, entity });
     Ok(Vec::new())
+}
+
+/// `/npc configgui` (`NPCConfigurator`): the configurator menu.
+fn configgui(w: &mut World, sender: &Sender) -> Res {
+    let Some(who) = sender.uuid else { return Err(err(w, M_MUST_BE_INGAME, &[])) };
+    let id = target(w, sender)?;
+    w.open_configgui(who, id);
+    Ok(Vec::new())
+}
+
+/// A chat line of a player in one of the chat-based editors (`TextEditor`, the configurator's name prompt, the
+/// waypoint editor's words). Whether the line was the editor's, so it stays out of public chat.
+pub fn chat_edit(w: &mut World, player: u128, text: &str) -> bool {
+    let t = text.trim();
+    let word = t.to_ascii_lowercase();
+    let mut out: Reply = Vec::new();
+    match w.chat_edits.get(&player).cloned() {
+        Some(ChatEdit::Rename(id)) => {
+            w.chat_edits.remove(&player);
+            if !t.is_empty() && w.saves.get(id).is_some() {
+                let kind = w.saves.get(id).map(NpcData::kind).unwrap_or_default();
+                let new_name = limit_name(w, t.to_owned(), &kind, &mut out);
+                let old = name_at(w, id);
+                if let Some(n) = w.saves.get_mut(id) {
+                    n.set_name(&new_name);
+                }
+                w.mark_dirty();
+                w.respawn(id);
+                out.extend(ok(w, M_RENAMED, &[&old, &new_name]));
+            }
+        }
+        Some(ChatEdit::Text(id)) => {
+            let mut lines = w.saves.get(id).map(NpcData::talk_lines).unwrap_or_default();
+            let (op, rest) = word.split_once(' ').unwrap_or((word.as_str(), ""));
+            match op {
+                "exit" | "quit" | "q" => {
+                    w.chat_edits.remove(&player);
+                    out = say(w, "Left the text editor.");
+                }
+                "list" => {
+                    for (i, l) in lines.iter().enumerate() {
+                        out.extend(say(w, &format!("[[{i}]] {l}")));
+                    }
+                }
+                "clear" => {
+                    lines.clear();
+                    out = say(w, "Text cleared.");
+                }
+                "remove" if rest.trim().parse::<usize>().is_ok_and(|i| i < lines.len()) => {
+                    let i: usize = rest.trim().parse().unwrap_or(0);
+                    lines.remove(i);
+                    out = say(w, &format!("Line [[{i}]] removed."));
+                }
+                "remove" => out = err(w, M_NO_SUCH_LINE, &[]),
+                _ => {
+                    lines.push(t.to_owned());
+                    out = say(w, "Line added.");
+                }
+            }
+            if let Some(n) = w.saves.get_mut(id) {
+                n.set_talk_lines(&lines);
+            }
+            w.mark_dirty();
+        }
+        None => {
+            // The waypoint editor (`/npc path`) also takes a few words.
+            let Some(id) = w.path_editors.get(&player).copied() else { return false };
+            let n = w.saves.get(id).map_or(0, |n| n.waypoints().len());
+            match word.as_str() {
+                "exit" | "quit" => {
+                    w.path_editors.remove(&player);
+                    out = say(w, "Left the waypoint editor.");
+                }
+                "list" => {
+                    for (i, p) in w.saves.get(id).map(NpcData::waypoints).unwrap_or_default().iter().enumerate() {
+                        out.extend(say(w, &format!("[[{i}]] {:.1} {:.1} {:.1}", p.x, p.y, p.z)));
+                    }
+                }
+                "clear" => {
+                    if let Some(npc) = w.saves.get_mut(id) {
+                        npc.clear_waypoints();
+                    }
+                    w.mark_dirty();
+                    out = say(w, "Waypoints cleared.");
+                }
+                "remove" if n > 0 => {
+                    if let Some(npc) = w.saves.get_mut(id) {
+                        npc.remove_waypoint(n - 1);
+                    }
+                    w.mark_dirty();
+                    out = ok(w, M_PATH_REMOVED, &[&(n - 1).to_string()]);
+                }
+                _ => return false,
+            }
+        }
+    }
+    for legacy in out {
+        w.push_op(crate::horizon_citizens_core::world::Op::Tell { player, legacy });
+    }
+    true
 }
 
 /// `/npc jump`: the NPC jumps on its next tick (`NMS.setShouldJump`).
@@ -5100,6 +5212,72 @@ mod tests {
         assert!(w.take_ops().contains(&Op::Camera { player, entity: Some(43) }));
         run_ok(&mut w, &s, "npc spectate -r");
         assert!(w.take_ops().contains(&Op::Camera { player, entity: None }));
+    }
+
+    fn tells(w: &mut World) -> Vec<String> {
+        w.take_ops().into_iter().filter_map(|o| if let crate::horizon_citizens_core::world::Op::Tell { legacy, .. } = o { Some(legacy) } else { None }).collect()
+    }
+
+    #[test]
+    fn the_text_editor_takes_chat_lines() {
+        let mut w = world();
+        let s = sender(2);
+        let p = s.uuid.unwrap();
+        run_ok(&mut w, &s, "npc create Bob");
+        assert!(!chat_edit(&mut w, p, "hello"), "no editor open: public chat");
+        assert!(run_ok(&mut w, &s, "npc text")[0].contains("Entered the text editor"));
+        assert!(chat_edit(&mut w, p, "Welcome, traveller"));
+        assert!(chat_edit(&mut w, p, "Mind the Dragon"));
+        assert_eq!(w.saves.get(0).unwrap().talk_lines(), ["Welcome, traveller", "Mind the Dragon"], "case kept");
+        assert!(chat_edit(&mut w, p, "remove 0"));
+        assert_eq!(w.saves.get(0).unwrap().talk_lines(), ["Mind the Dragon"]);
+        w.take_ops();
+        assert!(chat_edit(&mut w, p, "remove 9"));
+        assert!(tells(&mut w).iter().any(|t| t.contains("No such line")));
+        assert!(chat_edit(&mut w, p, "clear"));
+        assert!(w.saves.get(0).unwrap().talk_lines().is_empty());
+        assert!(chat_edit(&mut w, p, "exit"));
+        assert!(!chat_edit(&mut w, p, "hello"), "editor closed");
+    }
+
+    #[test]
+    fn configgui_renames_through_the_chat() {
+        use crate::horizon_citizens_core::world::Op;
+        let mut w = world();
+        let s = sender(2);
+        let p = s.uuid.unwrap();
+        run_ok(&mut w, &s, "npc create Bob");
+        w.take_ops();
+        run_ok(&mut w, &s, "npc configgui");
+        let ops = w.take_ops();
+        let Some(Op::OpenMenu { rows, items, .. }) = ops.into_iter().find(|o| matches!(o, Op::OpenMenu { .. })) else { panic!("no menu") };
+        assert_eq!(rows, 1);
+        assert_eq!(items[0].as_ref().map(|i| i.id.as_str()), Some("minecraft:name_tag"));
+        w.menu_opened(p, Some(3));
+        assert_eq!(w.menu_click(p, 3, 0, 0, false), crate::horizon_citizens_core::world::MenuAction::Nothing);
+        assert!(w.take_ops().iter().any(|o| matches!(o, Op::CloseMenu { .. })));
+        assert!(chat_edit(&mut w, p, "Alice"));
+        assert_eq!(w.saves.get(0).unwrap().name(), "Alice");
+        assert!(!chat_edit(&mut w, p, "again"));
+    }
+
+    #[test]
+    fn the_waypoint_editor_takes_a_few_words() {
+        let mut w = world();
+        let s = sender(2);
+        let p = s.uuid.unwrap();
+        run_ok(&mut w, &s, "npc create Bob");
+        run_ok(&mut w, &s, "npc path add");
+        run_ok(&mut w, &s, "npc path add");
+        assert!(!chat_edit(&mut w, p, "clear"), "the editor is off");
+        run_ok(&mut w, &s, "npc path");
+        assert!(!chat_edit(&mut w, p, "hello"), "other words stay public chat");
+        assert!(chat_edit(&mut w, p, "remove"));
+        assert_eq!(w.saves.get(0).unwrap().waypoints().len(), 1);
+        assert!(chat_edit(&mut w, p, "clear"));
+        assert!(w.saves.get(0).unwrap().waypoints().is_empty());
+        assert!(chat_edit(&mut w, p, "exit"));
+        assert!(!chat_edit(&mut w, p, "clear"));
     }
 
     #[test]

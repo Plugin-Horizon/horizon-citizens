@@ -694,6 +694,13 @@ impl Citizens {
                     let _ = host.menu_set_items(player, window, stacks);
                 }
                 core::world::Op::Entity { entity, set } => apply_entity_set(host, entity, set),
+                core::world::Op::EntityCommand { entity, line, level } => {
+                    if let Some(e) = host.entity(entity)
+                        && !e.run_command(host, &line, PermissionLevel::from_level(i32::from(level)))
+                    {
+                        eprintln!("[citizens] command as NPC failed: {line}");
+                    }
+                }
                 core::world::Op::Camera { player, entity } => {
                     if let Some(p) = host.player(player) {
                         let target = entity.and_then(|e| host.entity(e));
@@ -1188,7 +1195,10 @@ impl Hooks for Citizens {
     /// A shop editor's text prompt takes the player's next chat line (kept out of public chat). What it asks
     /// the game for runs with the next tick.
     fn server_chat(&self, _: &mut dyn ServerHost, event: &mut ServerChatEvent<'_>) -> Flow {
-        let taken = api::with_world(|w| w.shop_chat(event.player, event.raw_text)).unwrap_or(false);
+        let taken = api::with_world(|w| {
+            w.shop_chat(event.player, event.raw_text) || core::commands::chat_edit(w, event.player, event.raw_text)
+        })
+        .unwrap_or(false);
         if taken { Flow::Cancel } else { Flow::Continue }
     }
 
