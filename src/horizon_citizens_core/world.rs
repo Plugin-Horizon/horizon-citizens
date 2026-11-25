@@ -10,7 +10,7 @@ use crate::horizon_citizens_core::config::Config;
 use crate::horizon_citizens_core::tree::TreeExt;
 use crate::horizon_citizens_core::yaml::Node;
 use crate::horizon_citizens_core::look::{self, PlayerView, Rng};
-use crate::horizon_citizens_core::npc::{Hand, Location, NpcCommand, NpcData, Skin};
+use crate::horizon_citizens_core::npc::{CostItem, Hand, Location, NpcCommand, NpcData, Skin};
 use crate::horizon_citizens_core::saves::Saves;
 use crate::horizon_citizens_core::spawn;
 use crate::horizon_citizens_core::text;
@@ -23,6 +23,48 @@ pub const IGNORE_ERRORS: [&str; 3] = [
     "citizens.npc.command.ignoreerrors.globalcooldown",
     "citizens.npc.command.ignoreerrors.nused",
 ];
+
+/// Nodes that skip a command's costs (Citizens' `chargeCommandCosts`): everything, money, experience, items.
+pub const COST_IGNORE: [&str; 4] = [
+    "citizens.npc.command.ignoreerrors.*",
+    "citizens.npc.command.ignoreerrors.cost",
+    "citizens.npc.command.ignoreerrors.expcost",
+    "citizens.npc.command.ignoreerrors.itemcost",
+];
+
+/// What a click may be charged against: the clicking player's experience level and main-inventory
+/// stacks (`slot`, namespaced item id, count; slots 0 to 35), read by the host before the click.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlayerCost {
+    pub levels: i32,
+    pub slots: Vec<(u32, String, u32)>,
+}
+
+/// `ItemAction.takeItems`: the slots (and the counts they keep, 0 = emptied) that pay `costs`, or
+/// `None` when the stacks do not cover them. Slots are walked in order; a stack pays the first
+/// still-open cost of its item, then the next.
+pub fn plan_item_charge(slots: &[(u32, String, u32)], costs: &[CostItem]) -> Option<Vec<(u32, u32)>> {
+    let mut req: Vec<i64> = costs.iter().map(|c| c.amount).collect();
+    let mut out = Vec::new();
+    for (slot, id, count) in slots {
+        let mut left = i64::from(*count);
+        for (j, c) in costs.iter().enumerate() {
+            if left == 0 {
+                break;
+            }
+            if req[j] <= 0 || c.id != *id {
+                continue;
+            }
+            let taken = left.min(req[j]);
+            left -= taken;
+            req[j] -= taken;
+        }
+        if left != i64::from(*count) {
+            out.push((*slot, left as u32));
+        }
+    }
+    (req.iter().sum::<i64>() <= 0).then_some(out)
+}
 
 fn text_fill(s: &str, player: &str, npc: &str) -> String {
     s.replace("<player>", player).replace("<npc>", &text::strip(npc))
@@ -43,6 +85,9 @@ pub enum Op {
     /// Turn an NPC's entity (`Host::set_entity_rotation`: head and body, no `rotate` command);
     /// `fallback` is the console command for when the host refuses.
     Rotate { dimension: String, entity: u32, yaw: f32, pitch: f32, fallback: String },
+    /// A command's price, paid: take `levels` experience levels and set each slot to the count it
+    /// keeps (0 empties it). Sent only after every check of the command passed.
+    Charge { player: u128, levels: i32, slots: Vec<(u32, u32)> },
 }
 
 /// What other mods hear (see `api`).
@@ -149,6 +194,8 @@ pub struct World {
     delayed: Vec<(u64, Op)>,
     /// Command permissions the clicking player holds (the host asked before the click).
     pub held_perms: BTreeSet<String>,
+    /// The clicking player's level and inventory (the host reads them before the click).
+    pub player_cost: Option<PlayerCost>,
     teams_made: BTreeSet<String>,
     fetching: BTreeSet<i32>,
     pub tick: u64,
@@ -196,6 +243,7 @@ impl World {
             cmd_last_id: HashMap::new(),
             delayed: Vec::new(),
             held_perms: BTreeSet::new(),
+            player_cost: None,
             teams_made: BTreeSet::new(),
             fetching: BTreeSet::new(),
             tick: 0,
@@ -448,7 +496,7 @@ impl World {
             return;
         };
         self.ops.push(Op::Console(spawn::refresh(&npc, uuid, &live.dimension)));
-        if let Some(color) = npc.team_color() {
+        if let Some(color) = npc.team_key() {
             self.ensure_team(&color);
             self.ops.push(Op::Console(spawn::team_join(&color, uuid)));
         }
@@ -484,7 +532,7 @@ impl World {
             // A copy that came back with its chunk: bring it up to date.
             self.refresh(id);
             self.refresh_holograms(id);
-        } else if let (Some(color), Some(u)) = (npc.team_color(), npc.uuid()) {
+        } else if let (Some(color), Some(u)) = (npc.team_key(), npc.uuid()) {
             self.ensure_team(&color);
             self.ops.push(Op::Console(spawn::team_join(&color, u)));
         }
@@ -638,6 +686,7 @@ impl World {
         let mut v: Vec<String> = npc.commands().into_iter().flat_map(|c| c.perms).collect();
         if !v.is_empty() || !npc.commands().is_empty() {
             v.extend(IGNORE_ERRORS.iter().map(|s| (*s).to_owned()));
+            v.extend(COST_IGNORE.iter().map(|s| (*s).to_owned()));
         }
         v.sort();
         v.dedup();
@@ -654,6 +703,47 @@ impl World {
             .replace("{0}", &if kind.contains("cooldown") { secs } else { n }.to_string());
         let text = text_fill(&text, &player.name, &npc.name());
         self.ops.push(Op::Tell { player: player.uuid, legacy: text });
+    }
+
+    /// `CommandTrait.chargeCommandCosts` for `experienceCost` (levels) and `itemCost`: the levels and
+    /// slots a command's price takes, or `None` (after the error message) when the player cannot pay.
+    /// A player holding the matching `ignoreerrors` node pays nothing.
+    fn check_charge(
+        &mut self,
+        player: &PlayerView,
+        npc: &NpcData,
+        c: &NpcCommand,
+        em: &crate::horizon_citizens_core::config::ErrorMessages,
+        sent: &mut BTreeSet<String>,
+    ) -> Option<(i32, Vec<(u32, u32)>)> {
+        let held = |n: &str| self.held_perms.contains(n);
+        if held(COST_IGNORE[0]) {
+            return Some((0, Vec::new()));
+        }
+        let pay_xp = c.experience_cost != -1 && !held(COST_IGNORE[2]);
+        let pay_items = !c.item_cost.is_empty() && !held(COST_IGNORE[3]);
+        let have = self.player_cost.clone().unwrap_or_default();
+        let mut levels = 0;
+        if pay_xp {
+            if i64::from(have.levels) < c.experience_cost {
+                self.command_error(player, npc, "missing_experience", &em.not_enough_experience, 0, c.experience_cost, sent);
+                return None;
+            }
+            levels = c.experience_cost as i32;
+        }
+        let mut slots = Vec::new();
+        if pay_items {
+            match plan_item_charge(&have.slots, &c.item_cost) {
+                Some(plan) => slots = plan,
+                None => {
+                    let first = &c.item_cost[0];
+                    let msg = em.missing_item.replace("{1}", &first.amount.to_string()).replace("{0}", &first.name);
+                    self.command_error(player, npc, "missing_item", &msg, 0, 0, sent);
+                    return None;
+                }
+            }
+        }
+        Some((levels, slots))
     }
 
     /// `commandtrait`: which commands of a click run (execution mode, `perms`, `cooldown`,
@@ -694,6 +784,11 @@ impl World {
                 continue;
             }
             let em = self.cfg.commands.error_messages.clone();
+            // `chargeCommandCosts`: the price is checked first; one that cannot be paid stops the click.
+            let (charge_levels, charge_slots) = match self.check_charge(player, npc, &c, &em, &mut sent) {
+                Some(plan) => plan,
+                None => break,
+            };
             if c.perms.iter().any(|p| !self.held_perms.contains(p)) {
                 self.command_error(player, npc, "no_permission", &em.no_permission, 0, 0, &mut sent);
                 continue;
@@ -746,6 +841,19 @@ impl World {
             if sequential {
                 let who = if mode == ExecutionMode::Cycle { 0 } else { player.uuid };
                 self.cmd_last_id.insert((who, id), c.id);
+            }
+            if charge_levels > 0 || !charge_slots.is_empty() {
+                // The rest of this click sees what is left.
+                if let Some(pc) = self.player_cost.as_mut() {
+                    pc.levels -= charge_levels;
+                    for (slot, keep) in &charge_slots {
+                        if let Some(e) = pc.slots.iter_mut().find(|e| e.0 == *slot) {
+                            e.2 = *keep;
+                        }
+                    }
+                    pc.slots.retain(|e| e.2 > 0);
+                }
+                self.ops.push(Op::Charge { player: player.uuid, levels: charge_levels, slots: charge_slots });
             }
             let line = text::fill_placeholders(&c.command, &player.name, &npc.name(), id);
             let line = line.trim_start_matches('/').to_owned();
@@ -1444,6 +1552,117 @@ mod tests {
         assert!(matches!(w.take_events()[0], NpcEvent::LeftClick { .. }));
         assert_eq!(consoles(&mut w).len(), 1);
         assert!(!w.on_click(99, &p, Hand::Right, None), "not an NPC");
+    }
+
+    /// One command with `experienceCost` and/or `itemCost` (diamond x3), the way Citizens saves them.
+    fn costed(w: &mut World, id: i32, xp: Option<i64>, items: bool, n: Option<i64>) {
+        use crate::horizon_citizens_core::yaml::Node;
+        let npc = w.saves.get_mut(id).unwrap();
+        npc.add_command("say paid", Hand::Right, false, false);
+        let mut cmds = npc.map.map_at(&["traits", "commandtrait", "commands"]).clone();
+        if let Some(e) = cmds.get_mut("0").filter(|e| e.is_map()) {
+            if let Some(x) = xp {
+                e.set("experienceCost", Node::int(x));
+            }
+            if let Some(n) = n {
+                e.set("n", Node::int(n));
+            }
+            if items {
+                let mut stack = Node::map();
+                stack.set("==", Node::str("org.bukkit.inventory.ItemStack"));
+                stack.set("type", Node::str("DIAMOND"));
+                stack.set("amount", Node::int(3));
+                e.set("itemCost", Node::seq(vec![stack]));
+            }
+        }
+        npc.map.map_at(&["traits", "commandtrait"]).set("commands", cmds);
+    }
+
+    fn diamonds(w: &mut World, levels: i32, slots: &[(u32, u32)]) {
+        w.player_cost = Some(PlayerCost {
+            levels,
+            slots: slots.iter().map(|(s, n)| (*s, "minecraft:diamond".to_owned(), *n)).collect(),
+        });
+    }
+
+    fn tells(ops: &[Op]) -> Vec<String> {
+        ops.iter().filter_map(|o| if let Op::Tell { legacy, .. } = o { Some(legacy.clone()) } else { None }).collect()
+    }
+
+    #[test]
+    fn experience_cost_is_checked_then_charged_in_levels() {
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        costed(&mut w, id, Some(5), false, None);
+        w.take_ops();
+        let p = player(1.0, 1.0);
+        diamonds(&mut w, 4, &[]);
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        let ops = w.take_ops();
+        assert_eq!(tells(&ops), vec!["You need at least 5 experience.".to_owned()]);
+        assert!(!ops.iter().any(|o| matches!(o, Op::Console(_) | Op::Charge { .. })));
+        diamonds(&mut w, 7, &[]);
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        let ops = w.take_ops();
+        assert!(ops.contains(&Op::Charge { player: 0xA1, levels: 5, slots: vec![] }));
+        assert!(ops.contains(&Op::Console("say paid".into())));
+    }
+
+    #[test]
+    fn item_cost_takes_stacks_in_slot_order_and_names_the_missing_item() {
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        costed(&mut w, id, None, true, None);
+        w.take_ops();
+        let p = player(1.0, 1.0);
+        diamonds(&mut w, 0, &[(2, 2), (5, 4)]);
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        let ops = w.take_ops();
+        assert!(ops.contains(&Op::Charge { player: 0xA1, levels: 0, slots: vec![(2, 0), (5, 3)] }));
+        assert!(ops.contains(&Op::Console("say paid".into())));
+        diamonds(&mut w, 0, &[(2, 2)]);
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        let ops = w.take_ops();
+        assert_eq!(tells(&ops), vec!["Missing 3 diamond".to_owned()]);
+        assert!(!ops.iter().any(|o| matches!(o, Op::Console(_) | Op::Charge { .. })));
+    }
+
+    #[test]
+    fn cost_is_skipped_for_ignoreerrors_and_not_taken_when_a_limit_refuses() {
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        costed(&mut w, id, Some(5), true, Some(1));
+        w.take_ops();
+        let p = player(1.0, 1.0);
+        diamonds(&mut w, 0, &[]);
+        w.held_perms.insert("citizens.npc.command.ignoreerrors.cost".into());
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        assert!(tells(&w.take_ops()).iter().any(|t| t.contains("need at least 5")), "only the money node is ignored");
+        w.held_perms.insert("citizens.npc.command.ignoreerrors.expcost".into());
+        w.held_perms.insert("citizens.npc.command.ignoreerrors.itemcost".into());
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        let ops = w.take_ops();
+        assert!(ops.contains(&Op::Console("say paid".into())));
+        assert!(!ops.iter().any(|o| matches!(o, Op::Charge { .. })));
+        // n = 1 is used up: the limit refuses and the player pays nothing.
+        w.held_perms.clear();
+        for _ in 0..25 {
+            w.tick(&[]);
+        }
+        diamonds(&mut w, 9, &[(0, 3)]);
+        assert!(w.on_click(10, &p, Hand::Right, None));
+        let ops = w.take_ops();
+        assert!(!ops.iter().any(|o| matches!(o, Op::Charge { .. })));
+        assert!(tells(&ops).iter().any(|t| t == "You have reached the maximum number of uses (1)."));
+    }
+
+    #[test]
+    fn plan_item_charge_matches_citizens_take_items() {
+        let cost = |id: &str, n: i64| CostItem { id: id.into(), amount: n, name: id.into() };
+        let slots = vec![(0, "minecraft:stone".to_owned(), 64), (1, "minecraft:diamond".to_owned(), 1), (3, "minecraft:diamond".to_owned(), 5)];
+        assert_eq!(plan_item_charge(&slots, &[cost("minecraft:diamond", 4)]), Some(vec![(1, 0), (3, 2)]));
+        assert_eq!(plan_item_charge(&slots, &[cost("minecraft:diamond", 7)]), None);
+        assert_eq!(plan_item_charge(&slots, &[cost("minecraft:diamond", 2), cost("minecraft:stone", 1)]), Some(vec![(0, 63), (1, 0), (3, 4)]));
     }
 
     #[test]

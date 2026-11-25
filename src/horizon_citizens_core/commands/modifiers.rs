@@ -10,9 +10,9 @@
 //! - the save keys (`traits.<modifier>.*`, `metadata.<key>`) are this port's choice;
 //! - a flag nobody set reads as off, except `collidable`, which reads as on (an entity collides
 //!   unless told otherwise);
-//! - only `ai` changes the spawned entity (a non-player mob with AI on is summoned without
-//!   `NoAI`). Every other setting is saved and described, and the reply says it has no effect on
-//!   Horizon yet.
+//! - `ai`, `collidable` (a team without collision), `knockback`, `pickupitems` and `sitting` change
+//!   the spawned entity; every other setting is saved and described, and the reply says it has no
+//!   effect on Horizon yet.
 
 use super::*;
 
@@ -48,13 +48,13 @@ const SIMPLE: &[Simple] = &[
     Simple {
         name: "collidable",
         kind: Kind::Flag { on: "is now collidable", off: "is no longer collidable", flag: None, temp: false, default: true },
-        live: false,
+        live: true,
     },
-    flag("knockback", "now takes knockback", "no longer takes knockback", Some("explicit"), false, false),
+    flag("knockback", "now takes knockback", "no longer takes knockback", Some("explicit"), false, true),
     flag("leashable", "can now be leashed", "can no longer be leashed", None, false, false),
     flag("passive", "no longer damages other entities", "now damages other entities", Some("set"), false, false),
-    flag("pickupitems", "can now pick up items", "can no longer pick up items", Some("set"), false, false),
-    flag("sitting", "is now sitting", "is no longer sitting", Some("explicit"), false, false),
+    flag("pickupitems", "can now pick up items", "can no longer pick up items", Some("set"), false, true),
+    flag("sitting", "is now sitting", "is no longer sitting", Some("explicit"), false, true),
     flag("swim", "will now swim", "will no longer swim", Some("set"), false, false),
     flag("targetable", "can now be targeted", "can no longer be targeted", None, false, false),
     Simple { name: "activationrange", kind: Kind::Number { label: "activation range", min: 0.0, integer: false }, live: false },

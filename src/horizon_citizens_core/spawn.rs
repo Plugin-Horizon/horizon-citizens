@@ -131,8 +131,9 @@ pub fn npc_snbt(npc: &NpcData, uuid: u128, loc: &Location, cfg: &Config) -> Stri
         if let Some(p) = profile_snbt(&profile_for(npc, uuid, cfg)) {
             parts.push(format!("profile:{p}"));
         }
-        parts.push("immovable:1b".into());
-        parts.push("hide_description:1b".into());
+        let flag = |k: &str| npc.map.at(&["traits", "mannequin", k]).and_then(Node::as_bool).unwrap_or(true);
+        parts.push(format!("immovable:{}b", u8::from(flag("immovable"))));
+        parts.push(format!("hide_description:{}b", u8::from(flag("hide_description"))));
     } else if npc.map.at(&["traits", "ai", "enabled"]).and_then(Node::as_bool) != Some(true) {
         // `/npc ai true` leaves the mob its own AI.
         parts.push("NoAI:1b".into());

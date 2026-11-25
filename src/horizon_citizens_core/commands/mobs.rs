@@ -81,6 +81,8 @@ pub(super) struct Mob {
     toggle: &'static str,
     /// Whether the saved settings change the summoned entity ([`live_nbt`]).
     live: bool,
+    /// Saved keys that only show in synched data the entity does not save (reply says so).
+    noeffect: &'static [&'static str],
 }
 
 macro_rules! m {
@@ -94,18 +96,19 @@ macro_rules! m {
             req: 0,
             toggle: "",
             live: false,
+            noeffect: &[],
         }
     };
 }
 
 const MOBS: &[Mob] = &[
-    Mob { kinds: &["ALLAY"], flags: &[f('d', "dancing", true)], ..m!("allay", [], "allay (-d(ancing))") },
+    Mob { kinds: &["ALLAY"], flags: &[f('d', "dancing", true)], noeffect: &["dancing"], ..m!("allay", [], "allay (-d(ancing))") },
     Mob {
         kinds: &["AREA_EFFECT_CLOUD"],
         opts: &[o("color", V::Any), o("duration", V::Int(0, IMAX)), o("radius", V::Num(NUM0.0, NUM0.1)), o("radius_per_tick", V::Num(NUM.0, NUM.1)), o("particle", V::Any)],
-        ..m!("areaeffectcloud", [], "areaeffectcloud --color [color] --duration [duration] --radius [radius] --radius_per_tick [radius] --particle [particle]")
+        live: true, ..m!("areaeffectcloud", [], "areaeffectcloud --color [color] --duration [duration] --radius [radius] --radius_per_tick [radius] --particle [particle]")
     },
-    Mob { kinds: &["ARMADILLO"], opts: &[o("state", V::Words(&["idle", "rolling", "scared", "unrolling"]))], ..m!("armadillo", [], "armadillo --state [state]") },
+    Mob { kinds: &["ARMADILLO"], opts: &[o("state", V::Words(&["idle", "rolling", "scared", "unrolling"]))], live: true, ..m!("armadillo", [], "armadillo --state [state]") },
     Mob {
         kinds: &["ARMOR_STAND"],
         opts: &[
@@ -129,14 +132,14 @@ const MOBS: &[Mob] = &[
         kinds: &["AXOLOTL"],
         flags: &[f('d', "d", true)],
         opts: &[o("variant", V::Words(&["lucy", "wild", "gold", "cyan", "blue"]))],
-        ..m!("axolotl", [], "axolotl (-d) (--variant variant)")
+        live: true, noeffect: &["d"], ..m!("axolotl", [], "axolotl (-d) (--variant variant)")
     },
-    Mob { kinds: &["BAT"], opts: &[o("awake", V::Bool)], ..m!("bat", [], "bat --awake [awake]") },
+    Mob { kinds: &["BAT"], opts: &[o("awake", V::Bool)], live: true, ..m!("bat", [], "bat --awake [awake]") },
     Mob {
         kinds: &["BEE"],
         flags: &[f('s', "stung", true), f('n', "stung", false)],
         opts: &[o("anger", V::Int(0, IMAX))],
-        ..m!("bee", [], "bee (-s/-n) --anger anger")
+        live: true, ..m!("bee", [], "bee (-s/-n) --anger anger")
     },
     Mob { kinds: &["*BOAT", "*RAFT"], opts: &[o("type", V::Any)], ..m!("boat", [], "boat --type [type]") },
     Mob {
@@ -153,14 +156,14 @@ const MOBS: &[Mob] = &[
         ..m!("bossbar", [], "bossbar --style [style] --color [color] --title [title] --visible [visible] --viewpermission [permission] --flags [flags] --track [health | placeholder] --range [range]")
     },
     Mob { opts: &[o("location", V::Vec3), o("radius", V::Num(NUM0.0, NUM0.1))], ..m!("breakblock", [], "breakblock --location [x,y,z] --radius [radius]") },
-    Mob { kinds: &["CAMEL"], opts: &[o("pose", V::Any)], ..m!("camel", [], "camel (--pose pose)") },
+    Mob { kinds: &["CAMEL"], opts: &[o("pose", V::Any)], live: true, ..m!("camel", [], "camel (--pose pose)") },
     Mob {
         kinds: &["CAT"],
         flags: &[f('s', "sitting", true), f('n', "sitting", false), f('l', "lying", true)],
         opts: &[o("type", V::Any), o("ccolor", V::Any)],
-        ..m!("cat", [], "cat (-s/-n/-l) --type type --ccolor collar color")
+        live: true, noeffect: &["lying"], ..m!("cat", [], "cat (-s/-n/-l) --type type --ccolor collar color")
     },
-    Mob { kinds: &["CHICKEN"], opts: &[o("variant", V::Any)], ..m!("chicken", [], "chicken (--variant variant)") },
+    Mob { kinds: &["CHICKEN"], opts: &[o("variant", V::Any)], live: true, ..m!("chicken", [], "chicken (--variant variant)") },
     Mob {
         flags: &[f('m', "mount", true), f('o', "owner_required", true)],
         opts: &[o("controls", V::Any), o("enabled", V::Bool)],
@@ -172,7 +175,7 @@ const MOBS: &[Mob] = &[
         opts: &[o("weatherstate", V::Any), o("weatheringtick", V::Int(0, IMAX))],
         ..m!("coppergolem", [], "coppergolem (--weatherstate state) (--weatheringtick tick)")
     },
-    Mob { kinds: &["COW"], opts: &[o("variant", V::Any)], ..m!("cow", [], "cow (--variant variant)") },
+    Mob { kinds: &["COW"], opts: &[o("variant", V::Any)], live: true, ..m!("cow", [], "cow (--variant variant)") },
     Mob {
         kinds: &["BLOCK_DISPLAY", "ITEM_DISPLAY", "TEXT_DISPLAY"],
         opts: &[
@@ -188,15 +191,15 @@ const MOBS: &[Mob] = &[
             o("rightrotation", V::Vec4),
             o("offset", V::Vec3),
         ],
-        ..m!("display", [], "display --billboard [billboard] --brightness [blockLight,skyLight] --interpolationdelay [delay] --interpolationduration [duration] --height [height] --width [width] --scale [x,y,z] --viewrange [range] --leftrotation [x,y,z,w] --rightrotation [x,y,z,w] --offset [x,y,z]")
+        live: true, ..m!("display", [], "display --billboard [billboard] --brightness [blockLight,skyLight] --interpolationdelay [delay] --interpolationduration [duration] --height [height] --width [width] --scale [x,y,z] --viewrange [range] --leftrotation [x,y,z,w] --rightrotation [x,y,z,w] --offset [x,y,z]")
     },
-    Mob { kinds: &["END_CRYSTAL", "ENDER_CRYSTAL"], flags: &[f('b', "bottom", true)], ..m!("endercrystal", [], "endercrystal -b(ottom)") },
+    Mob { kinds: &["END_CRYSTAL", "ENDER_CRYSTAL"], flags: &[f('b', "bottom", true)], live: true, ..m!("endercrystal", [], "endercrystal -b(ottom)") },
     Mob {
         kinds: &["ENDER_DRAGON"],
         opts: &[o("phase", V::Any), o("destroywalls", V::Bool)],
-        ..m!("enderdragon", [], "enderdragon --phase [phase] --destroywalls [true|false]")
+        live: true, noeffect: &["destroywalls"], ..m!("enderdragon", [], "enderdragon --phase [phase] --destroywalls [true|false]")
     },
-    Mob { kinds: &["ENDERMAN"], flags: &[f('a', "angry", true)], ..m!("enderman", [], "enderman -a(ngry)") },
+    Mob { kinds: &["ENDERMAN"], flags: &[f('a', "angry", true)], noeffect: &["angry"], ..m!("enderman", [], "enderman -a(ngry)") },
     Mob {
         opts: &[o("width", V::Num(NUM0.0, NUM0.1)), o("height", V::Num(NUM0.0, NUM0.1)), o("strength", V::Num(NUM.0, NUM.1)), o("vertical-strength", V::Num(NUM.0, NUM.1))],
         ..m!("forcefield", [], "forcefield --width [width] --height [height] --strength [strength] --vertical-strength [vertical strength]")
@@ -212,9 +215,9 @@ const MOBS: &[Mob] = &[
             o("pouncing", V::Bool),
             o("faceplanted", V::Bool),
         ],
-        ..m!("fox", [], "fox --type type --sleeping [true|false] --sitting [true|false] --crouching [true|false] --interested [true|false] --pouncing [true|false] --faceplanted [true|false]")
+        live: true, noeffect: &["interested", "pouncing", "faceplanted"], ..m!("fox", [], "fox --type type --sleeping [true|false] --sitting [true|false] --crouching [true|false] --interested [true|false] --pouncing [true|false] --faceplanted [true|false]")
     },
-    Mob { kinds: &["FROG"], opts: &[o("variant", V::Any)], ..m!("frog", [], "frog (--variant variant)") },
+    Mob { kinds: &["FROG"], opts: &[o("variant", V::Any)], live: true, ..m!("frog", [], "frog (--variant variant)") },
     Mob {
         kinds: &["GOAT"],
         flags: &[
@@ -224,11 +227,11 @@ const MOBS: &[Mob] = &[
             Flag { ch: 'b', key: "left_horn", val: true, key2: "right_horn" },
         ],
         pos: &[o("horn", V::Any)],
-        ..m!("goat", [], "goat -l(eft) -r(ight) -n(either) -b(oth) horn")
+        live: true, ..m!("goat", [], "goat -l(eft) -r(ight) -n(either) -b(oth) horn")
     },
     Mob {
         opts: &[o("scale", V::Num(NUM0.0, NUM0.1)), o("width", V::Num(NUM0.0, NUM0.1)), o("height", V::Num(NUM0.0, NUM0.1)), o("offset", V::Vec3)],
-        ..m!("hitbox", [], "hitbox --scale [scale] --width/height [value] --offset [x,y,z]")
+        live: true, ..m!("hitbox", [], "hitbox --scale [scale] --width/height [value] --offset [x,y,z]")
     },
     Mob {
         flags: &[f('h', "here", true), f('p', "pathfind", true), f('t', "teleport", true)],
@@ -239,19 +242,19 @@ const MOBS: &[Mob] = &[
         kinds: &["HORSE", "DONKEY", "MULE", "SKELETON_HORSE", "ZOMBIE_HORSE"],
         flags: &[f('c', "chest", true), f('b', "chest", false), f('t', "t", true)],
         opts: &[o("color", V::Any), o("type", V::Any), o("style", V::Any)],
-        ..m!("horse", [], "horse (--color color) (--type type) (--style style) (-cbt)")
+        live: true, ..m!("horse", [], "horse (--color color) (--type type) (--style style) (-cbt)")
     },
     Mob { flags: &[f('h', "hand", true)], pos: &[o("item", V::Any)], ..m!("item", [], "item [item] (-h(and))") },
-    Mob { kinds: &["ITEM_DISPLAY"], opts: &[o("transform", V::Any)], ..m!("itemdisplay", [], "itemdisplay --transform [transform]") },
+    Mob { kinds: &["ITEM_DISPLAY"], opts: &[o("transform", V::Any)], live: true, ..m!("itemdisplay", [], "itemdisplay --transform [transform]") },
     Mob {
         kinds: &["ITEM_FRAME", "GLOW_ITEM_FRAME"],
         opts: &[o("visible", V::Bool), o("fixed", V::Bool), o("rotation", V::Any), o("item", V::Any), o("face", V::Any)],
-        ..m!("itemframe", [], "itemframe --visible [true|false] --fixed [true|false] --rotation [rotation] --item [item] --face [face]")
+        live: true, ..m!("itemframe", [], "itemframe --visible [true|false] --fixed [true|false] --rotation [rotation] --item [item] --face [face]")
     },
     Mob {
         kinds: &["LLAMA", "TRADER_LLAMA"],
         opts: &[o("color", V::Any), o("strength", V::Int(1, 5))],
-        ..m!("llama", [], "llama (--color color) (--strength strength)")
+        live: true, ..m!("llama", [], "llama (--color color) (--strength strength)")
     },
     Mob {
         kinds: &["MANNEQUIN"],
@@ -265,9 +268,9 @@ const MOBS: &[Mob] = &[
             o("skin_patch_cape", V::Any),
             o("skin_patch_elytra", V::Any),
         ],
-        ..m!("mannequin", [], "mannequin --hide_description [true|false] --immovable [true|false] --description [description] --main_hand [LEFT|RIGHT] --skin_patch_type [type] --skin_patch_body [location] --skin_patch_cape [location] --skin_patch_elytra [location]")
+        live: true, noeffect: &["skin_patch_type", "skin_patch_body", "skin_patch_cape", "skin_patch_elytra"], ..m!("mannequin", [], "mannequin --hide_description [true|false] --immovable [true|false] --description [description] --main_hand [LEFT|RIGHT] --skin_patch_type [type] --skin_patch_body [location] --skin_patch_cape [location] --skin_patch_elytra [location]")
     },
-    Mob { kinds: &["*MINECART"], opts: &[o("offset", V::Int(-IMAX, IMAX))], ..m!("minecart", [], "minecart (--offset offset)") },
+    Mob { kinds: &["*MINECART"], opts: &[o("offset", V::Int(-IMAX, IMAX))], live: true, ..m!("minecart", [], "minecart (--offset offset)") },
     Mob {
         kinds: &["PLAYER"],
         opts: &[o("name", V::Bool), o("equipment", V::Bool)],
@@ -279,7 +282,7 @@ const MOBS: &[Mob] = &[
         req: 1,
         ..m!("modelanimate", [], "modelanimate [start|stop|clear] (name) (speed)")
     },
-    Mob { kinds: &["MUSHROOM_COW", "MOOSHROOM"], opts: &[o("variant", V::Any)], ..m!("mushroomcow", [], "mushroomcow (--variant [variant])") },
+    Mob { kinds: &["MUSHROOM_COW", "MOOSHROOM"], opts: &[o("variant", V::Any)], live: true, ..m!("mushroomcow", [], "mushroomcow (--variant [variant])") },
     Mob {
         kinds: &["OCELOT"],
         flags: &[f('s', "sitting", true), f('n', "sitting", false)],
@@ -287,14 +290,14 @@ const MOBS: &[Mob] = &[
         ..m!("ocelot", [], "ocelot (--type type) (-s(itting), -n(ot sitting))")
     },
     Mob { opts: &[o("enabled", V::Bool)], ..m!("packet", [], "packet --enabled [true|false]") },
-    Mob { kinds: &["PAINTING"], opts: &[o("art", V::Any)], ..m!("painting", [], "painting (--art art)") },
+    Mob { kinds: &["PAINTING"], opts: &[o("art", V::Any)], live: true, ..m!("painting", [], "painting (--art art)") },
     Mob {
         kinds: &["PANDA"],
         flags: &[f('e', "eating", true), f('s', "sitting", true), f('n', "sneezing", true), f('r', "rolling", true)],
         opts: &[o("gene", V::Any), o("hiddengene", V::Any)],
-        ..m!("panda", [], "panda --gene (main gene) --hiddengene (hidden gene) -e(ating) -s(itting) -n (sneezing) -r(olling)")
+        live: true, noeffect: &["eating", "sitting", "sneezing", "rolling"], ..m!("panda", [], "panda --gene (main gene) --hiddengene (hidden gene) -e(ating) -s(itting) -n (sneezing) -r(olling)")
     },
-    Mob { kinds: &["PARROT"], opts: &[o("variant", V::Any)], ..m!("parrot", [], "parrot (--variant variant)") },
+    Mob { kinds: &["PARROT"], opts: &[o("variant", V::Any)], live: true, ..m!("parrot", [], "parrot (--variant variant)") },
     Mob {
         opts: &[
             o("avoid-teleporting", V::Bool),
@@ -317,8 +320,8 @@ const MOBS: &[Mob] = &[
         ..m!("pausepathfinding", [], "pausepathfinding --onrightclick [true|false] --when-player-within [range in blocks] --pauseduration [duration] --lockoutduration [duration]")
     },
     Mob { kinds: &["PHANTOM"], opts: &[o("size", V::Int(0, 64))], live: true, ..m!("phantom", [], "phantom (--size size)") },
-    Mob { kinds: &["PIG"], opts: &[o("variant", V::Any)], ..m!("pig", [], "pig (--variant variant)") },
-    Mob { kinds: &["PIGLIN"], opts: &[o("dancing", V::Bool)], ..m!("piglin", [], "piglin (--dancing [true|false])") },
+    Mob { kinds: &["PIG"], opts: &[o("variant", V::Any)], live: true, ..m!("pig", [], "pig (--variant variant)") },
+    Mob { kinds: &["PIGLIN"], opts: &[o("dancing", V::Bool)], noeffect: &["dancing"], ..m!("piglin", [], "piglin (--dancing [true|false])") },
     Mob {
         flags: &[f('a', "allowlist", true), f('e', "empty", true), f('d', "denylist", true), f('c', "clear", true)],
         opts: &[
@@ -332,7 +335,7 @@ const MOBS: &[Mob] = &[
         ],
         ..m!("playerfilter", [], "playerfilter -a(llowlist) -e(mpty) -d(enylist) --add [uuid] --remove [uuid] --addpermission [permission] --removepermission [permission] --addgroup [group] --removegroup [group] -c(lear) --applywithin [blocks range]")
     },
-    Mob { kinds: &["POLAR_BEAR"], flags: &[f('r', "rearing", true)], ..m!("polarbear", [], "polarbear (-r)") },
+    Mob { kinds: &["POLAR_BEAR"], flags: &[f('r', "rearing", true)], noeffect: &["rearing"], ..m!("polarbear", [], "polarbear (-r)") },
     Mob {
         flags: &[f('t', "temporary", true)],
         opts: &[o("name", V::Any), o("type", V::Any), o("duration", V::Int(-1, IMAX)), o("amplifier", V::Int(0, 255)), o("icon", V::Bool)],
@@ -345,7 +348,7 @@ const MOBS: &[Mob] = &[
         kinds: &["RABBIT"],
         pos: &[o("type", V::Words(&["brown", "white", "black", "black_and_white", "gold", "salt_and_pepper", "the_killer_bunny"]))],
         req: 1,
-        ..m!("rabbittype", ["rbtype"], "rabbittype [type]")
+        live: true, ..m!("rabbittype", ["rbtype"], "rabbittype [type]")
     },
     Mob {
         opts: &[
@@ -362,15 +365,15 @@ const MOBS: &[Mob] = &[
     Mob {
         kinds: &["SHULKER"],
         opts: &[o("peek", V::Int(0, 100)), o("color", V::Any)],
-        ..m!("shulker", [], "shulker (--peek [peek] --color [color])")
+        live: true, ..m!("shulker", [], "shulker (--peek [peek] --color [color])")
     },
-    Mob { kinds: &["SNIFFER"], opts: &[o("state", V::Any)], ..m!("sniffer", [], "sniffer (--state [state])") },
+    Mob { kinds: &["SNIFFER"], opts: &[o("state", V::Any)], noeffect: &["state"], ..m!("sniffer", [], "sniffer (--state [state])") },
     Mob {
         kinds: &["SNOWMAN", "SNOW_GOLEM"],
         flags: &[f('d', "derp", true), f('f', "form_snow", true)],
-        ..m!("snowman", [], "snowman (-d[erp]) (-f[orm snow])")
+        live: true, noeffect: &["form_snow"], ..m!("snowman", [], "snowman (-d[erp]) (-f[orm snow])")
     },
-    Mob { kinds: &["EVOKER", "ILLUSIONER"], opts: &[o("spell", V::Any)], ..m!("spellcaster", [], "spellcaster (--spell spell)") },
+    Mob { kinds: &["EVOKER", "ILLUSIONER"], opts: &[o("spell", V::Any)], noeffect: &["spell"], ..m!("spellcaster", [], "spellcaster (--spell spell)") },
     Mob {
         kinds: &["TEXT_DISPLAY"],
         opts: &[o("shadowed", V::Bool), o("seethrough", V::Bool), o("line_width", V::Int(0, IMAX)), o("text", V::Text)],
@@ -380,30 +383,30 @@ const MOBS: &[Mob] = &[
     Mob {
         kinds: &["TROPICAL_FISH"],
         opts: &[o("body", V::Any), o("pattern", V::Any), o("patterncolor", V::Any)],
-        ..m!("tropicalfish", [], "tropicalfish (--body color) (--pattern pattern) (--patterncolor color)")
+        live: true, ..m!("tropicalfish", [], "tropicalfish (--body color) (--pattern pattern) (--patterncolor color)")
     },
     Mob { flags: &[f('o', "offhand", true)], ..m!("useitem", [], "useitem (-o(ffhand))") },
-    Mob { kinds: &["VEX"], opts: &[o("charging", V::Bool)], ..m!("vex", [], "vex (--charging [charging])") },
+    Mob { kinds: &["VEX"], opts: &[o("charging", V::Bool)], noeffect: &["charging"], ..m!("vex", [], "vex (--charging [charging])") },
     Mob {
         kinds: &["VILLAGER", "ZOMBIE_VILLAGER"],
         flags: &[f('s', "shake_head", true)],
         opts: &[o("level", V::Int(1, 5)), o("type", V::Any), o("profession", V::Any)],
         live: true,
-        ..m!("villager", [], "villager (--level level) (--type type) (--profession profession) -s(hake head)")
+        noeffect: &["shake_head"], ..m!("villager", [], "villager (--level level) (--type type) (--profession profession) -s(hake head)")
     },
     Mob {
         kinds: &["WITHER"],
         opts: &[o("invulnerable", V::Bool), o("invulnerable-ticks", V::Int(0, IMAX)), o("arrow-shield", V::Bool)],
-        ..m!("wither", [], "wither (--invulnerable [true|false]) (--invulnerable-ticks [ticks]) (--arrow-shield [true|false])")
+        live: true, ..m!("wither", [], "wither (--invulnerable [true|false]) (--invulnerable-ticks [ticks]) (--arrow-shield [true|false])")
     },
     Mob {
         kinds: &["WOLF"],
         flags: &[f('s', "sitting", true), f('a', "angry", true), f('t', "tamed", true), f('i', "interested", true)],
         opts: &[o("collar", V::Any), o("variant", V::Any)],
-        ..m!("wolf", [], "wolf (-s(itting) a(ngry) t(amed) i(nterested)) --collar [hex rgb color|name] --variant [variant]")
+        live: true, noeffect: &["interested"], ..m!("wolf", [], "wolf (-s(itting) a(ngry) t(amed) i(nterested)) --collar [hex rgb color|name] --variant [variant]")
     },
     // The ones with their own handler: they read the line themselves.
-    Mob { pos: &[o("attribute", V::Any), o("value", V::Num(NUM.0, NUM.1))], ..m!("attribute", [], "attribute [attribute] [value]") },
+    Mob { pos: &[o("attribute", V::Any), o("value", V::Num(NUM.0, NUM.1))], live: true, ..m!("attribute", [], "attribute [attribute] [value]") },
     Mob {
         opts: &[o("bubble", V::Int(0, IMAX)), o("target", V::Any), o("range", V::Num(NUM0.0, NUM0.1))],
         pos: &[o("message", V::Text)],
@@ -757,7 +760,7 @@ fn generic(w: &mut World, id: i32, m: &'static Mob, parsed: Parsed) -> Res {
                 npc.add_trait_name(name);
             }
             let out = ok(w, M_TOGGLED, &[&npc_name, name, if now { "enabled" } else { "disabled" }]);
-            return Ok(finish(w, id, m.live, out));
+            return Ok(finish(w, id, m.live, false, out));
         }
         let have: Vec<String> = w
             .saves
@@ -779,7 +782,8 @@ fn generic(w: &mut World, id: i32, m: &'static Mob, parsed: Parsed) -> Res {
     for (key, _, shown) in &sets {
         out.extend(ok(w, M_SET, &[&npc_name, &format!("{name} {key}"), shown]));
     }
-    Ok(finish(w, id, m.live, out))
+    let partial = sets.iter().any(|(k, _, _)| m.noeffect.contains(k));
+    Ok(finish(w, id, m.live, partial, out))
 }
 
 fn node_text(n: &Node) -> String {
@@ -794,11 +798,12 @@ fn node_text(n: &Node) -> String {
     }
 }
 
-fn finish(w: &mut World, id: i32, live: bool, mut out: Reply) -> Reply {
+fn finish(w: &mut World, id: i32, live: bool, partial: bool, mut out: Reply) -> Reply {
     w.mark_dirty();
     if live {
         w.respawn(id);
-    } else {
+    }
+    if !live || partial {
         out.extend(ok(w, M_NOT_ENFORCED, &[]));
     }
     out
@@ -834,7 +839,7 @@ fn attribute(w: &mut World, id: i32, p: &Parsed) -> Res {
         npc.add_trait_name("attribute");
     }
     let out = ok(w, M_SET, &[&npc_name, &format!("attribute {key}"), &shown]);
-    Ok(finish(w, id, false, out))
+    Ok(finish(w, id, true, false, out))
 }
 
 fn string_list(w: &World, id: i32, key: &str) -> Vec<String> {
@@ -912,7 +917,7 @@ fn playerfilter(w: &mut World, id: i32, m: &'static Mob, p: &Parsed) -> Res {
     }
     npc_mut(w, id)?.add_trait_name("playerfilter");
     let _ = m;
-    Ok(finish(w, id, false, out))
+    Ok(finish(w, id, false, false, out))
 }
 
 /// `/npc potioneffect [add|remove|list]`: effects saved under `traits.potioneffect.<name>`; the
@@ -959,7 +964,7 @@ fn potioneffect(w: &mut World, id: i32, p: &Parsed) -> Res {
                 npc.add_trait_name("potioneffect");
             }
             let out = ok(w, M_SET, &[&npc_name, "potioneffect", &name]);
-            Ok(finish(w, id, false, out))
+            Ok(finish(w, id, true, false, out))
         }
         "remove" => {
             let wanted = opt("name").or_else(|| opt("type")).map(|s| s.to_ascii_lowercase());
@@ -1173,7 +1178,406 @@ pub fn live_nbt(npc: &NpcData, kind: &str) -> Vec<String> {
         }
         _ => {}
     }
+    mob_nbt(npc, kind, &mut out);
     out
+}
+
+fn tstr(npc: &NpcData, name: &str, key: &str) -> Option<String> {
+    let n = npc.map.at(&["traits", name, key])?;
+    n.text().or_else(|| n.as_i64().map(|i| i.to_string())).map(|s| s.trim().to_ascii_lowercase().replace([' ', '-'], "_"))
+}
+
+fn tnum(npc: &NpcData, name: &str, key: &str) -> Option<f64> {
+    let n = npc.map.at(&["traits", name, key])?;
+    n.as_f64().or_else(|| n.text().and_then(|t| t.trim().parse().ok()))
+}
+
+/// `a,b,..` of exactly `n` numbers.
+fn tlist(npc: &NpcData, name: &str, key: &str, n: usize) -> Option<Vec<f64>> {
+    let raw = npc.map.at(&["traits", name, key]).and_then(Node::text)?;
+    let v: Vec<f64> = raw.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+    (v.len() == n).then_some(v)
+}
+
+fn tbool_key(npc: &NpcData, name: &str, key: &str) -> Option<bool> {
+    tbool(npc, name, key)
+}
+
+fn b1(v: bool) -> u8 {
+    u8::from(v)
+}
+
+/// A registry word as a namespaced id string, when it is only letters, digits and `_`.
+fn ns_id(s: &str) -> Option<String> {
+    let s = s.strip_prefix("minecraft:").unwrap_or(s);
+    (!s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then(|| format!("\"minecraft:{s}\""))
+}
+
+fn index_of(list: &[&str], word: &str) -> Option<usize> {
+    list.iter().position(|w| w.eq_ignore_ascii_case(word))
+}
+
+fn dye(word: &str) -> Option<usize> {
+    index_of(&DYE_COLOURS, word)
+}
+
+/// The attribute id of a Citizens/Bukkit attribute name (`GENERIC_MAX_HEALTH`, `generic.max_health`).
+fn attribute_id(raw: &str) -> Option<String> {
+    let s = raw.to_ascii_lowercase().replace('.', "_");
+    let mut s = s.strip_prefix("minecraft:").unwrap_or(&s);
+    for p in ["generic_", "player_", "zombie_", "horse_"] {
+        if let Some(r) = s.strip_prefix(p) {
+            s = r;
+            break;
+        }
+    }
+    (!s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')).then(|| s.to_owned())
+}
+
+fn dbl(v: f64) -> String {
+    let s = format!("{v:.6}");
+    let s = s.trim_end_matches('0');
+    let s = if s.ends_with('.') { format!("{s}0") } else { s.to_owned() };
+    format!("{s}d")
+}
+
+/// The entity data of the mob-specific modifiers (the entity's own saved data; what the game
+/// keeps only in synched state is listed in each row's `noeffect` and in ENGINE_NEEDS).
+fn mob_nbt(npc: &NpcData, kind: &str, out: &mut Vec<String>) {
+    let tb = |n: &str, k: &str| tbool(npc, n, k);
+    let ts = |n: &str, k: &str| tstr(npc, n, k);
+    let ti = |n: &str, k: &str| tint(npc, n, k);
+    let id_of = |n: &str, k: &str| ts(n, k).and_then(|s| ns_id(&s));
+    let mut attrs: Vec<String> = Vec::new();
+    match kind {
+        "minecraft:area_effect_cloud" => {
+            let n = "areaeffectcloud";
+            if let Some(v) = tnum(npc, n, "radius") {
+                out.push(format!("Radius:{}", float_nbt(v)));
+            }
+            if let Some(v) = ti(n, "duration") {
+                out.push(format!("Duration:{v}"));
+            }
+            if let Some(v) = tnum(npc, n, "radius_per_tick") {
+                out.push(format!("RadiusPerTick:{}", float_nbt(v)));
+            }
+            if let Some(raw) = ts(n, "color") {
+                let rgb = raw.trim_start_matches('#').trim_start_matches("0x");
+                if let Ok(c) = i64::from_str_radix(rgb, 16) {
+                    out.push(format!("custom_color:{}", c & 0xFF_FFFF));
+                }
+            }
+            if let Some(p) = id_of(n, "particle") {
+                out.push(format!("custom_particle:{{type:{p}}}"));
+            }
+        }
+        "minecraft:armadillo" => {
+            if let Some(s) = ts("armadillo", "state").filter(|s| ["idle", "rolling", "scared", "unrolling"].contains(&s.as_str())) {
+                out.push(format!("state:\"{s}\""));
+            }
+        }
+        "minecraft:axolotl" => {
+            if let Some(i) = ts("axolotl", "variant").and_then(|v| index_of(&["lucy", "wild", "gold", "cyan", "blue"], &v)) {
+                out.push(format!("Variant:{i}"));
+            }
+        }
+        "minecraft:bat" => {
+            if let Some(a) = tb("bat", "awake") {
+                out.push(format!("BatFlags:{}b", b1(!a)));
+            }
+        }
+        "minecraft:bee" => {
+            if let Some(b) = tb("bee", "stung") {
+                out.push(format!("HasStung:{}b", b1(b)));
+            }
+            if let Some(a) = ti("bee", "anger") {
+                out.push(format!("AngerTime:{a}"));
+            }
+        }
+        "minecraft:camel" => {
+            if let Some(p) = ts("camel", "pose") {
+                out.push(format!("LastPoseTick:{}L", if p.starts_with("sit") { -1 } else { 0 }));
+            }
+        }
+        "minecraft:cat" => {
+            if let Some(v) = id_of("cat", "type") {
+                out.push(format!("variant:{v}"));
+            }
+            if let Some(c) = ts("cat", "ccolor").and_then(|c| dye(&c)) {
+                out.push(format!("CollarColor:{c}b"));
+            }
+            if let Some(s) = tb("cat", "sitting") {
+                out.push(format!("Sitting:{}b", b1(s)));
+            }
+        }
+        "minecraft:chicken" | "minecraft:cow" | "minecraft:pig" | "minecraft:frog" => {
+            let t = kind.trim_start_matches("minecraft:");
+            if let Some(v) = id_of(t, "variant") {
+                out.push(format!("variant:{v}"));
+            }
+        }
+        "minecraft:end_crystal" => {
+            if let Some(b) = tb("endercrystal", "bottom") {
+                out.push(format!("ShowBottom:{}b", b1(b)));
+            }
+        }
+        "minecraft:ender_dragon" => {
+            const PHASES: [&str; 12] = [
+                "circling", "strafing", "flying_to_portal", "landing_approach", "landing", "takeoff", "sitting_flaming", "sitting_scanning",
+                "sitting_attacking", "charging_player", "dying", "hover",
+            ];
+            if let Some(i) = ts("enderdragon", "phase").and_then(|p| index_of(&PHASES, &p)) {
+                out.push(format!("DragonPhase:{i}"));
+            }
+        }
+        "minecraft:fox" => {
+            if let Some(t) = ts("fox", "type").filter(|t| t == "red" || t == "snow") {
+                out.push(format!("Type:\"{t}\""));
+            }
+            for (key, nbt) in [("sleeping", "Sleeping"), ("sitting", "Sitting"), ("crouching", "Crouching")] {
+                if let Some(b) = tb("fox", key) {
+                    out.push(format!("{nbt}:{}b", b1(b)));
+                }
+            }
+        }
+        "minecraft:goat" => {
+            for (key, nbt) in [("left_horn", "HasLeftHorn"), ("right_horn", "HasRightHorn")] {
+                if let Some(b) = tb("goat", key) {
+                    out.push(format!("{nbt}:{}b", b1(b)));
+                }
+            }
+        }
+        "minecraft:horse" | "minecraft:donkey" | "minecraft:mule" | "minecraft:skeleton_horse" | "minecraft:zombie_horse" => {
+            if kind == "minecraft:horse" {
+                const COLOURS: [&str; 7] = ["white", "creamy", "chestnut", "brown", "black", "gray", "dark_brown"];
+                const STYLES: [&str; 5] = ["none", "white", "whitefield", "white_dots", "black_dots"];
+                let c = ts("horse", "color").and_then(|c| index_of(&COLOURS, &c));
+                let s = ts("horse", "style").and_then(|s| index_of(&STYLES, &s));
+                if c.is_some() || s.is_some() {
+                    out.push(format!("Variant:{}", c.unwrap_or(0) | (s.unwrap_or(0) << 8)));
+                }
+            }
+            if let Some(b) = tb("horse", "chest") {
+                out.push(format!("ChestedHorse:{}b", b1(b)));
+            }
+            if tb("horse", "t") == Some(true) {
+                out.push("Tame:1b".into());
+            }
+        }
+        "minecraft:item_frame" | "minecraft:glow_item_frame" => {
+            let n = "itemframe";
+            if let Some(b) = tb(n, "visible") {
+                out.push(format!("Invisible:{}b", b1(!b)));
+            }
+            if let Some(b) = tb(n, "fixed") {
+                out.push(format!("Fixed:{}b", b1(b)));
+            }
+            if let Some(r) = ti(n, "rotation") {
+                out.push(format!("ItemRotation:{}b", r.rem_euclid(8)));
+            }
+            if let Some(i) = index_of(&["down", "up", "north", "south", "west", "east"], &ts(n, "face").unwrap_or_default()) {
+                out.push(format!("Facing:{i}b"));
+            }
+            if let Some(item) = id_of(n, "item") {
+                out.push(format!("Item:{{id:{item},count:1}}"));
+            }
+        }
+        "minecraft:llama" | "minecraft:trader_llama" => {
+            if let Some(i) = ts("llama", "color").and_then(|c| index_of(&["creamy", "white", "brown", "gray"], &c)) {
+                out.push(format!("Variant:{i}"));
+            }
+            if let Some(s) = ti("llama", "strength") {
+                out.push(format!("Strength:{s}"));
+            }
+        }
+        "minecraft:mannequin" => {
+            let n = "mannequin";
+            if let Some(h) = ts(n, "main_hand").filter(|h| h == "left" || h == "right") {
+                out.push(format!("main_hand:\"{h}\""));
+            }
+            if let Some(d) = npc.map.at(&["traits", n, "description"]).and_then(Node::text) {
+                out.push(format!("description:{}", crate::horizon_citizens_core::text::component_snbt(&d)));
+            }
+        }
+        k if k.ends_with("minecart") => {
+            if let Some(o) = ti("minecart", "offset") {
+                out.push(format!("DisplayOffset:{o}"));
+            }
+        }
+        "minecraft:mooshroom" => {
+            if let Some(t) = ts("mushroomcow", "variant").filter(|t| t == "red" || t == "brown") {
+                out.push(format!("Type:\"{t}\""));
+            }
+        }
+        "minecraft:painting" => {
+            if let Some(v) = id_of("painting", "art") {
+                out.push(format!("variant:{v}"));
+            }
+        }
+        "minecraft:panda" => {
+            for (key, nbt) in [("gene", "MainGene"), ("hiddengene", "HiddenGene")] {
+                if let Some(g) = ts("panda", key).filter(|g| ["normal", "aggressive", "lazy", "worried", "playful", "weak", "brown"].contains(&g.as_str())) {
+                    out.push(format!("{nbt}:\"{g}\""));
+                }
+            }
+        }
+        "minecraft:parrot" => {
+            if let Some(i) = ts("parrot", "variant").and_then(|v| index_of(&["red_blue", "blue", "green", "yellow_blue", "gray"], &v)) {
+                out.push(format!("Variant:{i}"));
+            }
+        }
+        "minecraft:rabbit" => {
+            let t = ts("rabbittype", "type").and_then(|t| {
+                if t == "the_killer_bunny" {
+                    Some(99)
+                } else {
+                    index_of(&["brown", "white", "black", "black_and_white", "gold", "salt_and_pepper"], &t)
+                }
+            });
+            if let Some(t) = t {
+                out.push(format!("RabbitType:{t}"));
+            }
+        }
+        "minecraft:shulker" => {
+            if let Some(p) = ti("shulker", "peek") {
+                out.push(format!("Peek:{}b", p.clamp(0, 100)));
+            }
+            if let Some(c) = ts("shulker", "color").and_then(|c| dye(&c)) {
+                out.push(format!("Color:{c}b"));
+            }
+        }
+        "minecraft:snow_golem" => {
+            if tb("snowman", "derp") == Some(true) {
+                out.push("Pumpkin:0b".into());
+            }
+        }
+        "minecraft:tropical_fish" => {
+            // Small patterns are 0..5 (kob ...), large ones 256..261 (flopper ...); body colour << 16, pattern colour << 24.
+            const PATTERNS: [&str; 12] = ["kob", "sunstreak", "snooper", "dasher", "brinely", "spotty", "flopper", "stripey", "glitter", "blockfish", "betty", "clayfish"];
+            let n = "tropicalfish";
+            let body = ts(n, "body").and_then(|c| dye(&c));
+            let pc = ts(n, "patterncolor").and_then(|c| dye(&c));
+            let pat = ts(n, "pattern").and_then(|p| index_of(&PATTERNS, &p));
+            if body.is_some() || pc.is_some() || pat.is_some() {
+                let p = pat.map_or(0, |i| if i < 6 { i as i64 } else { 256 + i as i64 - 6 });
+                let v = p | ((body.unwrap_or(0) as i64) << 16) | ((pc.unwrap_or(0) as i64) << 24);
+                out.push(format!("Variant:{}", v as i32));
+            }
+        }
+        "minecraft:wither" => {
+            if let Some(t) = ti("wither", "invulnerable-ticks") {
+                out.push(format!("Invul:{t}"));
+            }
+        }
+        "minecraft:wolf" => {
+            let n = "wolf";
+            if let Some(b) = tb(n, "sitting") {
+                out.push(format!("Sitting:{}b", b1(b)));
+            }
+            if tb(n, "angry") == Some(true) {
+                out.push("AngerTime:2147483647".into());
+            }
+            if let Some(c) = ts(n, "collar").and_then(|c| dye(&c)) {
+                out.push(format!("CollarColor:{c}b"));
+            }
+            if let Some(v) = id_of(n, "variant") {
+                out.push(format!("variant:{v}"));
+            }
+            if tb(n, "tamed") == Some(true)
+                && let Some(owner) = npc.owner()
+            {
+                out.push(format!("Owner:{}", crate::horizon_citizens_core::ids::int_array_snbt(owner)));
+            }
+        }
+        "minecraft:block_display" | "minecraft:item_display" | "minecraft:text_display" => {
+            let n = "display";
+            if let Some(b) = ts(n, "billboard").filter(|b| ["fixed", "vertical", "horizontal", "center"].contains(&b.as_str())) {
+                out.push(format!("billboard:\"{b}\""));
+            }
+            if let Some(v) = tlist(npc, n, "brightness", 2) {
+                out.push(format!("brightness:{{block:{},sky:{}}}", v[0] as i64, v[1] as i64));
+            }
+            if let Some(v) = ti(n, "interpolationdelay") {
+                out.push(format!("start_interpolation:{v}"));
+            }
+            if let Some(v) = ti(n, "interpolationduration") {
+                out.push(format!("interpolation_duration:{v}"));
+            }
+            for (key, nbt) in [("height", "height"), ("width", "width"), ("viewrange", "view_range")] {
+                if let Some(v) = tnum(npc, n, key) {
+                    out.push(format!("{nbt}:{}", float_nbt(v)));
+                }
+            }
+            let (off, sc, l, r) = (tlist(npc, n, "offset", 3), tlist(npc, n, "scale", 3), tlist(npc, n, "leftrotation", 4), tlist(npc, n, "rightrotation", 4));
+            if off.is_some() || sc.is_some() || l.is_some() || r.is_some() {
+                let f = |v: Option<Vec<f64>>, d: &[f64]| format!("[{}]", v.unwrap_or_else(|| d.to_vec()).iter().map(|x| float_nbt(*x)).collect::<Vec<_>>().join(","));
+                out.push(format!(
+                    "transformation:{{translation:{},left_rotation:{},scale:{},right_rotation:{}}}",
+                    f(off, &[0.0; 3]),
+                    f(l, &[0.0, 0.0, 0.0, 1.0]),
+                    f(sc, &[1.0; 3]),
+                    f(r, &[0.0, 0.0, 0.0, 1.0])
+                ));
+            }
+            if kind == "minecraft:item_display"
+                && let Some(t) = ts("itemdisplay", "transform").filter(|t| {
+                    ["none", "thirdperson_lefthand", "thirdperson_righthand", "firstperson_lefthand", "firstperson_righthand", "head", "gui", "ground", "fixed"].contains(&t.as_str())
+                })
+            {
+                out.push(format!("item_display:\"{t}\""));
+            }
+        }
+        _ => {}
+    }
+    // Modifiers of every mob type: `attribute` and `hitbox --scale` become attribute bases,
+    // `potioneffect` the entity's active effects.
+    if let Some(n) = npc.map.at(&["traits", "attribute"]) {
+        for e in n.entries() {
+            if let (Some(id), Some(v)) = (attribute_id(&e.key), e.value.as_f64().or_else(|| e.value.as_i64().map(|i| i as f64))) {
+                attrs.push(format!("{{id:\"minecraft:{id}\",base:{}}}", dbl(v)));
+            }
+        }
+    }
+    // The general flags that show in the entity's data.
+    let flag_of = |name: &str| tbool_key(npc, name, "enabled");
+    if let Some(sit) = flag_of("sitting")
+        && matches!(kind, "minecraft:wolf" | "minecraft:cat" | "minecraft:parrot")
+        && !out.iter().any(|o| o.starts_with("Sitting:"))
+    {
+        out.push(format!("Sitting:{}b", b1(sit)));
+    }
+    if let Some(pick) = flag_of("pickupitems") {
+        out.push(format!("CanPickUpLoot:{}b", b1(pick)));
+    }
+    if flag_of("knockback") == Some(false) && !attrs.iter().any(|a| a.contains("knockback_resistance")) {
+        attrs.push(format!("{{id:\"minecraft:knockback_resistance\",base:{}}}", dbl(1.0)));
+    }
+    if let Some(v) = tnum(npc, "hitbox", "scale") {
+        attrs.retain(|a| !a.contains("minecraft:scale\""));
+        attrs.push(format!("{{id:\"minecraft:scale\",base:{}}}", dbl(v)));
+    }
+    if !attrs.is_empty() {
+        out.push(format!("attributes:[{}]", attrs.join(",")));
+    }
+    // (spawn.rs already writes the persistent invisibility effect; that one wins.)
+    if npc.invisibility().is_none()
+        && let Some(n) = npc.map.at(&["traits", "potioneffect"])
+    {
+        let effects: Vec<String> = n
+            .entries()
+            .iter()
+            .filter_map(|e| {
+                let id = ns_id(&e.value.get("type").and_then(Node::text)?.to_ascii_lowercase())?;
+                let dur = e.value.get("duration").and_then(Node::as_i64).unwrap_or(600);
+                let amp = e.value.get("amplifier").and_then(Node::as_i64).unwrap_or(0).clamp(0, 255);
+                let icon = e.value.get("icon").and_then(Node::as_bool).unwrap_or(true);
+                Some(format!("{{id:{id},amplifier:{amp}b,duration:{dur},show_particles:1b,show_icon:{}b,ambient:0b}}", b1(icon)))
+            })
+            .collect();
+        if !effects.is_empty() {
+            out.push(format!("active_effects:[{}]", effects.join(",")));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1219,7 +1623,7 @@ mod tests {
     #[test]
     fn wolf_flags_and_options_are_saved() {
         let (mut w, s) = setup("wolf");
-        let r = cmd(&mut w, &s, "npc wolf -s -a --collar red --variant ashen");
+        let r = cmd(&mut w, &s, "npc wolf -s -a -i --collar red --variant ashen");
         assert!(r.iter().any(|l| l == "&a&eBob&a's wolf sitting set to &etrue&a."), "{r:?}");
         assert!(r.iter().any(|l| l == "&a&eBob&a's wolf collar set to &ered&a."), "{r:?}");
         assert!(r.last().unwrap().contains("does not act on it"), "{r:?}");
@@ -1371,5 +1775,129 @@ mod tests {
         cmd(&mut w, &s, "npc villager --level 3 --profession farmer --type snow");
         let nbt = live_nbt(w.saves.get(0).unwrap(), "minecraft:villager");
         assert_eq!(nbt, vec!["VillagerData:{level:3,type:\"minecraft:snow\",profession:\"minecraft:farmer\"}".to_owned()]);
+    }
+
+    fn nbt(w: &World, kind: &str) -> Vec<String> {
+        live_nbt(w.saves.get(0).unwrap(), kind)
+    }
+
+    #[test]
+    fn tameable_variants_reach_the_entity() {
+        let (mut w, s) = setup("wolf");
+        let r = cmd(&mut w, &s, "npc wolf -s -a --collar red --variant ashen");
+        assert!(!r.iter().any(|l| l.contains("does not act")), "{r:?}");
+        assert_eq!(nbt(&w, "minecraft:wolf"), ["Sitting:1b", "AngerTime:2147483647", "CollarColor:14b", "variant:\"minecraft:ashen\""]);
+        let r = cmd(&mut w, &s, "npc wolf -i");
+        assert!(r.iter().any(|l| l.contains("does not act")), "interested is synched only: {r:?}");
+        let (mut w, s) = setup("cat");
+        cmd(&mut w, &s, "npc cat -s --type siamese --ccolor blue");
+        assert_eq!(nbt(&w, "minecraft:cat"), ["variant:\"minecraft:siamese\"", "CollarColor:11b", "Sitting:1b"]);
+        let (mut w, s) = setup("parrot");
+        cmd(&mut w, &s, "npc parrot --variant gray");
+        assert_eq!(nbt(&w, "minecraft:parrot"), ["Variant:4"]);
+    }
+
+    #[test]
+    fn horse_llama_rabbit_fox_and_friends() {
+        let (mut w, s) = setup("horse");
+        cmd(&mut w, &s, "npc horse --color black --style white_dots -t");
+        assert_eq!(nbt(&w, "minecraft:horse"), [format!("Variant:{}", 4 | (3 << 8)), "Tame:1b".to_owned()]);
+        let (mut w, s) = setup("llama");
+        cmd(&mut w, &s, "npc llama --color gray --strength 4");
+        assert_eq!(nbt(&w, "minecraft:llama"), ["Variant:3", "Strength:4"]);
+        let (mut w, s) = setup("rabbit");
+        cmd(&mut w, &s, "npc rabbittype the_killer_bunny");
+        assert_eq!(nbt(&w, "minecraft:rabbit"), ["RabbitType:99"]);
+        let (mut w, s) = setup("fox");
+        cmd(&mut w, &s, "npc fox --type snow --sleeping true --crouching false");
+        assert_eq!(nbt(&w, "minecraft:fox"), ["Type:\"snow\"", "Sleeping:1b", "Crouching:0b"]);
+        let (mut w, s) = setup("tropical_fish");
+        cmd(&mut w, &s, "npc tropicalfish --body red --pattern flopper --patterncolor blue");
+        assert_eq!(nbt(&w, "minecraft:tropical_fish"), [format!("Variant:{}", 256 | (14 << 16) | (11 << 24))]);
+        let (mut w, s) = setup("goat");
+        cmd(&mut w, &s, "npc goat -n");
+        assert_eq!(nbt(&w, "minecraft:goat"), ["HasLeftHorn:0b", "HasRightHorn:0b"]);
+        let (mut w, s) = setup("bee");
+        cmd(&mut w, &s, "npc bee -s --anger 40");
+        assert_eq!(nbt(&w, "minecraft:bee"), ["HasStung:1b", "AngerTime:40"]);
+        let (mut w, s) = setup("shulker");
+        cmd(&mut w, &s, "npc shulker --peek 50 --color lime");
+        assert_eq!(nbt(&w, "minecraft:shulker"), ["Peek:50b", "Color:5b"]);
+    }
+
+    #[test]
+    fn display_frame_and_cloud_data() {
+        let (mut w, s) = setup("item_display");
+        cmd(&mut w, &s, "npc display --billboard center --brightness 15,7 --scale 2,2,2 --viewrange 3 --interpolationduration 20");
+        cmd(&mut w, &s, "npc itemdisplay --transform gui");
+        assert_eq!(
+            nbt(&w, "minecraft:item_display"),
+            [
+                "billboard:\"center\"",
+                "brightness:{block:15,sky:7}",
+                "interpolation_duration:20",
+                "view_range:3f",
+                "transformation:{translation:[0f,0f,0f],left_rotation:[0f,0f,0f,1f],scale:[2f,2f,2f],right_rotation:[0f,0f,0f,1f]}",
+                "item_display:\"gui\""
+            ]
+        );
+        let (mut w, s) = setup("item_frame");
+        cmd(&mut w, &s, "npc itemframe --visible false --fixed true --rotation 3 --face east");
+        assert_eq!(nbt(&w, "minecraft:item_frame"), ["Invisible:1b", "Fixed:1b", "ItemRotation:3b", "Facing:5b"]);
+        let (mut w, s) = setup("area_effect_cloud");
+        cmd(&mut w, &s, "npc areaeffectcloud --radius 2.5 --duration 100 --radius_per_tick -0.5");
+        assert_eq!(nbt(&w, "minecraft:area_effect_cloud"), ["Radius:2.5f", "Duration:100", "RadiusPerTick:-0.5f"]);
+        let (mut w, s) = setup("minecart");
+        cmd(&mut w, &s, "npc minecart --offset 9");
+        assert_eq!(nbt(&w, "minecraft:minecart"), ["DisplayOffset:9"]);
+    }
+
+    #[test]
+    fn attributes_hitbox_and_potions_reach_any_mob() {
+        let (mut w, s) = setup("zombie");
+        cmd(&mut w, &s, "npc attribute GENERIC_MAX_HEALTH 40");
+        cmd(&mut w, &s, "npc hitbox --scale 2");
+        cmd(&mut w, &s, "npc potioneffect add --type speed --duration 100 --amplifier 1 --icon false");
+        assert_eq!(
+            nbt(&w, "minecraft:zombie"),
+            [
+                "attributes:[{id:\"minecraft:max_health\",base:40.0d},{id:\"minecraft:scale\",base:2.0d}]",
+                "active_effects:[{id:\"minecraft:speed\",amplifier:1b,duration:100,show_particles:1b,show_icon:0b,ambient:0b}]"
+            ]
+        );
+    }
+
+    #[test]
+    fn mannequin_description_and_flags() {
+        let (mut w, s) = setup("player");
+        cmd(&mut w, &s, "npc mannequin --hide_description false --immovable false --main_hand left");
+        let cfg = w.cfg.clone();
+        let npc = w.saves.get(0).unwrap();
+        let snbt = crate::horizon_citizens_core::spawn::npc_snbt(npc, 1, &npc.location().unwrap(), &cfg);
+        assert!(snbt.contains("immovable:0b") && snbt.contains("hide_description:0b") && snbt.contains("main_hand:\"left\""), "{snbt}");
+    }
+
+    #[test]
+    fn general_flags_show_in_the_entity_and_its_team() {
+        let (mut w, s) = setup("wolf");
+        cmd(&mut w, &s, "npc sitting true");
+        cmd(&mut w, &s, "npc pickupitems true");
+        cmd(&mut w, &s, "npc knockback false");
+        assert_eq!(
+            nbt(&w, "minecraft:wolf"),
+            ["Sitting:1b", "CanPickUpLoot:1b", "attributes:[{id:\"minecraft:knockback_resistance\",base:1.0d}]"]
+        );
+        assert_eq!(w.saves.get(0).unwrap().team_key(), None);
+        let r = cmd(&mut w, &s, "npc collidable false");
+        assert!(!r.iter().any(|l| l.contains("does not act")), "{r:?}");
+        assert_eq!(w.saves.get(0).unwrap().team_key().as_deref(), Some("nocollide"));
+    }
+
+    #[test]
+    fn synched_only_states_say_so() {
+        let (mut w, s) = setup("allay");
+        let r = cmd(&mut w, &s, "npc allay -d");
+        assert!(r.last().unwrap().contains("does not act on it"), "{r:?}");
+        assert!(nbt(&w, "minecraft:allay").is_empty());
     }
 }

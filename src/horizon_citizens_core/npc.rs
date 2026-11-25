@@ -110,10 +110,23 @@ pub struct NpcCommand {
     /// `cost` and `experienceCost`: -1 when unset (Citizens' default).
     pub cost: f64,
     pub experience_cost: i64,
+    /// `itemCost`: the stacks the click takes from the player's inventory.
+    pub item_cost: Vec<CostItem>,
     /// `permissions` (Citizens' `perms`): the clicking player must hold every one.
     pub perms: Vec<String>,
     /// Position among the NPC's commands by id (the numeric key; the list form's index).
     pub id: i64,
+}
+
+/// One stack of a command's `itemCost` (a Bukkit-serialised `ItemStack`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CostItem {
+    /// Namespaced item id (`minecraft:diamond`).
+    pub id: String,
+    pub amount: i64,
+    /// What the missing-item message calls it: the meta's display name, else the type in lower case
+    /// with spaces (`Util.prettyEnum`).
+    pub name: String,
 }
 
 /// `executionmode` of the `commandtrait`.
@@ -251,6 +264,19 @@ fn stack_of(m: &Node) -> Option<(String, i64, Vec<String>)> {
         components.push(format!("\"minecraft:damage\":{d}"));
     }
     Some((item, count, components))
+}
+
+/// One `itemCost` entry (`type`, `amount`, optional `meta`); air and unreadable entries are dropped.
+fn cost_item(m: &Node) -> Option<CostItem> {
+    let (item, amount, _) = stack_of(m)?;
+    let name = m
+        .get("meta")
+        .and_then(Node::text)
+        .and_then(|meta| crate::horizon_citizens_core::items::decode_meta(&meta).ok())
+        .and_then(|meta| meta.display_name)
+        .unwrap_or_else(|| item.replace('_', " "));
+    let id = if item.contains(':') { item } else { format!("minecraft:{item}") };
+    Some(CostItem { id, amount, name })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -488,6 +514,14 @@ impl NpcData {
     }
 
     /// The scoreboard team colour (`traits.scoreboardtrait.color`, a `ChatColor` name).
+    /// The scoreboard team key the entity joins: its glow colour, else `nocollide` for a
+    /// `/npc collidable false` NPC (the team's collision rule is `never`).
+    pub fn team_key(&self) -> Option<String> {
+        self.team_color().or_else(|| {
+            (self.map.at(&["traits", "collidable", "enabled"]).and_then(Node::as_bool) == Some(false)).then(|| "nocollide".to_owned())
+        })
+    }
+
     pub fn team_color(&self) -> Option<String> {
         text_at(&self.map, &["traits", "scoreboardtrait", "color"])
     }
@@ -802,8 +836,8 @@ impl NpcData {
                     !(t.is_empty() || t == "null" || t.parse::<f64>().is_ok_and(|x| x <= 0.0))
                 }
             };
-            // Only what needs an economy or the NPC as a sender is still not run (cost, experienceCost, npc).
-            let unenforced = ["cost", "experienceCost", "npc"]
+            // Only what needs an economy or the NPC as a sender is still not run (cost, npc).
+            let unenforced = ["cost", "npc"]
                 .into_iter()
                 .find(|k| set(k))
                 .map(str::to_owned);
@@ -832,6 +866,10 @@ impl NpcData {
                 gn: m.get("gn").and_then(Node::as_i64).unwrap_or(-1),
                 cost: m.get("cost").and_then(Node::as_f64).unwrap_or(-1.0),
                 experience_cost: m.get("experienceCost").and_then(Node::as_i64).unwrap_or(-1),
+                item_cost: m
+                    .get("itemCost")
+                    .map(|v| v.items().iter().filter_map(cost_item).collect())
+                    .unwrap_or_default(),
                 perms,
                 id: 0,
             })
