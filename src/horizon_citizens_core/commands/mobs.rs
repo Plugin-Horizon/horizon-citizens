@@ -102,6 +102,12 @@ macro_rules! m {
 }
 
 const MOBS: &[Mob] = &[
+    Mob {
+        kinds: &["INTERACTION"],
+        opts: &[o("height", V::Num(NUM0.0, NUM0.1)), o("responsive", V::Bool), o("width", V::Num(NUM0.0, NUM0.1))],
+        live: true, ..m!("interaction", [], "interaction --height [height] --responsive [true|false] --width [width]")
+    },
+    Mob { kinds: &["SULFUR_CUBE"], ..m!("sulfurcube", [], "sulfurcube") },
     Mob { kinds: &["ALLAY"], flags: &[f('d', "dancing", true)], ..m!("allay", [], "allay (-d(ancing))") },
     Mob {
         kinds: &["AREA_EFFECT_CLOUD"],
@@ -242,7 +248,7 @@ const MOBS: &[Mob] = &[
         kinds: &["HORSE", "DONKEY", "MULE", "SKELETON_HORSE", "ZOMBIE_HORSE"],
         flags: &[f('c', "chest", true), f('b', "chest", false), f('t', "t", true)],
         opts: &[o("color", V::Any), o("type", V::Any), o("style", V::Any)],
-        live: true, ..m!("horse", [], "horse (--color color) (--type type) (--style style) (-cbt)")
+        live: true, ..m!("horse", ["donkey", "mule"], "horse (--color color) (--type type) (--style style) (-cbt)")
     },
     Mob { flags: &[f('h', "hand", true)], pos: &[o("item", V::Any)], ..m!("item", [], "item [item] (-h(and))") },
     Mob { kinds: &["ITEM_DISPLAY"], opts: &[o("transform", V::Any)], live: true, ..m!("itemdisplay", [], "itemdisplay --transform [transform]") },
@@ -282,7 +288,7 @@ const MOBS: &[Mob] = &[
         req: 1,
         ..m!("modelanimate", [], "modelanimate [start|stop|clear] (name) (speed)")
     },
-    Mob { kinds: &["MUSHROOM_COW", "MOOSHROOM"], opts: &[o("variant", V::Any)], live: true, ..m!("mushroomcow", [], "mushroomcow (--variant [variant])") },
+    Mob { kinds: &["MUSHROOM_COW", "MOOSHROOM"], opts: &[o("variant", V::Any)], live: true, ..m!("mushroomcow", ["mooshroom"], "mushroomcow (--variant [variant])") },
     Mob {
         kinds: &["OCELOT"],
         flags: &[f('s', "sitting", true), f('n', "sitting", false)],
@@ -371,7 +377,7 @@ const MOBS: &[Mob] = &[
     Mob {
         kinds: &["SNOWMAN", "SNOW_GOLEM"],
         flags: &[f('d', "derp", true), f('f', "form_snow", true)],
-        live: true, noeffect: &["form_snow"], ..m!("snowman", [], "snowman (-d[erp]) (-f[orm snow])")
+        live: true, noeffect: &["form_snow"], ..m!("snowman", ["snowgolem"], "snowman (-d[erp]) (-f[orm snow])")
     },
     Mob { kinds: &["EVOKER", "ILLUSIONER"], opts: &[o("spell", V::Any)], noeffect: &["spell"], ..m!("spellcaster", [], "spellcaster (--spell spell)") },
     Mob {
@@ -1277,6 +1283,18 @@ fn mob_nbt(npc: &NpcData, kind: &str, out: &mut Vec<String>) {
     let id_of = |n: &str, k: &str| ts(n, k).and_then(|s| ns_id(&s));
     let mut attrs: Vec<String> = Vec::new();
     match kind {
+        "minecraft:interaction" => {
+            let n = "interaction";
+            if let Some(v) = tnum(npc, n, "width") {
+                out.push(format!("width:{}", float_nbt(v)));
+            }
+            if let Some(v) = tnum(npc, n, "height") {
+                out.push(format!("height:{}", float_nbt(v)));
+            }
+            if let Some(v) = tbool(npc, n, "responsive") {
+                out.push(format!("response:{}b", u8::from(v)));
+            }
+        }
         "minecraft:area_effect_cloud" => {
             let n = "areaeffectcloud";
             if let Some(v) = tnum(npc, n, "radius") {

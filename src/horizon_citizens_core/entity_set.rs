@@ -35,6 +35,10 @@ pub enum EntitySet {
     MoveTo { target: [f64; 3], speed: f64 },
     /// `mob_stop`.
     StopNavigation,
+    /// `entity_set_no_physics` (`/npc nophysics`).
+    NoPhysics(bool),
+    /// `entity_set_velocity` (`/npc velocity`), blocks per tick.
+    Velocity([f64; 3]),
 }
 
 /// The poses `/npc warden` sets.
@@ -96,6 +100,9 @@ pub fn settings(npc: &NpcData, kind: &str) -> Vec<EntitySet> {
     }
     if let Some(b) = flag(npc, "targetable", "enabled") {
         out.push(EntitySet::Targetable(b));
+    }
+    if let Some(b) = flag(npc, "nophysics", "enabled") {
+        out.push(EntitySet::NoPhysics(b));
     }
     if let Some(b) = flag(npc, "leashable", "enabled") {
         out.push(EntitySet::Leashable(b));

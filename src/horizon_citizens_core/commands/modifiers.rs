@@ -53,6 +53,7 @@ const SIMPLE: &[Simple] = &[
     },
     flag("knockback", "now takes knockback", "no longer takes knockback", Some("explicit"), false, true),
     flag("leashable", "can now be leashed", "can no longer be leashed", None, false, false),
+    flag("nophysics", "will now ignore physics", "will no longer ignore physics", Some("explicit"), false, false),
     flag("passive", "no longer damages other entities", "now damages other entities", Some("set"), false, false),
     flag("pickupitems", "can now pick up items", "can no longer pick up items", Some("set"), false, true),
     flag("sitting", "is now sitting", "is no longer sitting", Some("explicit"), false, true),
@@ -66,7 +67,7 @@ const SIMPLE: &[Simple] = &[
 
 /// The sub-commands of this file.
 pub const NAMES: &[&str] = &[
-    "aggressive", "ai", "chunkload", "collidable", "knockback", "leashable", "passive", "pickupitems", "sitting", "swim",
+    "aggressive", "ai", "chunkload", "collidable", "knockback", "leashable", "nophysics", "passive", "pickupitems", "sitting", "swim",
     "targetable", "activationrange", "respawn", "scaledmaxhealth", "trackingrange", "playerlist", "skinlayers",
     "entitypose", "metadata",
 ];
@@ -119,7 +120,7 @@ fn saved_bool(w: &World, id: i32, path: &[&str]) -> Option<bool> {
 
 /// The settings that are set on the entity through host calls, right away.
 fn applied(name: &str) -> bool {
-    matches!(name, "leashable" | "targetable" | "trackingrange" | "activationrange")
+    matches!(name, "leashable" | "targetable" | "trackingrange" | "activationrange" | "nophysics")
 }
 
 fn finish_applied(w: &mut World, id: i32, out: Reply) -> Reply {

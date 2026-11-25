@@ -490,6 +490,12 @@ fn apply_entity_set(host: &mut dyn ServerHost, entity: u32, set: core::entity_se
                 let _ = m.move_to(host, target, speed);
             }
         }
+        EntitySet::NoPhysics(b) => {
+            let _ = e.set_no_physics(host, b);
+        }
+        EntitySet::Velocity(v) => {
+            let _ = e.set_velocity(host, v);
+        }
         EntitySet::StopNavigation => {
             if let Some(m) = host.mob(e) {
                 let _ = m.stop(host);
@@ -761,6 +767,12 @@ impl Citizens {
                     };
                     if !turned {
                         let _ = host.commands().run_command(&fallback);
+                    }
+                }
+                core::world::Op::RotateHead { entity, body_yaw, yaw, pitch } => {
+                    if let Some(e) = host.entity(entity) {
+                        let _ = e.set_rotation(host, body_yaw, pitch);
+                        let _ = e.set_head_yaw(host, yaw);
                     }
                 }
                 core::world::Op::Charge { player, levels, slots, money } => {

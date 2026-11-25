@@ -21,6 +21,8 @@ pub struct Saves {
     pub last_created_id: i32,
     /// In file order.
     pub npcs: Vec<NpcData>,
+    /// NPCs made with `create -t` (or `--temporaryduration`, `--registry`): they live until the server stops and are not written.
+    pub temporary: std::collections::BTreeSet<i32>,
 }
 
 impl Saves {
@@ -44,6 +46,7 @@ impl Saves {
             }
         }
         Ok(Saves {
+            temporary: Default::default(),
             doc,
             last_created_id,
             npcs,
@@ -63,6 +66,7 @@ impl Saves {
         root.set("last-created-npc-id", Node::int(-1));
         root.set("npc", Node::map());
         Saves {
+            temporary: Default::default(),
             doc: Document {
                 leading: vec![format!("# {HEADER}")],
                 root,
@@ -100,7 +104,7 @@ impl Saves {
         };
         let mut written: Vec<i32> = Vec::new();
         entries.retain_mut(|e| match e.key.trim().parse::<i32>() {
-            Ok(id) if e.value.is_map() => match self.npcs.iter().find(|n| n.id == id) {
+            Ok(id) if e.value.is_map() => match self.npcs.iter().find(|n| n.id == id && !self.temporary.contains(&n.id)) {
                 Some(n) => {
                     written.push(id);
                     e.value = n.map.clone();
@@ -111,7 +115,7 @@ impl Saves {
             _ => true,
         });
         for n in &self.npcs {
-            if !written.contains(&n.id) {
+            if !written.contains(&n.id) && !self.temporary.contains(&n.id) {
                 entries.push(Entry {
                     key: n.id.to_string(),
                     key_style: Style::Single,

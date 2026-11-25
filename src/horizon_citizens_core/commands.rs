@@ -72,6 +72,19 @@ const M_LOOKCLOSE_RANDOM_STOPPED: &str = "[[{0}]] will no longer randomly look a
 const M_LOOKCLOSE_RANGE_SET: &str = "[[{0}]]''s lookclose range set to [[{1}]] blocks.";
 const M_LOOKCLOSE_PITCH_SET: &str = "[[{0}]] will now randomly choose a pitch in the range [{1}].";
 const M_LOOKCLOSE_YAW_SET: &str = "[[{0}]] will now randomly choose a yaw in the range [{1}].";
+const M_LOOKCLOSE_FILTER_SET: &str = "The lookclose filter is now [[{0}]].";
+const M_LOOKCLOSE_DELAY_SET: &str = "[[{0}]]''s random look delay is now [[{1}]] ticks.";
+const M_LOOKCLOSE_REALISTIC_SET: &str = "[[{0}]] will now look realistically.";
+const M_LOOKCLOSE_REALISTIC_UNSET: &str = "[[{0}]] will no longer look realistically.";
+/// The boolean options of `/npc lookclose`: option, saved key, and the two replies.
+const LOOKCLOSE_BOOLS: [(&str, &str, &str, &str); 6] = [
+    ("perplayer", "perplayer", "[[{0}]] will now look at each player on its own.", "[[{0}]] will no longer look at each player on its own."),
+    ("headonly", "headonly", "[[{0}]] will now only turn its head.", "[[{0}]] will now turn its body too."),
+    ("linkedbody", "linkedbody", "[[{0}]]''s body will now follow its head.", "[[{0}]]''s body will no longer follow its head."),
+    ("randomswitchtargets", "randomSwitchTargets", "[[{0}]] will now randomly switch targets.", "[[{0}]] will no longer randomly switch targets."),
+    ("targetnpcs", "targetnpcs", "[[{0}]] will now look at NPCs too.", "[[{0}]] will no longer look at NPCs."),
+    ("disablewhennavigating", "disablewhilenavigating", "[[{0}]] will not look around while it walks.", "[[{0}]] will look around while it walks."),
+];
 const M_LOOKCLOSE_RANGE_ERROR: &str = "Invalid range [[{0}]]. Use the format `min,max`.";
 const M_NAMEPLATE_SET: &str = "Nameplate visibility set to [[{0}]].";
 const M_OWNER: &str = "[[{0}]]''s owner is [[{1}]].";
@@ -127,6 +140,9 @@ const M_CMD_REMEMBER_UNSET: &str = "Commands will no longer remember the last on
 const M_CMD_PERMS_SET: &str = "Temporary permissions set to [[{0}]] for [[{1}]] ticks.";
 const M_MONEY_WITHDRAWN: &str = "Withdrew [[{0}]] from your account.";
 const M_CREATE_CANCELLED: &str = "Could not create the NPC. Reason: {0}";
+const M_MUST_BE_PLAYER_NPC: &str = "The NPC must be a player type.";
+const M_FISH_NEEDS_ROD: &str = "NPC must hold a fishing rod";
+const M_TRAIT_DATA_CLEARED: &str = "Cleared the saved data of the traits [[{0}]].";
 const M_CMD_NONE: &str = "No commands have been added.";
 const M_CMD_LEFT: &str = "Commands to run on [[left click]]:";
 const M_CMD_RIGHT: &str = "Commands to run on [[right click]]:";
@@ -247,6 +263,10 @@ const CMDS: &[Cmd] = &[
     cmd("anchor", &[], "anchor (--save [name]|--assume [name]|--remove [name]) (-a) (-c)", 1, Some(3), "citizens.npc.anchor"),
     cmd("pose", &[], "pose (--save [name] (-d) | --mirror [name] (-d) | --assume [name] | --remove [name] | --default [name]) (--yaw yaw) (--pitch pitch) (-a)", 1, Some(2), "citizens.npc.pose"),
     cmd("sound", &[], "sound (--death [death sound|d]) (--ambient [ambient sound|d]) (--hurt [hurt sound|d]) (-n(one)/-s(ilent)) (-d(efault))", 1, Some(1), "citizens.npc.sound"),
+    cmd("fish", &[], "fish [cast_out|reel_in] [location]", 2, Some(3), "citizens.npc.fish"),
+    cmd("nophysics", &[], "nophysics (--explicit true|false)", 1, Some(2), "citizens.npc.nophysics"),
+    cmd("target", &[], "target [name|UUID] (-a[ggressive]) (-c[ancel])", 1, Some(2), "citizens.npc.target"),
+    cmd("velocity", &["vel"], "velocity [x] [y] [z]", 4, Some(4), "citizens.npc.velocity"),
     cmd("hurt", &[], "hurt [damage]", 2, Some(2), "citizens.npc.hurt"),
     cmd("playsound", &[], "playsound [sound] (category) (volume) (pitch) (--to [player]) (--at x:y:z:world)", 2, Some(5), "citizens.npc.playsound"),
     cmd("wander", &[], "wander (add x y z world) | (worldguardregion [region]) | (xyrange [xrange] [yrange])", 1, Some(6), "citizens.npc.wander"),
@@ -341,8 +361,8 @@ const CMDS: &[Cmd] = &[
     cmd("path", &[], "path [list|add|remove <point>|clear]", 1, None, "citizens.npc.edit.path"),
     cmd("aggressive", &[], "aggressive [true|false] (-t(emporary))", 2, Some(2), "citizens.npc.aggressive"),
     cmd("ai", &[], "ai (true|false)", 1, Some(2), "citizens.npc.ai"),
-    cmd("chunkload", &[], "chunkload (-t(emporary))", 1, Some(1), "citizens.npc.chunkload"),
-    cmd("collidable", &[], "collidable --fluids [true|false]", 1, Some(2), "citizens.npc.collidable"),
+    cmd("chunkload", &["cload"], "chunkload (-t(emporary))", 1, Some(1), "citizens.npc.chunkload"),
+    cmd("collidable", &["pushable"], "collidable --fluids [true|false]", 1, Some(2), "citizens.npc.collidable"),
     cmd("knockback", &[], "knockback (--explicit true|false)", 1, Some(2), "citizens.npc.knockback"),
     cmd("leashable", &[], "leashable", 1, Some(2), "citizens.npc.leashable"),
     cmd("mount", &[], "mount (--onnpc <npc id|uuid>) (-d(ismount)) (-c(ancel))", 1, Some(1), "citizens.npc.mount"),
@@ -375,7 +395,7 @@ const CMDS: &[Cmd] = &[
 ];
 
 /// Citizens modifiers this port does not have (they answer "not supported", not "Too many arguments").
-const CITIZENS_ONLY: &[&str] = &["cload", "pushable", "fish", "nophysics", "target", "velocity", "vel", "donkey", "mule"];
+const CITIZENS_ONLY: &[&str] = &[];
 
 fn find_cmd(sub: &str) -> Option<&'static Cmd> {
     let sub = sub.to_ascii_lowercase();
@@ -1594,6 +1614,9 @@ fn npc(w: &mut World, sender: &Sender, rest: &str) -> Res {
         "create" => create(w, sender, &args),
         "age" => age(w, sender, &args),
         "follow" => follow(w, sender, &args),
+        "fish" => fish(w, sender, &args),
+        "target" => target_cmd(w, sender, &args),
+        "velocity" => velocity(w, sender, &args),
         "speed" => speed(w, sender, &args),
         "pathto" => pathto(w, sender, &args),
         "rotate" => rotate(w, sender, &args),
@@ -1723,7 +1746,7 @@ const ENTITY_TYPES: &[&str] = &[
     "phantom", "pig", "piglin", "piglin_brute", "pillager", "player", "polar_bear", "pufferfish", "rabbit",
     "ravager", "salmon", "sheep", "shulker", "shulker_bullet", "silverfish", "skeleton", "skeleton_horse",
     "slime", "small_fireball", "sniffer", "snow_golem", "snowball", "spawner_minecart", "spectral_arrow",
-    "spider", "splash_potion", "spruce_boat", "spruce_chest_boat", "squid", "stray", "strider", "tadpole",
+    "spider", "splash_potion", "spruce_boat", "spruce_chest_boat", "squid", "stray", "strider", "sulfur_cube", "tadpole",
     "text_display", "tnt", "tnt_minecart", "trader_llama", "trident", "tropical_fish", "turtle", "vex",
     "villager", "vindicator", "wandering_trader", "warden", "wind_charge", "witch", "wither",
     "wither_skeleton", "wither_skull", "wolf", "zoglin", "zombie", "zombie_horse", "zombie_nautilus",
@@ -1784,16 +1807,24 @@ fn create(w: &mut World, sender: &Sender, args: &Args) -> Res {
     {
         return Err(err(w, M_NO_PERM, &[]));
     }
-    for (flag, what) in [('b', "-b"), ('p', "-p"), ('t', "-t")] {
+    // `-p` (a packet-only NPC) needs an entity the server does not simulate; `--model` is the ModelEngine plugin's.
+    for (flag, what) in [('p', "-p")] {
         if args.has(flag) {
             return Err(err(w, M_UNSUPPORTED, &[what]));
         }
     }
-    for what in ["item", "model", "registry", "temporaryduration"] {
-        if args.has_value(what) {
-            return Err(err(w, M_UNSUPPORTED, &[&format!("--{what}")]));
-        }
+    if args.has_value("model") {
+        return Err(err(w, M_UNSUPPORTED, &["--model"]));
     }
+    let expire = match args.value("temporaryduration") {
+        Some(d) => Some(
+            crate::horizon_citizens_core::config::duration_ticks(d)
+                .or_else(|| d.parse::<u32>().ok())
+                .ok_or_else(|| err(w, M_INVALID_NUMBER, &[]))?,
+        ),
+        None => None,
+    };
+    let temporary = args.has('t') || expire.is_some() || args.has_value("registry");
     let mut loc = match args.value("at") {
         Some(at) => parse_at(w, at, sender).ok_or_else(|| err(w, M_INVALID_LOCATION, &[]))?,
         None => here(w, sender)?,
@@ -1813,6 +1844,8 @@ fn create(w: &mut World, sender: &Sender, args: &Args) -> Res {
     });
     let silent = args.has('s');
     let spawned = !args.has('u');
+    let baby = args.has('b');
+    let item_name = args.value("item").map(|i| i.trim_start_matches("minecraft:").to_ascii_lowercase());
     let mut wanted: Vec<String> = Vec::new();
     if let Some(list) = args.value("trait") {
         for t in list.split(',').map(|t| t.trim().to_ascii_lowercase()).filter(|t| !t.is_empty()) {
@@ -1843,10 +1876,23 @@ fn create(w: &mut World, sender: &Sender, args: &Args) -> Res {
         for t in &wanted {
             npc.add_trait_name(t);
         }
+        if baby {
+            npc.map.put(&["traits", "age", "age"], Node::int(-24000));
+            npc.add_trait_name("age");
+        }
+        if let Some(i) = &item_name {
+            npc.map.put(&["traits", "item", "item"], Node::str(i));
+        }
     });
+    if temporary {
+        w.make_temporary(id, expire.map(u64::from));
+        if let Some(r) = args.value("registry") {
+            out.extend(ok(w, "An in-memory registry has been created named [[{0}]].", &[r]));
+        }
+    }
     w.select(skey(sender), id);
     let shown = name_at(w, id);
-    out.extend(ok(w, "Created [[{0}]] (ID [[{1}]]).", &[&shown, &id.to_string()]));
+    out.extend(ok(w, if baby { "Created [[{0}]] (ID [[{1}]]) as a baby." } else { "Created [[{0}]] (ID [[{1}]])." }, &[&shown, &id.to_string()]));
     // `--templates a:b,c`: each is applied after the NPC exists (`/template apply`).
     if let Some(list) = args.value("templates") {
         for reference in list.split(',').map(str::trim).filter(|t| !t.is_empty()) {
@@ -2397,23 +2443,6 @@ fn parse_range(s: &str) -> Option<(f64, f64)> {
 
 fn lookclose(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let id = target(w, sender)?;
-    for what in [
-        "filter",
-        "perplayer",
-        "randomswitchtargets",
-        "disablewhennavigating",
-        "targetnpcs",
-        "headonly",
-        "linkedbody",
-        "randomlookdelay",
-    ] {
-        if args.has_value(what) {
-            return Err(err(w, M_UNSUPPORTED, &[&format!("--{what}")]));
-        }
-    }
-    if args.has('r') {
-        return Err(err(w, M_UNSUPPORTED, &["-r"]));
-    }
     let name = name_at(w, id);
     let random = args.value("randomlook").or_else(|| args.value("rlook"));
     let range = match args.value("range") {
@@ -2425,6 +2454,7 @@ fn lookclose(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let mut bad: Option<String> = None;
     let mut toggle = true;
     let mut ranges: Vec<(bool, f64, f64)> = Vec::new();
+    let mut out_delay: Option<u32> = None;
     for (key, yaw, msg) in [("randompitchrange", false, M_LOOKCLOSE_PITCH_SET), ("randomyawrange", true, M_LOOKCLOSE_YAW_SET)] {
         if let Some(v) = args.value(key) {
             match parse_range(v) {
@@ -2440,6 +2470,15 @@ fn lookclose(w: &mut World, sender: &Sender, args: &Args) -> Res {
             }
         }
     }
+    let delay_ticks = match args.value("randomlookdelay") {
+        Some(d) => Some(
+            crate::horizon_citizens_core::config::duration_ticks(d)
+                .or_else(|| d.parse::<u32>().ok())
+                .ok_or_else(|| err(w, M_INVALID_NUMBER, &[]))?
+                .max(1),
+        ),
+        None => None,
+    };
     let npc = npc_mut(w, id)?;
     let mut front: Vec<(&str, Vec<String>)> = Vec::new();
     if let Some(v) = random {
@@ -2451,6 +2490,31 @@ fn lookclose(w: &mut World, sender: &Sender, args: &Args) -> Res {
     if let Some(r) = range {
         npc.set_look_range(r);
         front.push((M_LOOKCLOSE_RANGE_SET, vec![name.clone(), jnum(r)]));
+        toggle = false;
+    }
+    // The other options, in the order Citizens checks them: saved under `traits.lookclose.<key>` as it saves them.
+    for (opt, key, on_msg, off_msg) in LOOKCLOSE_BOOLS {
+        if let Some(v) = args.value(opt) {
+            let on = v.eq_ignore_ascii_case("true");
+            npc.map.put(&["traits", "lookclose", key], Node::bool(on));
+            front.push((if on { on_msg } else { off_msg }, vec![name.clone()]));
+            toggle = false;
+        }
+    }
+    if let Some(f) = args.value("filter") {
+        npc.map.put(&["traits", "lookclose", "filter"], Node::str(f));
+        front.push((M_LOOKCLOSE_FILTER_SET, vec![f.to_owned()]));
+        toggle = false;
+    }
+    if let Some(t) = delay_ticks {
+        npc.map.put(&["traits", "lookclose", "randomLookDelay"], Node::int(i64::from(t)));
+        out_delay = Some(t);
+        toggle = false;
+    }
+    if args.has('r') {
+        let now = npc.map.at(&["traits", "lookclose", "realisticlooking"]).and_then(Node::as_bool).unwrap_or(false);
+        npc.map.put(&["traits", "lookclose", "realisticlooking"], Node::bool(!now));
+        front.push((if now { M_LOOKCLOSE_REALISTIC_UNSET } else { M_LOOKCLOSE_REALISTIC_SET }, vec![name.clone()]));
         toggle = false;
     }
     for (yaw, min, max) in ranges {
@@ -2467,6 +2531,9 @@ fn lookclose(w: &mut World, sender: &Sender, args: &Args) -> Res {
     for (t, a) in front {
         let a: Vec<&str> = a.iter().map(String::as_str).collect();
         out.extend(ok(w, t, &a));
+    }
+    if let Some(t) = out_delay {
+        out.extend(ok(w, M_LOOKCLOSE_DELAY_SET, &[&name, &t.to_string()]));
     }
     if let Some(b) = bad {
         out.extend(err(w, M_LOOKCLOSE_RANGE_ERROR, &[&b]));
@@ -2747,6 +2814,65 @@ fn online_player<'a>(w: &'a World, raw: &str) -> Option<&'a crate::horizon_citiz
     w.online
         .iter()
         .find(|p| Some(p.uuid) == uuid || p.name.eq_ignore_ascii_case(raw))
+}
+
+/// `/npc fish [cast_out|reel_in] [location]`: a player NPC with a fishing rod in hand casts a hook. The mannequin that
+/// stands for a player NPC cannot own a fishing hook (ENGINE_NEEDS `entity_launch_fishing_hook`), so only the checks run.
+fn fish(w: &mut World, sender: &Sender, args: &Args) -> Res {
+    let id = target(w, sender)?;
+    let kind = w.saves.get(id).map(NpcData::kind).unwrap_or_default();
+    if !kind.eq_ignore_ascii_case("PLAYER") {
+        return Err(err(w, M_MUST_BE_PLAYER_NPC, &[]));
+    }
+    match args.words.first().map(|c| c.to_ascii_lowercase()).as_deref() {
+        Some("cast_out") => {
+            let holds_rod = w.saves.get(id).is_some_and(|n| n.equipment().iter().any(|e| e.slot == "mainhand" && e.item == "fishing_rod"));
+            if !holds_rod {
+                return Err(err(w, M_FISH_NEEDS_ROD, &[]));
+            }
+            if args.words.len() < 2 {
+                return Err(usage_of(w, "fish"));
+            }
+            Err(err(w, M_UNSUPPORTED, &["fish cast_out"]))
+        }
+        Some("reel_in") => Ok(Vec::new()),
+        _ => Err(usage_of(w, "fish")),
+    }
+}
+
+/// `/npc velocity [x] [y] [z]`: gives the NPC's entity that motion, in blocks per tick.
+fn velocity(w: &mut World, sender: &Sender, args: &Args) -> Res {
+    let id = target(w, sender)?;
+    let mut v = [0.0; 3];
+    for (i, word) in args.words.iter().take(3).enumerate() {
+        v[i] = word.parse().ok().filter(|x: &f64| x.is_finite()).ok_or_else(|| err(w, M_INVALID_NUMBER, &[]))?;
+    }
+    if args.words.len() < 3 {
+        return Err(usage_of(w, "velocity"));
+    }
+    if let Some(entity) = w.entity_of(id) {
+        w.push_op(crate::horizon_citizens_core::world::Op::Entity { entity, set: crate::horizon_citizens_core::entity_set::EntitySet::Velocity(v) });
+    }
+    Ok(Vec::new())
+}
+
+/// `/npc target [name|UUID] (-a) (-c)`: the NPC walks to a player (the sender without a name) until told to stop with `-c`;
+/// `-a` makes it hit the player once it is there.
+fn target_cmd(w: &mut World, sender: &Sender, args: &Args) -> Res {
+    let id = target(w, sender)?;
+    if args.has('c') {
+        w.clear_target(id);
+        return Ok(Vec::new());
+    }
+    let who = match args.words.first() {
+        Some(raw) => crate::horizon_citizens_core::ids::parse_uuid(raw)
+            .filter(|u| w.online.iter().any(|p| p.uuid == *u))
+            .or_else(|| online_player(w, raw).map(|p| p.uuid)),
+        None => sender.uuid,
+    };
+    let Some(who) = who else { return Err(usage_of(w, "target")) };
+    w.set_target(id, who, args.has('a'));
+    Ok(Vec::new())
 }
 
 fn follow(w: &mut World, sender: &Sender, args: &Args) -> Res {
@@ -4527,8 +4653,104 @@ fn path(w: &mut World, sender: &Sender, tail: &str) -> Res {
 /// Traits `/trait` and `create --trait` know. Citizens asks its trait factory; these are the ones
 /// this port (or a mod built on it, Sentinel) reads from `traitnames`. The NPC's own basics
 /// (`type`, `location`, `spawned`, `owner`, the skin) are not listed: removing them would break it.
-pub const KNOWN_TRAITS: &[&str] =
-    &["sentinel", "lookclose", "commandtrait", "hologramtrait", "waypoints", "age", "gravity", "gamemodetrait"];
+pub const KNOWN_TRAITS: &[&str] = &[
+    "age",
+    "allaytrait",
+    "anchors",
+    "areaeffectcloudtrait",
+    "armadillotrait",
+    "armorstandtrait",
+    "attributetrait",
+    "axolotltrait",
+    "battrait",
+    "beetrait",
+    "behavior",
+    "boattrait",
+    "bossbar",
+    "boundingbox",
+    "cameltrait",
+    "cattrait",
+    "chickentrait",
+    "chunktickettrait",
+    "clickredirecttrait",
+    "commandtrait",
+    "controllable",
+    "coppergolemtrait",
+    "cowtrait",
+    "disguise",
+    "displaytrait",
+    "dropstrait",
+    "endercrystaltrait",
+    "enderdragontrait",
+    "endermantrait",
+    "entitypose",
+    "followtrait",
+    "forcefieldtrait",
+    "foxtrait",
+    "frogtrait",
+    "gamemodetrait",
+    "goattrait",
+    "gravity",
+    "hologramtrait",
+    "hometrait",
+    "horsemodifiers",
+    "interactiontrait",
+    "itemdisplaytrait",
+    "itemframe",
+    "leashedtrait",
+    "llamatrait",
+    "location",
+    "lookclose",
+    "mannequintrait",
+    "mirrortrait",
+    "mounttrait",
+    "mushroomcowtrait",
+    "ocelotmodifiers",
+    "packet",
+    "paintingtrait",
+    "pandatrait",
+    "parrottrait",
+    "pausepathfinding",
+    "phantomtrait",
+    "piglintrait",
+    "pigtrait",
+    "polarbeartrait",
+    "poses",
+    "potioneffects",
+    "powered",
+    "profession",
+    "pufferfishtrait",
+    "rabbittype",
+    "rotationtrait",
+    "saddle",
+    "scaledhealthtrait",
+    "scoreboardtrait",
+    "sentinel",
+    "sheeptrait",
+    "shop",
+    "shulkertrait",
+    "sittrait",
+    "skinlayers",
+    "skintrait",
+    "sleeptrait",
+    "slimesize",
+    "sneak",
+    "sniffertrait",
+    "snowmantrait",
+    "spellcastertrait",
+    "sulfurcubetrait",
+    "targetable",
+    "text",
+    "textdisplaytrait",
+    "tropicalfishtrait",
+    "vextrait",
+    "villagertrait",
+    "wardentrait",
+    "waypoints",
+    "withertrait",
+    "wolfmodifiers",
+    "woolcolor",
+];
 
 fn trait_cmd(w: &mut World, sender: &Sender, rest: &str) -> Res {
     let id = target(w, sender)?;
@@ -4548,7 +4770,23 @@ fn trait_cmd(w: &mut World, sender: &Sender, rest: &str) -> Res {
             }
             return Ok(out);
         }
-        "clearsaves" => return Err(err(w, M_UNSUPPORTED, &["trait clearsaves"])),
+        "clearsaves" => {
+            // `NPCDataStore.clearTraitData`: the named traits' saved data goes from every NPC.
+            if !exact(sender, w.cfg.command_level, "citizens.npc.trait.clearsaves") {
+                return Err(err(w, M_NO_PERM, &[]));
+            }
+            let names: Vec<String> = tail.split(',').map(|t| t.trim().to_ascii_lowercase()).filter(|t| !t.is_empty()).collect();
+            if names.is_empty() {
+                return Err(trait_usage(w, "clearsaves [trait name]"));
+            }
+            for n in w.saves.npcs.iter_mut() {
+                for t in &names {
+                    n.remove_trait(t);
+                }
+            }
+            w.mark_dirty();
+            return Ok(ok(w, M_TRAIT_DATA_CLEARED, &[&names.join(", ")]));
+        }
         _ => ('t', rest),
     };
     let level = w.cfg.command_level;

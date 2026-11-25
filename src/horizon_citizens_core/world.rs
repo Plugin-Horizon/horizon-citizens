@@ -114,6 +114,8 @@ pub enum Op {
     /// Turn an NPC's entity (`Host::set_entity_rotation`: head and body, no `rotate` command);
     /// `fallback` is the console command for when the host refuses.
     Rotate { dimension: String, entity: u32, yaw: f32, pitch: f32, fallback: String },
+    /// `lookclose --headonly`: the head turns to `yaw` and `pitch`, the body keeps `body_yaw`.
+    RotateHead { entity: u32, body_yaw: f32, yaw: f32, pitch: f32 },
     /// A command's price, paid: take `levels` experience levels and set each slot to the count it
     /// keeps (0 empties it). Sent only after every check of the command passed.
     Charge { player: u128, levels: i32, slots: Vec<(u32, u32)>, money: f64 },
@@ -485,6 +487,9 @@ pub struct World {
     pub money_fmt: Option<fn(f64) -> String>,
     /// Takes the cost of creating an NPC from a player's account (the glue sets it with the economy): the formatted amount,
     /// or the economy's reason it refused.
+    pub targets: BTreeMap<i32, (u128, bool)>,
+    /// Temporary NPCs that go at a tick (`create --temporaryduration`).
+    temp_expire: Vec<(u64, i32)>,
     pub create_charge: Option<fn(u128, f64) -> Result<String, String>>,
     /// The behavior trees of the NPCs that have the `behavior` trait.
     behaviors: BTreeMap<i32, behave::BehaviorRun>,
@@ -567,6 +572,8 @@ impl World {
             economy: false,
             money_fmt: None,
             create_charge: None,
+            targets: BTreeMap::new(),
+            temp_expire: Vec::new(),
             behaviors: BTreeMap::new(),
             signals: crate::horizon_citizens_core::behavior::Signals::default(),
             live_stats: HashMap::new(),
@@ -1231,6 +1238,25 @@ impl World {
         }
     }
 
+    /// `create -t`: the NPC is not saved; with `ticks` it is removed then (if it is still temporary).
+    pub fn make_temporary(&mut self, id: i32, ticks: Option<u64>) {
+        self.saves.temporary.insert(id);
+        if let Some(t) = ticks {
+            self.temp_expire.push((self.tick + t, id));
+        }
+    }
+
+    /// `/npc target`: the NPC walks to this player until cleared; `aggressive` also hits them there.
+    pub fn set_target(&mut self, id: i32, who: u128, aggressive: bool) {
+        self.targets.insert(id, (who, aggressive));
+        self.cancel_follow_walk(id);
+    }
+
+    pub fn clear_target(&mut self, id: i32) {
+        self.targets.remove(&id);
+        self.cancel_follow_walk(id);
+    }
+
     /// The permissions the commands of the NPC behind `entity` ask (and the `ignoreerrors` nodes), for the
     /// host to look up before a click: see `held_perms`.
     pub fn command_perms(&self, entity: u32) -> Vec<String> {
@@ -1579,6 +1605,15 @@ impl World {
             Some(entity) => Op::Rotate { dimension: live.dimension.clone(), entity, yaw, pitch, fallback },
             None => Op::Console(fallback),
         });
+    }
+
+    /// Turns only the head (`lookclose --headonly`): the body stays where it faces.
+    pub fn face_head(&mut self, id: i32, yaw: f32, pitch: f32) {
+        let Some(live) = self.live.get_mut(&id) else { return };
+        let Some(entity) = live.entity else { return };
+        live.look = Some((yaw, pitch));
+        let body_yaw = live.at.as_ref().map_or(yaw, |a| a.body_yaw);
+        self.ops.push(Op::RotateHead { entity, body_yaw, yaw, pitch });
     }
 
     // ---- skins --------------------------------------------------------------------------
@@ -2093,6 +2128,17 @@ impl World {
         {
             eprintln!("[citizens] could not save NPCs: {e}");
         }
+        if !self.temp_expire.is_empty() {
+            let now = self.tick;
+            let (due, wait): (Vec<_>, Vec<_>) = std::mem::take(&mut self.temp_expire).into_iter().partition(|(t, _)| *t <= now);
+            self.temp_expire = wait;
+            for (_, id) in due {
+                if self.saves.temporary.contains(&id) {
+                    self.remove_unrecorded(id);
+                    self.saves.temporary.remove(&id);
+                }
+            }
+        }
         if !self.delayed.is_empty() {
             let now = self.tick;
             let (due, wait): (Vec<_>, Vec<_>) = std::mem::take(&mut self.delayed).into_iter().partition(|(t, _)| *t <= now);
@@ -2145,12 +2191,16 @@ impl World {
     fn look_close(&mut self, players: &[PlayerView]) {
         let mut turns = Vec::new();
         for (id, live) in &self.live {
-            if live.entity.is_none() || self.walks.contains_key(id) {
+            if live.entity.is_none() {
                 continue;
             }
             let Some(npc) = self.saves.get(*id) else {
                 continue;
             };
+            // `disablewhilenavigating` is on unless saved off.
+            if self.walks.contains_key(id) && npc.lookclose_flag("disablewhilenavigating", true) {
+                continue;
+            }
             if !npc.look_close() {
                 continue;
             }
@@ -2159,7 +2209,31 @@ impl World {
             };
             let range = npc.look_range().unwrap_or(self.cfg.look_close.range);
             let from = look::eye([at.x, at.y, at.z]);
-            let want = match look::target(players, &live.dimension, from, range) {
+            // `targetnpcs`: the other NPCs that stand out count as players.
+            let others: Vec<PlayerView> = if npc.lookclose_flag("targetnpcs", false) {
+                self.live
+                    .iter()
+                    .filter(|(oid, o)| **oid != *id && o.entity.is_some() && o.dimension == live.dimension)
+                    .filter_map(|(oid, o)| {
+                        let l = o.at.as_ref()?;
+                        Some(PlayerView {
+                            uuid: u128::MAX - *oid as u128,
+                            name: String::new(),
+                            dimension: o.dimension.clone(),
+                            pos: [l.x, l.y, l.z],
+                            game_mode: 0,
+                            permission: 0,
+                            entity_id: 0,
+                            sneaking: false,
+                        })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let pool: Vec<PlayerView> = if others.is_empty() { Vec::new() } else { players.iter().cloned().chain(others).collect() };
+            let seen: &[PlayerView] = if pool.is_empty() { players } else { &pool };
+            let want = match look::target(seen, &live.dimension, from, range) {
                 Some(p) => Some(look::look_at(from, look::eye(p.pos))),
                 None if npc.random_look() && self.tick >= live.next_random_look => {
                     let ((y0, y1), (p0, p1)) = npc.random_ranges();
@@ -2181,12 +2255,17 @@ impl World {
                 turns.push((*id, yaw, pitch));
             }
         }
-        let delay = u64::from(self.cfg.look_close.random_look_delay_ticks);
+        let default_delay = u64::from(self.cfg.look_close.random_look_delay_ticks);
         for (id, yaw, pitch) in turns {
+            let delay = self.saves.get(id).and_then(NpcData::random_look_delay).map_or(default_delay, u64::from);
             if let Some(l) = self.live.get_mut(&id) {
                 l.next_random_look = self.tick + delay;
             }
-            self.face(id, yaw, pitch);
+            if self.saves.get(id).is_some_and(|n| n.lookclose_flag("headonly", false)) {
+                self.face_head(id, yaw, pitch);
+            } else {
+                self.face(id, yaw, pitch);
+            }
         }
     }
 
@@ -2223,6 +2302,7 @@ impl World {
     fn follow_and_wander(&mut self) {
         let mut set: Vec<(i32, [f64; 3], f64, bool)> = Vec::new();
         let mut clear: Vec<i32> = Vec::new();
+        let mut hits: Vec<(i32, u128)> = Vec::new();
         for npc in &self.saves.npcs {
             let id = npc.id;
             if !self.is_out(id) {
@@ -2230,7 +2310,8 @@ impl World {
             }
             let Some(at) = self.current_location(id) else { continue };
             let speed = 0.2 * npc.speed_modifier();
-            if let Some(target) = npc.follow_target() {
+            let targeted = self.targets.get(&id).copied();
+            if let Some(target) = npc.follow_target().or(targeted.map(|t| t.0)) {
                 let same = self.locate(target).filter(|(d, _)| self.dimension_of(id).as_ref() == Some(d));
                 let Some((_, pos)) = same else { continue };
                 let d = [pos[0] - at.x, pos[1] - at.y, pos[2] - at.z];
@@ -2239,6 +2320,9 @@ impl World {
                 let margin = if npc.follow_margin() > 0.0 { npc.follow_margin() } else { 2.0 };
                 if len <= margin {
                     clear.push(id);
+                    if targeted.is_some_and(|t| t.1) && self.tick % 20 == 0 {
+                        hits.push((id, target));
+                    }
                 } else {
                     let f = (len - margin) / len;
                     set.push((id, [at.x + d[0] * f, at.y + d[1] * f, at.z + d[2] * f], speed, true));
@@ -2253,6 +2337,12 @@ impl World {
                 // Citizens' default delay is not in its plugin source; two to six seconds is a guess.
                 let wait = if delay > 0 { delay as u64 } else { 40 + (self.rng.next_f64() * 80.0) as u64 };
                 self.wander_at.insert(id, self.tick + wait);
+            }
+        }
+        for (id, victim) in hits {
+            if let Some(me) = self.saves.get(id).and_then(NpcData::uuid) {
+                let (v, a) = (crate::horizon_citizens_core::ids::format_uuid(victim), crate::horizon_citizens_core::ids::format_uuid(me));
+                self.ops.push(Op::Console(format!("damage {v} 1 minecraft:mob_attack by {a}")));
             }
         }
         for id in clear {
@@ -3554,5 +3644,69 @@ mod tests {
         s.grants.push("citizens.npc.ignore-cost".into());
         let out = run(&mut w, &s, "npc create Eve", || Err("x".into())).join("|");
         assert!(!out.contains("not enough money"), "{out}");
+    }
+
+    fn creator() -> Sender {
+        Sender {
+            uuid: Some(7),
+            name: "Op".into(),
+            permission: 4,
+            grants: Vec::new(),
+            at: Some(("minecraft:overworld".into(), Location { world: "world".into(), x: 0.0, y: 64.0, z: 0.0, yaw: 0.0, pitch: 0.0, body_yaw: 0.0 })),
+        }
+    }
+
+    #[test]
+    fn the_original_aliases_resolve() {
+        use crate::horizon_citizens_core::commands::run;
+        let mut w = world();
+        let s = creator();
+        let id = spawned(&mut w, "Guide", 10);
+        w.select(7, id);
+        for line in ["npc cload", "npc pushable", "npc vel 0 1 0", "npc nophysics", "npc target -c", "npc donkey"] {
+            let out = run(&mut w, &s, line, || Err("x".into())).join("|");
+            assert!(!out.contains("not supported") && !out.contains("Too many"), "{line}: {out}");
+        }
+    }
+
+    #[test]
+    fn a_temporary_npc_is_not_written_and_a_baby_has_an_age() {
+        use crate::horizon_citizens_core::commands::run;
+        let mut w = world();
+        let s = creator();
+        let out = run(&mut w, &s, "npc create Temp -t -b --type cow", || Err("x".into())).join("|");
+        assert!(out.contains("as a baby"), "{out}");
+        let id = w.selected(7).unwrap();
+        assert!(w.saves.temporary.contains(&id));
+        assert_eq!(w.saves.get(id).unwrap().map.at(&["traits", "age", "age"]).and_then(Node::as_i64), Some(-24000));
+        assert!(!w.saves.to_yaml().contains("Temp"), "a temporary NPC is not saved");
+    }
+
+    #[test]
+    fn a_targeted_player_is_walked_to_until_cancelled() {
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        w.online = vec![player(30.0, 0.0)];
+        w.set_target(id, 0xA1, false);
+        for _ in 0..3 {
+            w.tick(&[player(30.0, 0.0)]);
+        }
+        assert!(w.is_navigating(id));
+        w.clear_target(id);
+        assert!(!w.is_navigating(id));
+    }
+
+    #[test]
+    fn lookclose_options_are_saved() {
+        use crate::horizon_citizens_core::commands::run;
+        let mut w = world();
+        let s = creator();
+        let id = spawned(&mut w, "Guide", 10);
+        w.select(7, id);
+        let out = run(&mut w, &s, "npc lookclose --targetnpcs true --randomlookdelay 3s --headonly true", || Err("x".into())).join("|");
+        assert!(!out.contains("not supported"), "{out}");
+        let n = w.saves.get(id).unwrap();
+        assert!(n.lookclose_flag("targetnpcs", false) && n.lookclose_flag("headonly", false));
+        assert_eq!(n.random_look_delay(), Some(60));
     }
 }

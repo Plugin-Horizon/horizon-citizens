@@ -406,6 +406,9 @@ pub const NPC_READ_PATHS: &[&str] = &[
     "traits.lookclose.enableRandomLook",
     "traits.lookclose.randomYawRange.**",
     "traits.lookclose.randomPitchRange.**",
+    "traits.lookclose.randomLookDelay",
+    "traits.lookclose.targetnpcs",
+    "traits.lookclose.disablewhilenavigating",
     "traits.hologramtrait.lines.**",
     "traits.hologramtrait.lineHeight",
     "traits.commandtrait.**",
@@ -663,6 +666,14 @@ impl NpcData {
             .at(&["traits", "lookclose", "enableRandomLook"])
             .and_then(bool_of)
             .unwrap_or(false)
+    }
+    /// A boolean of `traits.lookclose` (`targetnpcs`, `disablewhilenavigating`, ...); `default` when unset.
+    pub fn lookclose_flag(&self, key: &str, default: bool) -> bool {
+        self.map.at(&["traits", "lookclose", key]).and_then(bool_of).unwrap_or(default)
+    }
+    /// `randomLookDelay` in ticks (`/npc lookclose --randomlookdelay`).
+    pub fn random_look_delay(&self) -> Option<u32> {
+        self.map.at(&["traits", "lookclose", "randomLookDelay"]).and_then(Node::as_i64).filter(|d| *d > 0).map(|d| d as u32)
     }
     pub fn set_random_look(&mut self, on: bool) {
         self.map
