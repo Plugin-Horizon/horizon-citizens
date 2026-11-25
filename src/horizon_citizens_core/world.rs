@@ -17,6 +17,9 @@ use crate::horizon_citizens_core::text;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
+mod shop_ui;
+pub use shop_ui::{ShopPlayer, Src, Target};
+
 /// Nodes that skip a command's cooldown, global cooldown and use limit (Citizens' `ignoreerrors`).
 pub const IGNORE_ERRORS: [&str; 3] = [
     "citizens.npc.command.ignoreerrors.cooldown",
@@ -96,7 +99,12 @@ pub enum Op {
     Dismount { player: Option<u128>, entity: u32 },
     /// Open a chest menu of `rows` rows for a player (`Host::open_menu`); the glue answers with
     /// [`World::menu_opened`].
-    OpenMenu { player: u128, title: String, rows: u8, items: Vec<Option<StackData>> },
+    /// `in_place` swaps the screen the player has open without the client centring the mouse.
+    OpenMenu { player: u128, title: String, rows: u8, items: Vec<Option<StackData>>, in_place: bool },
+    /// Close the player's open menu (a chat prompt of a shop editor, an open-shop action).
+    CloseMenu { player: u128 },
+    /// A shop purchase went through: set the experience level, and each slot (`Inventory` numbers 0-35) to the stack.
+    ShopApply { player: u128, levels: Option<i32>, slots: Vec<(u32, Option<StackData>)> },
     /// Replace everything an open menu shows (`menu_set_items`).
     SetMenuItems { player: u128, window: i32, items: Vec<Option<StackData>> },
 }
@@ -141,6 +149,8 @@ pub enum MenuAction {
     /// Offer the stack in this player-inventory slot (`Inventory` numbers) to the menu: read it, call
     /// [`World::menu_deposit`], and empty the slot when that answers true.
     Deposit { inv_slot: u32 },
+    /// Read the stack in this player-inventory slot and hand it to [`World::menu_read`]; the slot stays as it is.
+    Read { inv_slot: u32 },
 }
 
 #[derive(Clone, Debug)]
@@ -304,6 +314,13 @@ pub struct World {
     /// `MountTrait.currentMount`: NPC id -> (its entity, the entity it sits on).
     mounted: HashMap<i32, (u32, u32)>,
     menus: HashMap<u128, MenuSession>,
+    /// The stored shops (`shops.yml`), the file's path and whether it needs writing.
+    pub shops: crate::horizon_citizens_core::shop::StoredShops,
+    shops_path: Option<PathBuf>,
+    shops_dirty: bool,
+    shop_ui: shop_ui::ShopUi,
+    /// What the host read about a player just before a shop interaction.
+    pub shop_player: HashMap<u128, ShopPlayer>,
     /// Players with the NPC copier on: the NPC they copy.
     pub copiers: HashMap<u128, i32>,
     /// Players with the linear waypoint editor on: the NPC they edit.
@@ -343,6 +360,19 @@ const HISTORY_LIMIT: usize = 100;
 
 impl World {
     pub fn new(cfg: Config, saves: Saves, saves_path: Option<PathBuf>) -> World {
+        // `shops.yml` lives beside `saves.yml`; an unreadable one is left alone (no path, nothing written).
+        let mut shops_path = saves_path.as_ref().and_then(|p| p.parent()).map(|d| d.join("shops.yml"));
+        let shops = match &shops_path {
+            Some(p) => match crate::horizon_citizens_core::shop::StoredShops::load(p, &cfg.shops) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[citizens] could not read shops: {e}; shops are off until it is fixed");
+                    shops_path = None;
+                    crate::horizon_citizens_core::shop::StoredShops::empty()
+                }
+            },
+            None => crate::horizon_citizens_core::shop::StoredShops::empty(),
+        };
         World {
             cfg,
             saves,
@@ -364,6 +394,11 @@ impl World {
             player_cost: None,
             mounted: HashMap::new(),
             menus: HashMap::new(),
+            shops,
+            shops_path,
+            shops_dirty: false,
+            shop_ui: shop_ui::ShopUi::default(),
+            shop_player: HashMap::new(),
             copiers: HashMap::new(),
             path_editors: HashMap::new(),
             rotations: HashMap::new(),
@@ -416,10 +451,28 @@ impl World {
     /// Writes `saves.yml` now; the error for the log.
     pub fn save_now(&mut self) -> Result<(), String> {
         self.dirty_since = None;
-        match &self.saves_path {
+        let mut result = match &self.saves_path {
             Some(p) => self.saves.save(p),
             None => Ok(()),
+        };
+        if self.shops_dirty {
+            match &self.shops_path {
+                Some(p) => match self.shops.save(p) {
+                    Ok(()) => self.shops_dirty = false,
+                    Err(e) => result = result.and(Err(e)),
+                },
+                None => self.shops_dirty = false,
+            }
         }
+        result
+    }
+
+    /// `/citizens reload`: the shops are read again.
+    pub fn reload_shops(&mut self) -> Result<(), String> {
+        let Some(p) = &self.shops_path else { return Ok(()) };
+        self.shops = crate::horizon_citizens_core::shop::StoredShops::load(p, &self.cfg.shops)?;
+        self.shops_dirty = false;
+        Ok(())
     }
 
     // ---- lookups ------------------------------------------------------------------------
@@ -795,6 +848,9 @@ impl World {
             },
         };
         self.events.push(event);
+        if hand == Hand::Right && npc.has_trait("shop") {
+            self.shop_right_click(player.uuid, id);
+        }
         let commands: Vec<_> = npc.commands().into_iter().filter(|c| c.hand.matches(hand, player.sneaking)).collect();
         if !commands.is_empty() {
             self.run_commands(player, hand, &npc, id, commands);
@@ -1220,12 +1276,16 @@ impl World {
     fn start_menu(&mut self, player: u128, title: String, session: MenuSession) {
         let items = session.shown();
         let rows = session.rows;
+        self.shop_ui.drop_session(player);
         self.menus.insert(player, session);
-        self.ops.push(Op::OpenMenu { player, title, rows, items });
+        self.ops.push(Op::OpenMenu { player, title, rows, items, in_place: false });
     }
 
     /// The glue opened the menu: its window id.
     pub fn menu_opened(&mut self, player: u128, window: Option<i32>) {
+        if self.shop_opened(player, window) {
+            return;
+        }
         match window {
             Some(w) => {
                 if let Some(m) = self.menus.get_mut(&player) {
@@ -1251,6 +1311,9 @@ impl World {
     /// barrier changes its chance (`PercentageSlotHandler`: left +10, right -10, shift 1). A slot of the player's own inventory
     /// (the chest menu's bottom 36 slots) is offered for deposit.
     pub fn menu_click(&mut self, player: u128, window: i32, slot: i32, button: i32, shift: bool) -> MenuAction {
+        if let Some(action) = self.shop_click(player, window, slot, button, shift) {
+            return action;
+        }
         let Some(m) = self.menus.get_mut(&player).filter(|m| m.window == Some(window)) else {
             return MenuAction::Nothing;
         };
@@ -1283,6 +1346,9 @@ impl World {
 
     /// Puts `stack` into the first free item slot of the player's open menu; whether there was room.
     pub fn menu_deposit(&mut self, player: u128, stack: StackData) -> bool {
+        if let Some(taken) = self.shop_deposit(player, stack.clone()) {
+            return taken;
+        }
         let Some(m) = self.menus.get_mut(&player) else { return false };
         let free = if m.kind == MenuKind::Equipment {
             let cell = 9 + equipment_cell_for(&stack.id);
@@ -1299,6 +1365,9 @@ impl World {
 
     /// The menu was closed: the NPC keeps what it shows (`DropsGUI.onClose`, the inventory's close).
     pub fn menu_closed(&mut self, player: u128, window: i32) {
+        if self.shop_closed(player, window) {
+            return;
+        }
         if self.menus.get(&player).is_none_or(|m| m.window != Some(window)) {
             return;
         }
@@ -1396,6 +1465,7 @@ impl World {
         }
         self.walk();
         self.check_all_mounts();
+        self.shop_tick();
         if self.tick % 5 == 0 {
             self.talk_close(players);
         }
@@ -1792,6 +1862,13 @@ impl World {
             return false;
         }
         self.despawn(id, DespawnReason::Removal);
+        // `ShopTrait.onRemove`: the NPC's own shop goes with it.
+        if let Some(uuid) = self.saves.get(id).and_then(NpcData::uuid)
+            && self.saves.get(id).is_some_and(|n| n.has_trait("shop"))
+            && self.shops.npc.remove(&crate::horizon_citizens_core::ids::format_uuid(uuid)).is_some()
+        {
+            self.shops_changed();
+        }
         self.saves.remove(id);
         self.selected.retain(|_, n| *n != id);
         self.dead.remove(&id);

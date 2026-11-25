@@ -17,7 +17,7 @@ use crate::horizon_citizens_core::yaml::Node;
 use crate::horizon_citizens_core::npc::{CommandSpec, Hand, Location, Nameplate, NpcData, Skin};
 use crate::horizon_citizens_core::saves::Saves;
 use crate::horizon_citizens_core::text;
-use crate::horizon_citizens_core::world::{DespawnReason, Sender, World};
+use crate::horizon_citizens_core::world::{Src, Target, DespawnReason, Sender, World};
 
 // ---- messages (Citizens' en.json, `{n}` arguments, `[[x]]` highlights) ------------------------
 
@@ -326,6 +326,9 @@ const CMDS: &[Cmd] = &[
     cmd("warden", &[], "warden dig|emerge|roar|anger [entity uuid/player name] [anger]", 1, Some(4), "citizens.npc.warden"),
     cmd("inventory", &[], "inventory (player name/uuid)", 1, Some(2), "citizens.npc.inventory"),
     cmd("drops", &[], "drops", 1, Some(1), "citizens.npc.drops"),
+    cmd("shop", &[], "shop (edit|show|delete|copyfrom) (name) (new_name)", 1, Some(4), "citizens.npc.shop"),
+    cmd("shopitem", &[], "shopitem [shop name/id|all] [reset_purchases] [item index|all] (--page [page])", 4, Some(5), "citizens.npc.shopitem"),
+    cmd("showshop", &[], "showshop (name)", 2, Some(2), "citizens.npc.showshop"),
     cmd("passive", &[], "passive (--set [true|false])", 1, Some(2), "citizens.npc.passive"),
     cmd("pickupitems", &[], "pickupitems (--set [true|false])", 1, Some(2), "citizens.npc.pickupitems"),
     cmd("sitting", &[], "sitting (--explicit [true|false])", 1, Some(2), "citizens.npc.sitting"),
@@ -342,7 +345,7 @@ const CMDS: &[Cmd] = &[
 ];
 
 /// Citizens modifiers this port does not have (they answer "not supported", not "Too many arguments").
-const CITIZENS_ONLY: &[&str] = &["behavior", "cload", "pushable", "configgui", "disguise", "eval", "fish", "nophysics", "shop", "shopitem", "showshop", "spectate", "target", "velocity", "vel", "donkey", "mule"];
+const CITIZENS_ONLY: &[&str] = &["behavior", "cload", "pushable", "configgui", "disguise", "eval", "fish", "nophysics", "spectate", "target", "velocity", "vel", "donkey", "mule"];
 
 fn find_cmd(sub: &str) -> Option<&'static Cmd> {
     let sub = sub.to_ascii_lowercase();
@@ -545,6 +548,30 @@ const TAILS: &[(&str, &[&str])] = &[
     ("warden", &["anger", "dig", "emerge", "roar"]),
     ("inventory", &[""]),
     ("drops", &[""]),
+    (
+        "shop",
+        &[
+            "",
+            "edit",
+            "edit <name:word>",
+            "show",
+            "show <name:word>",
+            "show <name:word> <player:word>",
+            "delete <name:word>",
+            "copyfrom <name:word>",
+            "copyfrom <name:word> <new_name:word>",
+        ],
+    ),
+    (
+        "shopitem",
+        &[
+            "<shop:word> reset_purchases <index:word>",
+            "<shop:word> reset_purchases <index:word> --page <page:integer>",
+            "<shop:word> reset_player_purchases <index:word> --player <uuid:word>",
+            "<shop:word> reset_player_purchases <index:word> --page <page:integer> --player <uuid:word>",
+        ],
+    ),
+    ("showshop", &["<name:word>", "<name:word> --player <player:word>"]),
     ("passive", &["", "--set true", "--set false"]),
     ("pickupitems", &["", "--set true", "--set false"]),
     ("sitting", &["", "--explicit true", "--explicit false"]),
@@ -697,6 +724,20 @@ pub const NODES: &[&str] = &[
     "citizens.npc.warden",
     "citizens.npc.inventory",
     "citizens.npc.drops",
+    "citizens.npc.shop",
+    "citizens.npc.shopitem",
+    "citizens.npc.showshop",
+    "citizens.npc.showshop.to-others",
+    "citizens.npc.shop.edit",
+    "citizens.npc.shop.editor.set-shop-type",
+    "citizens.npc.shop.editor.show-on-right-click",
+    "citizens.npc.shop.editor.actions.edit-item",
+    "citizens.npc.shop.editor.actions.edit-permission",
+    "citizens.npc.shop.editor.actions.edit-money",
+    "citizens.npc.shop.editor.actions.edit-command",
+    "citizens.npc.shop.editor.actions.edit-exp",
+    "citizens.npc.shop.editor.actions.edit-open-shop",
+    "citizens.npc.shop.editor.actions.edit-condition",
     "citizens.npc.passive",
     "citizens.npc.pickupitems",
     "citizens.npc.sitting",
@@ -788,6 +829,63 @@ const PARENT_EDGES: &[(&str, &str)] = &[
     ("citizens.npc.*", "citizens.npc.mount"),
     ("citizens.npc.*", "citizens.npc.jump"),
     ("citizens.npc.*", "citizens.npc.warden"),
+    ("citizens.npc.*", "citizens.npc.shop"),
+    ("citizens.*", "citizens.npc.shop"),
+    ("citizens.npc.*", "citizens.npc.shopitem"),
+    ("citizens.*", "citizens.npc.shopitem"),
+    ("citizens.npc.*", "citizens.npc.showshop"),
+    ("citizens.*", "citizens.npc.showshop"),
+    ("citizens.npc.*", "citizens.npc.showshop.to-others"),
+    ("citizens.*", "citizens.npc.showshop.to-others"),
+    ("citizens.npc.*", "citizens.npc.shop.edit"),
+    ("citizens.*", "citizens.npc.shop.edit"),
+    ("citizens.npc.*", "citizens.npc.shop.editor.set-shop-type"),
+    ("citizens.*", "citizens.npc.shop.editor.set-shop-type"),
+    ("citizens.npc.*", "citizens.npc.shop.editor.show-on-right-click"),
+    ("citizens.*", "citizens.npc.shop.editor.show-on-right-click"),
+    ("citizens.npc.*", "citizens.npc.shop.editor.actions.edit-item"),
+    ("citizens.*", "citizens.npc.shop.editor.actions.edit-item"),
+    ("citizens.npc.shop.editor.actions.*", "citizens.npc.shop.editor.actions.edit-item"),
+    ("citizens.npc.*", "citizens.npc.shop.editor.actions.edit-permission"),
+    ("citizens.*", "citizens.npc.shop.editor.actions.edit-permission"),
+    ("citizens.npc.shop.editor.actions.*", "citizens.npc.shop.editor.actions.edit-permission"),
+    ("citizens.npc.*", "citizens.npc.shop.editor.actions.edit-money"),
+    ("citizens.*", "citizens.npc.shop.editor.actions.edit-money"),
+    ("citizens.npc.shop.editor.actions.*", "citizens.npc.shop.editor.actions.edit-money"),
+    ("citizens.npc.*", "citizens.npc.shop.editor.actions.edit-command"),
+    ("citizens.*", "citizens.npc.shop.editor.actions.edit-command"),
+    ("citizens.npc.shop.editor.actions.*", "citizens.npc.shop.editor.actions.edit-command"),
+    ("citizens.npc.*", "citizens.npc.shop.editor.actions.edit-exp"),
+    ("citizens.*", "citizens.npc.shop.editor.actions.edit-exp"),
+    ("citizens.npc.shop.editor.actions.*", "citizens.npc.shop.editor.actions.edit-exp"),
+    ("citizens.npc.*", "citizens.npc.shop.editor.actions.edit-open-shop"),
+    ("citizens.*", "citizens.npc.shop.editor.actions.edit-open-shop"),
+    ("citizens.npc.shop.editor.actions.*", "citizens.npc.shop.editor.actions.edit-open-shop"),
+    ("citizens.npc.*", "citizens.npc.shop.editor.actions.edit-condition"),
+    ("citizens.*", "citizens.npc.shop.editor.actions.edit-condition"),
+    ("citizens.npc.shop.editor.actions.*", "citizens.npc.shop.editor.actions.edit-condition"),
+    ("citizens.npc.shop.*", "citizens.npc.shop"),
+    ("citizens.npc.shop.*", "citizens.npc.shop.edit"),
+    ("citizens.npc.shop.*", "citizens.npc.shop.editor.set-shop-type"),
+    ("citizens.npc.shop.*", "citizens.npc.shop.editor.show-on-right-click"),
+    ("citizens.npc.shop.*", "citizens.npc.shop.editor.actions.edit-item"),
+    ("citizens.npc.shop.*", "citizens.npc.shop.editor.actions.edit-permission"),
+    ("citizens.npc.shop.*", "citizens.npc.shop.editor.actions.edit-money"),
+    ("citizens.npc.shop.*", "citizens.npc.shop.editor.actions.edit-command"),
+    ("citizens.npc.shop.*", "citizens.npc.shop.editor.actions.edit-exp"),
+    ("citizens.npc.shop.*", "citizens.npc.shop.editor.actions.edit-open-shop"),
+    ("citizens.npc.shop.*", "citizens.npc.shop.editor.actions.edit-condition"),
+    ("citizens.npc.shop.editor.*", "citizens.npc.shop.editor.set-shop-type"),
+    ("citizens.npc.shop.editor.*", "citizens.npc.shop.editor.show-on-right-click"),
+    ("citizens.npc.shop.editor.*", "citizens.npc.shop.editor.actions.edit-item"),
+    ("citizens.npc.shop.editor.*", "citizens.npc.shop.editor.actions.edit-permission"),
+    ("citizens.npc.shop.editor.*", "citizens.npc.shop.editor.actions.edit-money"),
+    ("citizens.npc.shop.editor.*", "citizens.npc.shop.editor.actions.edit-command"),
+    ("citizens.npc.shop.editor.*", "citizens.npc.shop.editor.actions.edit-exp"),
+    ("citizens.npc.shop.editor.*", "citizens.npc.shop.editor.actions.edit-open-shop"),
+    ("citizens.npc.shop.editor.*", "citizens.npc.shop.editor.actions.edit-condition"),
+    ("citizens.npc.showshop.*", "citizens.npc.showshop"),
+    ("citizens.npc.showshop.*", "citizens.npc.showshop.to-others"),
     ("citizens.npc.*", "citizens.npc.inventory"),
     ("citizens.npc.*", "citizens.npc.drops"),
     ("citizens.npc.*", "citizens.npc.passive"),
@@ -1044,7 +1142,7 @@ fn code_of(name: &str) -> Option<char> {
 
 /// Citizens' MiniMessage-ish tags as legacy codes: `<yellow>`, `<u>`, `<red>`..., with the end
 /// tags back to `base`. Click and hover tags are dropped; any other `<...>` stays text.
-fn tags(s: &str, base: &str) -> String {
+pub(crate) fn tags(s: &str, base: &str) -> String {
     let mut out = String::new();
     let mut rest = s;
     while let Some(i) = rest.find('<') {
@@ -1381,6 +1479,9 @@ fn citizens(w: &mut World, sender: &Sender, rest: &str, reload: impl FnOnce() ->
                         w.despawn(id, DespawnReason::Command);
                     }
                     w.saves = saves;
+                    if let Err(e) = w.reload_shops() {
+                        eprintln!("[citizens] shops not reloaded: {e}");
+                    }
                     out.extend(ok(w, M_CITIZENS_RELOADED, &[]));
                 }
                 Err(e) => {
@@ -1495,6 +1596,9 @@ fn npc(w: &mut World, sender: &Sender, rest: &str) -> Res {
         "warden" => warden(w, sender, &args),
         "inventory" => inventory(w, sender, &args),
         "drops" => drops(w, sender),
+        "shop" => shop_cmd(w, sender, &args),
+        "shopitem" => shopitem_cmd(w, sender, &args),
+        "showshop" => showshop_cmd(w, sender, &args),
         "path" => path(w, sender, tail),
         n if modifiers::handles(n) => modifiers::run(w, sender, n, &args),
         n if mobs::handles(n) => mobs::run(w, sender, n, tail),
@@ -3571,6 +3675,203 @@ fn drops(w: &mut World, sender: &Sender) -> Res {
     Ok(Vec::new())
 }
 
+const M_SHOP_NOT_FOUND: &str = "Shop [[{0}]] not found.";
+const M_SHOP_DELETED: &str = "Shop [[{0}]] deleted.";
+const M_SHOP_PLAYER_NOT_FOUND: &str = "Player [[{0}]] not online to show shop.";
+const M_SHOPITEM_PAGE_NOT_FOUND: &str = "Shop page [[{0}]] does not exist. There are [[{1}]] pages.";
+
+/// `NPCShop.canEdit(npc, sender)`: `citizens.admin`, `citizens.npc.shop.edit`, or the NPC's owner.
+fn shop_can_edit(w: &World, sender: &Sender, npc: Option<i32>) -> bool {
+    let level = w.cfg.command_level;
+    allowed(sender, level, "citizens.admin")
+        || allowed(sender, level, "citizens.npc.shop.edit")
+        || npc.is_some_and(|id| owns(w, sender, id))
+}
+
+/// `@Requirements(selected = false, ownership = true)`: the selected NPC, if any, must be the sender's.
+fn optional_target(w: &World, sender: &Sender) -> Result<Option<i32>, Reply> {
+    match w.selected(skey(sender)) {
+        Some(id) if !owns(w, sender, id) => Err(err(w, M_MUST_OWN, &[])),
+        other => Ok(other),
+    }
+}
+
+/// `/npc shop (edit|show|delete|copyfrom) (name) (new_name)`.
+fn shop_cmd(w: &mut World, sender: &Sender, args: &Args) -> Res {
+    let npc = optional_target(w, sender)?;
+    let len = 1 + args.words.len();
+    if len == 1 {
+        let Some(who) = sender.uuid else {
+            return Err(err(w, M_MUST_BE_INGAME, &[]));
+        };
+        if let Some(id) = npc
+            && let Some(t) = w.shop_default(id)
+        {
+            w.shop_display(who, t.clone(), Src::Shop(t));
+        }
+        return Ok(Vec::new());
+    }
+    let action = args.words[0].to_ascii_lowercase();
+    let mut shop: Option<Target> = match npc {
+        Some(id) => w.shop_default(id),
+        None => None,
+    };
+    if len >= 3 {
+        let name = args.words[1].clone();
+        shop = w.shop_find(&name);
+        if shop.is_none() && action == "edit" {
+            if sender.uuid.is_none() {
+                return Err(err(w, M_MUST_BE_INGAME, &[]));
+            }
+            if !shop_can_edit(w, sender, npc) {
+                return Err(err(w, M_NO_PERM, &[]));
+            }
+            w.shops.add_named(&name);
+            w.shops_changed();
+            shop = Some(Target::Global(name));
+        }
+    }
+    let Some(target) = shop else {
+        let name = if len >= 3 { args.words[1].as_str() } else { "" };
+        return Err(err(w, M_SHOP_NOT_FOUND, &[name]));
+    };
+    let shop_name = w.shop_ref(&target).map(|s| s.name.clone()).unwrap_or_default();
+    match action.as_str() {
+        "delete" => {
+            if !shop_can_edit(w, sender, npc) {
+                return Err(err(w, M_NO_PERM, &[]));
+            }
+            match &target {
+                Target::Npc(k) => {
+                    w.shops.npc.remove(k);
+                }
+                Target::Global(k) => {
+                    w.shops.global.remove(k);
+                }
+            }
+            w.shops_changed();
+            Ok(ok(w, M_SHOP_DELETED, &[&shop_name]))
+        }
+        "edit" => {
+            let Some(who) = sender.uuid else {
+                return Err(err(w, M_MUST_BE_INGAME, &[]));
+            };
+            if !shop_can_edit(w, sender, npc) {
+                return Err(err(w, M_NO_PERM, &[]));
+            }
+            w.shop_open_editor(who, target, npc, sender.clone());
+            Ok(Vec::new())
+        }
+        "copyfrom" => {
+            // The original reads the NPC's default shop and so needs a selected NPC.
+            let Some(id) = npc else {
+                return Err(err(w, M_MUST_SELECT, &[]));
+            };
+            if !shop_can_edit(w, sender, npc) {
+                return Err(err(w, M_NO_PERM, &[]));
+            }
+            let new_name = if len == 4 {
+                args.words[2].clone()
+            } else {
+                crate::horizon_citizens_core::ids::format_uuid(crate::horizon_citizens_core::ids::random_uuid())
+            };
+            let Some(mut copy) = w.shop_ref(&target).cloned() else {
+                return Err(err(w, M_SHOP_NOT_FOUND, &[&args.words[1]]));
+            };
+            copy.name = new_name;
+            w.shop_set_default(id, copy);
+            Ok(Vec::new())
+        }
+        "show" => {
+            let who = if len == 4 {
+                match online_player(w, &args.words[2]) {
+                    Some(p) => Some(p.uuid),
+                    None => return Err(err(w, M_SHOP_PLAYER_NOT_FOUND, &[&args.words[2]])),
+                }
+            } else {
+                sender.uuid
+            };
+            let Some(who) = who else {
+                return Err(err(w, M_MUST_BE_INGAME, &[]));
+            };
+            w.shop_display(who, target.clone(), Src::Shop(target));
+            Ok(Vec::new())
+        }
+        _ => Err(usage_error(w, None, find_cmd("shop").ok_or_else(Vec::new)?)),
+    }
+}
+
+/// `/npc shopitem [shop name/id|all] [reset_purchases|reset_player_purchases] [item index|all] (--page n) (--player uuid)`.
+fn shopitem_cmd(w: &mut World, sender: &Sender, args: &Args) -> Res {
+    let npc = optional_target(w, sender)?;
+    let shop_name = args.words[0].clone();
+    let operation = args.words[1].clone();
+    let index = args.words[2].clone();
+    if shop_name != "all" && w.shop_find(&shop_name).is_none() {
+        return Err(err(w, M_SHOP_NOT_FOUND, &[&shop_name]));
+    }
+    let page = args.value("page").and_then(|p| p.parse::<i64>().ok()).filter(|p| *p >= 1).unwrap_or(1) - 1;
+    let player = args.value("player").and_then(crate::horizon_citizens_core::ids::parse_uuid);
+    let targets: Vec<Target> = if shop_name == "all" {
+        let global = w.shops.global.keys().cloned().map(Target::Global);
+        let own = w.shops.npc.keys().cloned().map(Target::Npc);
+        global.chain(own).collect()
+    } else {
+        w.shop_find(&shop_name).into_iter().collect()
+    };
+    for t in targets {
+        if !shop_can_edit(w, sender, npc) {
+            return Err(err(w, M_NO_PERM, &[]));
+        }
+        if index != "all" {
+            // As written in Citizens: `get(page)` and then an inverted bounds check, so a numbered item never
+            // gets past this error (its page count is what the message names).
+            let pages = w.shop_ref(&t).map_or(0, |s| s.pages.len());
+            return Err(err(w, M_SHOPITEM_PAGE_NOT_FOUND, &[&(page + 1).to_string(), &pages.to_string()]));
+        }
+        let reset_all = operation == "reset_purchases";
+        let reset_player = operation == "reset_player_purchases";
+        if !reset_all && !reset_player {
+            return Err(usage_error(w, None, find_cmd("shopitem").ok_or_else(Vec::new)?));
+        }
+        if let Some(sh) = w.shop_mut(&t) {
+            for p in &mut sh.pages {
+                for it in p.items.values_mut() {
+                    if reset_all {
+                        it.reset_purchase_history();
+                    } else if let Some(u) = player {
+                        it.reset_player_history(u);
+                    }
+                }
+            }
+        }
+        w.shops_changed();
+    }
+    Ok(Vec::new())
+}
+
+/// `/npc showshop (name) (--player p)`.
+fn showshop_cmd(w: &mut World, sender: &Sender, args: &Args) -> Res {
+    optional_target(w, sender)?;
+    let who = if let Some(name) = args.value("player") {
+        if !allowed(sender, w.cfg.command_level, "citizens.npc.showshop.to-others") {
+            return Err(err(w, M_NO_PERM, &[]));
+        }
+        online_player(w, name).map(|p| p.uuid)
+    } else {
+        sender.uuid
+    };
+    let Some(who) = who else {
+        return Err(err(w, M_SHOP_PLAYER_NOT_FOUND, &[]));
+    };
+    let name = args.words[0].clone();
+    let Some(target) = w.shop_find(&name) else {
+        return Err(err(w, M_SHOP_NOT_FOUND, &[&name]));
+    };
+    w.shop_display(who, target.clone(), Src::Shop(target));
+    Ok(Vec::new())
+}
+
 const M_COPIER_BEGIN: &str = "Entered the NPC copier!<br>Click anywhere to copy the currently selected NPC.";
 const M_COPIER_END: &str = "Exited the NPC copier. ";
 const M_WARDEN_ANGER: &str = "[[{1}]] anger added towards [[{0}]].";
@@ -4770,5 +5071,115 @@ mod tests {
         two_spawned(&mut w, &s);
         assert!(run_ok(&mut w, &s, "npc jump").is_empty());
         assert!(w.take_ops().contains(&Op::Jump { entity: 10 }));
+    }
+
+    // ---- shops ----
+
+    #[test]
+    fn shop_edit_creates_a_named_shop_and_opens_the_editor() {
+        let mut w = world();
+        let s = sender(2);
+        assert_eq!(run_ok(&mut w, &s, "npc shop edit bank"), Vec::<String>::new());
+        assert!(w.shops.global.contains_key("bank"));
+        let ops = w.take_ops();
+        assert!(ops.iter().any(|o| matches!(o, Op::OpenMenu { title, rows: 2, .. } if title == "NPC Shop Editor")), "{ops:?}");
+        // `show` of a shop with no pages is an error line to the player.
+        w.shop_player.insert(0xA1, crate::horizon_citizens_core::world::ShopPlayer { op: true, ..Default::default() });
+        assert!(run_ok(&mut w, &s, "npc shop show bank").is_empty());
+        assert!(w.take_ops().iter().any(|o| matches!(o, Op::Tell { legacy, .. } if legacy.ends_with("Empty shop"))));
+    }
+
+    #[test]
+    fn shop_delete_and_not_found_use_the_original_messages() {
+        let mut w = world();
+        let s = sender(2);
+        let r = run_ok(&mut w, &s, "npc shop delete nothing");
+        assert_eq!(r, vec!["&cShop &enothing&c not found."]);
+        run_ok(&mut w, &s, "npc shop edit bank");
+        let r = run_ok(&mut w, &s, "npc shop delete bank");
+        assert_eq!(r, vec!["&aShop &ebank&a deleted."]);
+        assert!(w.shops.global.is_empty());
+        assert!(run_ok(&mut w, &s, "npc shop show")[0].contains("not found."), "no NPC selected and no name: no shop");
+    }
+
+    #[test]
+    fn shop_commands_need_their_nodes() {
+        let mut w = world();
+        let mut s = sender(0);
+        assert!(run_ok(&mut w, &s, "npc shop edit bank")[0].contains("permission"));
+        s.grants = vec!["citizens.npc.shop".into()];
+        // The command node alone does not let a player create a shop: canEdit needs citizens.npc.shop.edit.
+        assert!(run_ok(&mut w, &s, "npc shop edit bank")[0].contains("permission"));
+        assert!(w.shops.global.is_empty());
+        s.grants.push("citizens.npc.shop.edit".into());
+        assert!(run_ok(&mut w, &s, "npc shop edit bank").is_empty());
+        assert!(w.shops.global.contains_key("bank"));
+    }
+
+    #[test]
+    fn npc_shop_is_the_selected_npcs_own_and_copyfrom_copies_a_named_one() {
+        let mut w = world();
+        let s = sender(2);
+        run_ok(&mut w, &s, "npc create Trader");
+        let uuid = crate::horizon_citizens_core::ids::format_uuid(w.saves.get(0).unwrap().uuid().unwrap());
+        run_ok(&mut w, &s, "npc shop edit");
+        assert!(w.shops.npc.contains_key(&uuid), "the default shop is keyed by the NPC's UUID");
+        assert!(w.saves.get(0).unwrap().has_trait("shop"));
+        run_ok(&mut w, &s, "npc shop edit bank");
+        w.shops.global.get_mut("bank").unwrap().title = Some("Bank".into());
+        run_ok(&mut w, &s, "npc shop copyfrom bank copy");
+        assert_eq!(w.shops.npc[&uuid].title(), "Bank");
+        assert_eq!(w.shops.npc[&uuid].name, "copy");
+        // `/npc shop delete` with no name deletes the NPC's own shop.
+        let r = run_ok(&mut w, &s, "npc shop delete");
+        assert_eq!(r, vec!["&aShop &ecopy&a deleted."]);
+        assert!(w.shops.npc.is_empty());
+    }
+
+    #[test]
+    fn showshop_shows_to_the_sender_or_a_named_player() {
+        let mut w = world();
+        let s = sender(2);
+        let mut sh = crate::horizon_citizens_core::shop::Shop::new("bank");
+        sh.page_mut(0);
+        w.shops.global.insert("bank".into(), sh);
+        assert_eq!(run_ok(&mut w, &s, "npc showshop nothing"), vec!["&cShop &enothing&c not found."]);
+        assert!(run_ok(&mut w, &s, "npc showshop bank").is_empty());
+        assert!(w.take_ops().iter().any(|o| matches!(o, Op::OpenMenu { player: 0xA1, .. })));
+        // The original throws the message with no argument, so its placeholder stays in the text.
+        assert_eq!(run_ok(&mut w, &s, "npc showshop bank --player Nobody"), vec!["&cPlayer &e{0}&c not online to show shop."]);
+    }
+
+    #[test]
+    fn shopitem_resets_purchases_for_all_items_and_fails_for_a_numbered_one_as_written() {
+        let mut w = world();
+        let s = sender(2);
+        let mut sh = crate::horizon_citizens_core::shop::Shop::new("bank");
+        let mut it = crate::horizon_citizens_core::shop::ShopItem::new(&w.cfg.shops);
+        it.purchases.insert(7, 2);
+        sh.page_mut(0).items.insert(3, it);
+        w.shops.global.insert("bank".into(), sh);
+        assert!(run_ok(&mut w, &s, "npc shopitem bank reset_purchases all").is_empty());
+        assert!(w.shops.global["bank"].pages[0].items[&3].purchases.is_empty());
+        let r = run_ok(&mut w, &s, "npc shopitem bank reset_purchases 3");
+        assert_eq!(r, vec!["&cShop page &e1&c does not exist. There are &e1&c pages."]);
+        assert_eq!(run_ok(&mut w, &s, "npc shopitem nothing reset_purchases all"), vec!["&cShop &enothing&c not found."]);
+        assert!(run_ok(&mut w, &s, "npc shopitem bank bogus all")[0].contains("/npc shopitem"));
+        let mut it = w.shops.global["bank"].pages[0].items[&3].clone();
+        it.purchases.insert(7, 2);
+        it.purchases.insert(8, 1);
+        w.shops.global.get_mut("bank").unwrap().pages[0].items.insert(3, it);
+        run_ok(&mut w, &s, "npc shopitem all reset_player_purchases all --player 00000000-0000-0000-0000-000000000007");
+        let left: Vec<u128> = w.shops.global["bank"].pages[0].items[&3].purchases.keys().copied().collect();
+        assert_eq!(left, vec![8]);
+    }
+
+    #[test]
+    fn shop_usages_complete() {
+        let all = usages();
+        for want in ["npc shop edit <name:word>", "npc showshop <name:word> --player <player:word>", "npc shopitem <shop:word> reset_purchases <index:word>"] {
+            assert!(all.iter().any(|u| u == want), "{want}");
+        }
+        assert!(find_cmd("shop").is_some() && !CITIZENS_ONLY.contains(&"shop"));
     }
 }
