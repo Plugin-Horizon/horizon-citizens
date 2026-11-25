@@ -1553,6 +1553,12 @@ fn mob_nbt(npc: &NpcData, kind: &str, out: &mut Vec<String>) {
     if flag_of("knockback") == Some(false) && !attrs.iter().any(|a| a.contains("knockback_resistance")) {
         attrs.push(format!("{{id:\"minecraft:knockback_resistance\",base:{}}}", dbl(1.0)));
     }
+    if let Some(v) = tnum(npc, "scaledmaxhealth", "value").filter(|v| *v > 0.0) {
+        if !attrs.iter().any(|a| a.contains("minecraft:max_health")) {
+            attrs.push(format!("{{id:\"minecraft:max_health\",base:{}}}", dbl(v)));
+        }
+        out.push(format!("Health:{}", float_nbt(v)));
+    }
     if let Some(v) = tnum(npc, "hitbox", "scale") {
         attrs.retain(|a| !a.contains("minecraft:scale\""));
         attrs.push(format!("{{id:\"minecraft:scale\",base:{}}}", dbl(v)));
@@ -1900,5 +1906,12 @@ mod tests {
         let r = cmd(&mut w, &s, "npc allay -d");
         assert!(r.last().unwrap().contains("does not act on it"), "{r:?}");
         assert!(nbt(&w, "minecraft:allay").is_empty());
+    }
+
+    #[test]
+    fn scaled_max_health_sets_health_and_attribute() {
+        let (mut w, s) = setup("zombie");
+        cmd(&mut w, &s, "npc scaledmaxhealth 50");
+        assert_eq!(nbt(&w, "minecraft:zombie"), ["Health:50f", "attributes:[{id:\"minecraft:max_health\",base:50.0d}]"]);
     }
 }

@@ -59,7 +59,7 @@ const SIMPLE: &[Simple] = &[
     flag("targetable", "can now be targeted", "can no longer be targeted", None, false, false),
     Simple { name: "activationrange", kind: Kind::Number { label: "activation range", min: 0.0, integer: false }, live: false },
     Simple { name: "respawn", kind: Kind::Number { label: "respawn delay", min: -1.0, integer: true }, live: false },
-    Simple { name: "scaledmaxhealth", kind: Kind::Number { label: "scaled max health", min: 0.0, integer: false }, live: false },
+    Simple { name: "scaledmaxhealth", kind: Kind::Number { label: "scaled max health", min: 0.0, integer: false }, live: true },
     Simple { name: "trackingrange", kind: Kind::Number { label: "tracking range", min: -1.0, integer: false }, live: false },
 ];
 
