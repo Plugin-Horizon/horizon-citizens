@@ -1067,7 +1067,7 @@ impl World {
     /// `/npc inventory`: the NPC's `inventory` trait in a chest for `player` (`Inventory.openInventory`).
     pub fn open_inventory(&mut self, player: u128, npc: i32) {
         let Some(data) = self.saves.get(npc) else { return };
-        let stacks = data.inventory();
+        let stacks = data.inventory_stacks();
         // `Inventory.onSpawn`: 36 slots for a player NPC, else the 72 saved ones cut to 54.
         let rows: u8 = if data.kind().eq_ignore_ascii_case("PLAYER") { 4 } else { 6 };
         let mut slots = vec![None; usize::from(rows) * 9];
@@ -1954,7 +1954,7 @@ mod tests {
         let MenuAction::Take(apples) = w.menu_click(0xA1, 7, 2, 0, false) else { panic!("take") };
         assert_eq!((apples.id.as_str(), apples.count), ("minecraft:apple", 5));
         w.menu_closed(0xA1, 7);
-        let saved = w.saves.get(id).unwrap().inventory();
+        let saved = w.saves.get(id).unwrap().inventory_stacks();
         assert_eq!(saved.len(), 1, "the apples left, the stone came in");
         assert_eq!((saved[0].0, saved[0].1.id.as_str()), (0, "minecraft:stone"));
     }

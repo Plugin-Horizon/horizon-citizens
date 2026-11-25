@@ -968,7 +968,7 @@ impl NpcData {
     }
 
     /// The `inventory` trait's stacks by slot (`Inventory.save`: the slot numbers are the keys under the trait).
-    pub fn inventory(&self) -> Vec<(i64, StackData)> {
+    pub fn inventory_stacks(&self) -> Vec<(i64, StackData)> {
         let Some(n) = self.map.at(&["traits", "inventory"]).filter(|n| n.is_map()) else {
             return Vec::new();
         };
@@ -980,7 +980,7 @@ impl NpcData {
 
     /// Replaces the `inventory` trait's stacks (the slot keys; other keys stay).
     pub fn set_inventory(&mut self, mut slots: Vec<(i64, StackData)>) {
-        let old = self.inventory();
+        let old = self.inventory_stacks();
         let olds: Vec<&StackData> = old.iter().map(|(_, s)| s).collect();
         for (_, s) in &mut slots {
             reuse_raw(&olds, s);
@@ -1510,7 +1510,7 @@ uuid: 00000000-0000-4000-8000-0000000000aa
         blade.raw_meta = Some(BLADE.to_owned());
         blade.meta = decode_meta(BLADE).unwrap();
         n.set_inventory(vec![(3, blade.clone()), (10, StackData::new("minecraft:stone", 64))]);
-        let back = n.inventory();
+        let back = n.inventory_stacks();
         assert_eq!(back.len(), 2);
         assert_eq!(back[0].0, 3);
         assert_eq!(back[0].1.id, "minecraft:diamond_sword");
@@ -1520,7 +1520,7 @@ uuid: 00000000-0000-4000-8000-0000000000aa
         let mut live = StackData::new("minecraft:diamond_sword", 1);
         live.meta = ItemMeta { unmapped: Vec::new(), ..blade.meta.clone() };
         n.set_inventory(vec![(5, live)]);
-        assert_eq!(n.inventory()[0].1.raw_meta.as_deref(), Some(BLADE));
+        assert_eq!(n.inventory_stacks()[0].1.raw_meta.as_deref(), Some(BLADE));
         // A changed one is written fresh and reads back.
         let mut named = StackData::new("minecraft:stick", 2);
         named.meta.display_name = Some("Wand".into());
@@ -1538,7 +1538,7 @@ uuid: 00000000-0000-4000-8000-0000000000aa
         n.set_drops(Vec::new());
         assert!(n.drops().is_empty());
         n.set_inventory(Vec::new());
-        assert!(n.inventory().is_empty());
+        assert!(n.inventory_stacks().is_empty());
     }
 
     #[test]
