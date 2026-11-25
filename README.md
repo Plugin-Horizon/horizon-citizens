@@ -136,7 +136,7 @@ What does not work yet on arismoko/horizon (each is marked `TODO(arismoko-api: .
 
 - The server folder is taken from the working directory (dedicated servers only).
 - `/npc`, `/citizens` and `/trait` sub-commands carry their own `citizens.*` nodes; the bare root commands carry none.
-- `/npc inventory` and `/npc drops` (GUIs over the NPC's items) are not done; the commandtrait `cost` (money) is skipped (no economy); the `npc` flag runs as the console's `execute as` (see ENGINE_NEEDS `npc_run_command_as_entity`).
+- `/npc inventory` and `/npc drops` edit by clicks (take, deposit, drops chance), not by dragging, and the save layout of both traits is a guess; the commandtrait `cost` (money) is skipped (no economy); the `npc` flag runs as the console's `execute as` (see ENGINE_NEEDS `npc_run_command_as_entity`).
 - The `team add citizens_<colour>` console commands used for glow colours fail on arismoko's console (logged, glow colour falls back).
 
 ## Docs gaps

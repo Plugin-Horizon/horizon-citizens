@@ -322,6 +322,8 @@ const CMDS: &[Cmd] = &[
     cmd("leashable", &[], "leashable", 1, Some(2), "citizens.npc.leashable"),
     cmd("mount", &[], "mount (--onnpc <npc id|uuid>) (-d(ismount)) (-c(ancel))", 1, Some(1), "citizens.npc.mount"),
     cmd("jump", &[], "jump", 1, Some(1), "citizens.npc.jump"),
+    cmd("inventory", &[], "inventory (player name/uuid)", 1, Some(2), "citizens.npc.inventory"),
+    cmd("drops", &[], "drops", 1, Some(1), "citizens.npc.drops"),
     cmd("passive", &[], "passive (--set [true|false])", 1, Some(2), "citizens.npc.passive"),
     cmd("pickupitems", &[], "pickupitems (--set [true|false])", 1, Some(2), "citizens.npc.pickupitems"),
     cmd("sitting", &[], "sitting (--explicit [true|false])", 1, Some(2), "citizens.npc.sitting"),
@@ -338,7 +340,7 @@ const CMDS: &[Cmd] = &[
 ];
 
 /// Citizens modifiers this port does not have (they answer "not supported", not "Too many arguments").
-const CITIZENS_ONLY: &[&str] = &["behavior", "cload", "pushable", "configgui", "copier", "disguise", "drops", "eval", "fish", "inventory", "nophysics", "shop", "shopitem", "showshop", "spectate", "target", "velocity", "vel", "warden", "donkey", "mule"];
+const CITIZENS_ONLY: &[&str] = &["behavior", "cload", "pushable", "configgui", "copier", "disguise", "eval", "fish", "nophysics", "shop", "shopitem", "showshop", "spectate", "target", "velocity", "vel", "warden", "donkey", "mule"];
 
 fn find_cmd(sub: &str) -> Option<&'static Cmd> {
     let sub = sub.to_ascii_lowercase();
@@ -537,6 +539,8 @@ const TAILS: &[(&str, &[&str])] = &[
     ("leashable", &[""]),
     ("mount", &["", "--onnpc", "-d", "-c"]),
     ("jump", &[""]),
+    ("inventory", &[""]),
+    ("drops", &[""]),
     ("passive", &["", "--set true", "--set false"]),
     ("pickupitems", &["", "--set true", "--set false"]),
     ("sitting", &["", "--explicit true", "--explicit false"]),
@@ -685,6 +689,8 @@ pub const NODES: &[&str] = &[
     "citizens.npc.leashable",
     "citizens.npc.mount",
     "citizens.npc.jump",
+    "citizens.npc.inventory",
+    "citizens.npc.drops",
     "citizens.npc.passive",
     "citizens.npc.pickupitems",
     "citizens.npc.sitting",
@@ -775,6 +781,8 @@ const PARENT_EDGES: &[(&str, &str)] = &[
     ("citizens.npc.*", "citizens.npc.leashable"),
     ("citizens.npc.*", "citizens.npc.mount"),
     ("citizens.npc.*", "citizens.npc.jump"),
+    ("citizens.npc.*", "citizens.npc.inventory"),
+    ("citizens.npc.*", "citizens.npc.drops"),
     ("citizens.npc.*", "citizens.npc.passive"),
     ("citizens.npc.*", "citizens.npc.pickupitems"),
     ("citizens.npc.*", "citizens.npc.sitting"),
@@ -850,6 +858,8 @@ const PARENT_EDGES: &[(&str, &str)] = &[
     ("citizens.*", "citizens.npc.leashable"),
     ("citizens.*", "citizens.npc.mount"),
     ("citizens.*", "citizens.npc.jump"),
+    ("citizens.*", "citizens.npc.inventory"),
+    ("citizens.*", "citizens.npc.drops"),
     ("citizens.*", "citizens.npc.passive"),
     ("citizens.*", "citizens.npc.pickupitems"),
     ("citizens.*", "citizens.npc.sitting"),
@@ -1473,6 +1483,8 @@ fn npc(w: &mut World, sender: &Sender, rest: &str) -> Res {
         "equip" => equip(w, sender, &args),
         "mount" => mount(w, sender, &args),
         "jump" => jump(w, sender),
+        "inventory" => inventory(w, sender, &args),
+        "drops" => drops(w, sender),
         "path" => path(w, sender, tail),
         n if modifiers::handles(n) => modifiers::run(w, sender, n, &args),
         n if mobs::handles(n) => mobs::run(w, sender, n, tail),
@@ -3511,6 +3523,32 @@ fn mount(w: &mut World, sender: &Sender, args: &Args) -> Res {
     Ok(Vec::new())
 }
 
+/// `/npc inventory (player)`: the NPC's inventory opens for the sender, or for the named player.
+fn inventory(w: &mut World, sender: &Sender, args: &Args) -> Res {
+    let id = target(w, sender)?;
+    let who = match args.words.first() {
+        Some(name) => crate::horizon_citizens_core::ids::parse_uuid(name)
+            .or_else(|| w.player_by_name(name))
+            .or(sender.uuid),
+        None => sender.uuid,
+    };
+    let Some(who) = who else {
+        return Err(err(w, M_MUST_BE_INGAME, &[]));
+    };
+    w.open_inventory(who, id);
+    Ok(Vec::new())
+}
+
+/// `/npc drops`: the editor of the NPC's death drops (players only, as in Citizens).
+fn drops(w: &mut World, sender: &Sender) -> Res {
+    let id = target(w, sender)?;
+    let Some(who) = sender.uuid else {
+        return Err(err(w, M_MUST_BE_INGAME, &[]));
+    };
+    w.open_drops(who, id);
+    Ok(Vec::new())
+}
+
 /// `/npc jump`: the NPC jumps on its next tick (`NMS.setShouldJump`).
 fn jump(w: &mut World, sender: &Sender) -> Res {
     let id = target(w, sender)?;
@@ -4425,6 +4463,17 @@ mod tests {
         assert!(w.take_ops().contains(&Op::Ride { player: Some(0xA1), rider: 0, vehicle: 10 }));
         run_ok(&mut w, &s, "npc mount -d");
         assert!(w.take_ops().contains(&Op::Dismount { player: Some(0xA1), entity: 0 }));
+    }
+
+    #[test]
+    fn inventory_and_drops_open_a_menu() {
+        let mut w = world();
+        let s = sender(2);
+        two_spawned(&mut w, &s);
+        assert!(run_ok(&mut w, &s, "npc inventory").is_empty());
+        assert!(w.take_ops().iter().any(|o| matches!(o, Op::OpenMenu { player: 0xA1, rows: 4, .. })));
+        assert!(run_ok(&mut w, &s, "npc drops").is_empty());
+        assert!(w.take_ops().iter().any(|o| matches!(o, Op::OpenMenu { player: 0xA1, rows: 5, .. })));
     }
 
     #[test]

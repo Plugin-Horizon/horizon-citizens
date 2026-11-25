@@ -408,6 +408,142 @@ impl Value {
     }
 }
 
+// ---- writing -----------------------------------------------------------------------------------
+
+/// A value of the map a Bukkit `ItemMeta` serialises to, as far as this port writes one.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Out {
+    Str(String),
+    Int(i32),
+    /// A `java.util.ArrayList` of strings.
+    List(Vec<String>),
+    /// An `ImmutableBiMap` of strings to integers (`enchants`).
+    BiMap(Vec<(String, i32)>),
+}
+
+fn put_utf(out: &mut Vec<u8>, s: &str) {
+    let mut body = Vec::new();
+    for u in s.encode_utf16() {
+        match u {
+            1..=0x7f => body.push(u as u8),
+            0 | 0x80..=0x7ff => body.extend([0xc0 | (u >> 6) as u8, 0x80 | (u & 0x3f) as u8]),
+            _ => body.extend([0xe0 | (u >> 12) as u8, 0x80 | ((u >> 6) & 0x3f) as u8, 0x80 | (u & 0x3f) as u8]),
+        }
+    }
+    out.extend((body.len() as u16).to_be_bytes());
+    out.extend(body);
+}
+
+fn put_string(out: &mut Vec<u8>, s: &str) {
+    out.push(0x74);
+    put_utf(out, s);
+}
+
+/// A class descriptor up to and including its end-of-annotation marker; the caller writes the
+/// superclass descriptor (or `0x70`) after it.
+fn put_desc(out: &mut Vec<u8>, name: &str, suid: i64, flags: u8, fields: &[(u8, &str, Option<&str>)]) {
+    out.push(0x72);
+    put_utf(out, name);
+    out.extend(suid.to_be_bytes());
+    out.push(flags);
+    out.extend((fields.len() as u16).to_be_bytes());
+    for (code, fname, sig) in fields {
+        out.push(*code);
+        put_utf(out, fname);
+        if let Some(sig) = sig {
+            put_string(out, sig);
+        }
+    }
+    out.push(0x78);
+}
+
+const OBJECTS: &str = "[Ljava/lang/Object;";
+
+fn put_object_array(out: &mut Vec<u8>, items: &[&dyn Fn(&mut Vec<u8>)]) {
+    out.push(0x75);
+    put_desc(out, "[Ljava.lang.Object;", 0, 2, &[]);
+    out.push(0x70);
+    out.extend((items.len() as i32).to_be_bytes());
+    for i in items {
+        i(out);
+    }
+}
+
+fn put_integer(out: &mut Vec<u8>, v: i32) {
+    out.push(0x73);
+    put_desc(out, "java.lang.Integer", 0, 2, &[(b'I', "value", None)]);
+    put_desc(out, "java.lang.Number", 0, 2, &[]);
+    out.push(0x70);
+    out.extend(v.to_be_bytes());
+}
+
+fn put_map_fields(out: &mut Vec<u8>, keys: &[String], values: &[&dyn Fn(&mut Vec<u8>)]) {
+    let key_writers: Vec<Box<dyn Fn(&mut Vec<u8>) + '_>> = keys.iter().map(|k| Box::new(move |o: &mut Vec<u8>| put_string(o, k)) as Box<dyn Fn(&mut Vec<u8>)>).collect();
+    let refs: Vec<&dyn Fn(&mut Vec<u8>)> = key_writers.iter().map(|b| b.as_ref()).collect();
+    put_object_array(out, &refs);
+    put_object_array(out, values);
+}
+
+fn put_immutable_map_desc(out: &mut Vec<u8>) {
+    put_desc(
+        out,
+        "com.google.common.collect.ImmutableMap$SerializedForm",
+        0,
+        2,
+        &[(b'[', "keys", Some(OBJECTS)), (b'[', "values", Some(OBJECTS))],
+    );
+}
+
+fn put_value(out: &mut Vec<u8>, v: &Out) {
+    match v {
+        Out::Str(s) => put_string(out, s),
+        Out::Int(i) => put_integer(out, *i),
+        Out::List(items) => {
+            out.push(0x73);
+            put_desc(out, "java.util.ArrayList", 8683452581122892189, 3, &[(b'I', "size", None)]);
+            out.push(0x70);
+            out.extend((items.len() as i32).to_be_bytes());
+            out.extend([0x77, 4]);
+            out.extend((items.len() as i32).to_be_bytes());
+            for i in items {
+                put_string(out, i);
+            }
+            out.push(0x78);
+        }
+        Out::BiMap(pairs) => {
+            out.push(0x73);
+            put_desc(out, "com.google.common.collect.ImmutableBiMap$SerializedForm", 0, 2, &[]);
+            put_immutable_map_desc(out);
+            out.push(0x70);
+            let keys: Vec<String> = pairs.iter().map(|(k, _)| k.clone()).collect();
+            let vals: Vec<Box<dyn Fn(&mut Vec<u8>)>> =
+                pairs.iter().map(|(_, n)| { let n = *n; Box::new(move |o: &mut Vec<u8>| put_integer(o, n)) as Box<dyn Fn(&mut Vec<u8>)> }).collect();
+            let refs: Vec<&dyn Fn(&mut Vec<u8>)> = vals.iter().map(|b| b.as_ref()).collect();
+            put_map_fields(out, &keys, &refs);
+        }
+    }
+}
+
+/// `org.bukkit.util.io.Wrapper` around an `ImmutableMap` of `entries`, in the layout [`read`] takes
+/// (and the fixtures of `items`). The Wrapper's own serialVersionUID is written as 0, as the fixtures
+/// have it; it has not been checked against a real Bukkit stream.
+pub fn write_bukkit_map(entries: &[(String, Out)]) -> Vec<u8> {
+    let mut out = vec![0xac, 0xed, 0x00, 0x05, 0x73];
+    put_desc(&mut out, "org.bukkit.util.io.Wrapper", 0, 2, &[(b'L', "map", Some("Ljava/util/Map;"))]);
+    out.push(0x70);
+    out.push(0x73);
+    put_immutable_map_desc(&mut out);
+    out.push(0x70);
+    let keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
+    let vals: Vec<Box<dyn Fn(&mut Vec<u8>) + '_>> = entries
+        .iter()
+        .map(|(_, v)| Box::new(move |o: &mut Vec<u8>| put_value(o, v)) as Box<dyn Fn(&mut Vec<u8>)>)
+        .collect();
+    let refs: Vec<&dyn Fn(&mut Vec<u8>)> = vals.iter().map(|b| b.as_ref()).collect();
+    put_map_fields(&mut out, &keys, &refs);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

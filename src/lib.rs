@@ -14,7 +14,7 @@ use mod_api::{
     LivingIncomingDamageEvent, NodeDefault, PermissionGatherNodesEvent, PermissionLevel, PermissionNode,
     PermissionValueType, PlayerCommandEvent, PlayerCommandsSentEvent, PlayerRef, RegisterCommandsEvent, RegisterNodeCommandsEvent,
     RegisterConfigsEvent, RemovalReason, RunModCommandEvent, ServerHost, ServerStoppingEvent,
-    ServerTickEvent, ServerTickPhase, Text,
+    ServerTickEvent, ServerTickPhase, Text, ItemStack, MenuClickedEvent, MenuClosedEvent, MenuReplace,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -226,6 +226,28 @@ fn cost_state(host: &dyn ServerHost, p: PlayerRef) -> core::world::PlayerCost {
             })
             .collect(),
     }
+}
+
+/// A stack of the NPC's saved items as the game's item, with the components the meta maps. The bare item
+/// when the host refuses the text.
+fn item_stack_of(host: &dyn ServerHost, s: &core::npc::StackData) -> Option<ItemStack> {
+    let comps = core::items::components(&s.meta).join(",");
+    let snbt = format!("{{id:\"{}\",count:{},components:{{{comps}}}}}", s.id, s.count.clamp(1, 99));
+    host.item_from_snbt(&snbt)
+        .or_else(|| host.item_from_snbt(&format!("{{id:\"{}\",count:{}}}", s.id, s.count.clamp(1, 99))))
+}
+
+/// A game stack as the NPC saves it. Only what Citizens' meta maps is read (plain name and lore, enchantments,
+/// damage): colours and other components of the stack are not kept.
+fn stack_data_of(host: &dyn ServerHost, st: &ItemStack) -> core::npc::StackData {
+    let id = st.item().id(host).to_string();
+    let id = if id.contains(':') { id } else { format!("minecraft:{id}") };
+    let mut d = core::npc::StackData::new(&id, i64::from(st.count()));
+    d.meta.display_name = st.display_name_plain(host);
+    d.meta.lore = st.lore(host).iter().map(Text::plain).collect();
+    d.meta.enchants = st.enchantments().into_iter().map(|(e, l)| (e, l as i32)).collect();
+    d.meta.damage = st.damage_component().map(|x| x as i32);
+    d
 }
 
 /// Pays a command's price: takes the levels, then sets each slot to the count it keeps.
@@ -496,6 +518,18 @@ impl Citizens {
                     }
                 }
                 core::world::Op::Charge { player, levels, slots } => charge(host, player, levels, &slots),
+                core::world::Op::OpenMenu { player, title, rows, items } => {
+                    let stacks: Vec<Option<ItemStack>> =
+                        items.iter().map(|i| i.as_ref().and_then(|s| item_stack_of(&*host, s))).collect();
+                    let title = plain(&*host, &title);
+                    let window = host.open_menu(player, rows, title, stacks, MenuReplace::CloseFirst).ok().flatten();
+                    api::with_world(|w| w.menu_opened(player, window));
+                }
+                core::world::Op::SetMenuItems { player, window, items } => {
+                    let stacks: Vec<Option<ItemStack>> =
+                        items.iter().map(|i| i.as_ref().and_then(|s| item_stack_of(&*host, s))).collect();
+                    let _ = host.menu_set_items(player, window, stacks);
+                }
                 core::world::Op::Jump { entity } => {
                     if let Some(mob) = host.entity(entity).and_then(|e| host.mob(e)) {
                         let _ = mob.jump(host);
@@ -882,6 +916,37 @@ impl Hooks for Citizens {
         });
         self.run_work(host);
         api::refresh_snapshot();
+    }
+
+    fn menu_clicked(&self, host: &mut dyn ServerHost, event: &mut MenuClickedEvent) {
+        let (uuid, window) = (event.uuid, event.window);
+        let Some(action) = api::with_world(|w| w.menu_click(uuid, window, event.slot, event.button)) else {
+            return;
+        };
+        let Some(p) = host.player(uuid) else { return };
+        match action {
+            core::world::MenuAction::Nothing => {}
+            core::world::MenuAction::Take(stack) => {
+                if let Some(s) = item_stack_of(&*host, &stack) {
+                    let _ = p.give_stack(host, s);
+                }
+            }
+            core::world::MenuAction::Deposit { inv_slot } => {
+                let held = p.inventory_slots(&*host).unwrap_or_default();
+                if let Some((_, st)) = held.iter().find(|(i, _)| *i == inv_slot) {
+                    let data = stack_data_of(&*host, st);
+                    if api::with_world(|w| w.menu_deposit(uuid, data)).unwrap_or(false) {
+                        let _ = p.set_inventory_slot(host, inv_slot, None);
+                    }
+                }
+            }
+        }
+        self.run_work(host);
+    }
+
+    fn menu_closed(&self, _: &mut dyn ServerHost, event: &mut MenuClosedEvent) {
+        let (uuid, window) = (event.uuid, event.window);
+        api::with_world(|w| w.menu_closed(uuid, window));
     }
 
     fn server_stopping(&self, host: &mut dyn ServerHost, _event: &mut ServerStoppingEvent) {

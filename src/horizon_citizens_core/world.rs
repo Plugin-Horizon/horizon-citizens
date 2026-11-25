@@ -10,7 +10,7 @@ use crate::horizon_citizens_core::config::Config;
 use crate::horizon_citizens_core::tree::TreeExt;
 use crate::horizon_citizens_core::yaml::Node;
 use crate::horizon_citizens_core::look::{self, PlayerView, Rng};
-use crate::horizon_citizens_core::npc::{CostItem, Hand, Location, NpcCommand, NpcData, Skin};
+use crate::horizon_citizens_core::npc::{CostItem, StackData, Hand, Location, NpcCommand, NpcData, Skin};
 use crate::horizon_citizens_core::saves::Saves;
 use crate::horizon_citizens_core::spawn;
 use crate::horizon_citizens_core::text;
@@ -94,6 +94,61 @@ pub enum Op {
     Ride { player: Option<u128>, rider: u32, vehicle: u32 },
     /// Take a rider off its vehicle (`leaveVehicle`): the player `player`, else the entity `entity`.
     Dismount { player: Option<u128>, entity: u32 },
+    /// Open a chest menu of `rows` rows for a player (`Host::open_menu`); the glue answers with
+    /// [`World::menu_opened`].
+    OpenMenu { player: u128, title: String, rows: u8, items: Vec<Option<StackData>> },
+    /// Replace everything an open menu shows (`menu_set_items`).
+    SetMenuItems { player: u128, window: i32, items: Vec<Option<StackData>> },
+}
+
+/// Which NPC data a menu edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuKind {
+    Inventory,
+    Drops,
+}
+
+/// What a click in an open menu asks the glue to do.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MenuAction {
+    Nothing,
+    /// Give this stack to the player (it left the menu; the menu is already refreshed).
+    Take(StackData),
+    /// Offer the stack in this player-inventory slot (`Inventory` numbers) to the menu: read it, call
+    /// [`World::menu_deposit`], and empty the slot when that answers true.
+    Deposit { inv_slot: u32 },
+}
+
+#[derive(Clone, Debug)]
+struct MenuSession {
+    npc: i32,
+    kind: MenuKind,
+    rows: u8,
+    window: Option<i32>,
+    slots: Vec<Option<StackData>>,
+    chances: Vec<f64>,
+}
+
+impl MenuSession {
+    /// `DropsTrait.DropsGUI`: items live in rows 0, 2 and 4; rows 1 and 3 hold the chance barriers.
+    fn is_item_slot(&self, slot: usize) -> bool {
+        self.kind == MenuKind::Inventory || (slot / 9) % 2 == 0
+    }
+
+    fn shown(&self) -> Vec<Option<StackData>> {
+        let mut out = self.slots.clone();
+        if self.kind == MenuKind::Drops {
+            for (i, cell) in out.iter_mut().enumerate() {
+                if !self.is_item_slot(i) {
+                    let pct = if i >= 9 && self.slots[i - 9].is_some() { (self.chances[i - 9] * 100.0 + 1e-6).floor() as i64 } else { 100 };
+                    let mut b = StackData::new("minecraft:barrier", 1);
+                    b.meta.display_name = Some(format!("Drop chance {pct}%"));
+                    *cell = Some(b);
+                }
+            }
+        }
+        out
+    }
 }
 
 /// What other mods hear (see `api`).
@@ -204,6 +259,7 @@ pub struct World {
     pub player_cost: Option<PlayerCost>,
     /// `MountTrait.currentMount`: NPC id -> (its entity, the entity it sits on).
     mounted: HashMap<i32, (u32, u32)>,
+    menus: HashMap<u128, MenuSession>,
     teams_made: BTreeSet<String>,
     fetching: BTreeSet<i32>,
     pub tick: u64,
@@ -253,6 +309,7 @@ impl World {
             held_perms: BTreeSet::new(),
             player_cost: None,
             mounted: HashMap::new(),
+            menus: HashMap::new(),
             teams_made: BTreeSet::new(),
             fetching: BTreeSet::new(),
             tick: 0,
@@ -1005,6 +1062,141 @@ impl World {
     // ---- the tick -----------------------------------------------------------------------
 
     /// One server tick, with the players online.
+    // ---- the inventory and drops menus ----------------------------------------------------
+
+    /// `/npc inventory`: the NPC's `inventory` trait in a chest for `player`. Four rows, more when a saved
+    /// slot lies beyond them (the size Citizens' own trait uses is not in the source this port has).
+    pub fn open_inventory(&mut self, player: u128, npc: i32) {
+        let Some(data) = self.saves.get(npc) else { return };
+        let stacks = data.inventory();
+        let top = stacks.iter().map(|(s, _)| *s).max().unwrap_or(0) as usize;
+        let rows = ((top / 9) + 1).clamp(4, 6) as u8;
+        let mut slots = vec![None; usize::from(rows) * 9];
+        for (slot, st) in stacks {
+            if let Some(cell) = slots.get_mut(slot.max(0) as usize) {
+                *cell = Some(st);
+            }
+        }
+        let title = text::strip(&data.name());
+        let chances = vec![1.0; slots.len()];
+        self.start_menu(player, title, MenuSession { npc, kind: MenuKind::Inventory, rows, window: None, slots, chances });
+    }
+
+    /// `/npc drops`: five rows, the drops in rows 0 and 2 with a chance barrier under each.
+    pub fn open_drops(&mut self, player: u128, npc: i32) {
+        let Some(data) = self.saves.get(npc) else { return };
+        let mut slots = vec![None; 45];
+        let mut chances = vec![1.0; 45];
+        let mut k = 0;
+        let drops = data.drops();
+        'rows: for i in [0usize, 2] {
+            for j in 0..9 {
+                let Some((st, chance)) = drops.get(k) else { break 'rows };
+                slots[i * 9 + j] = Some(st.clone());
+                chances[i * 9 + j] = *chance;
+                k += 1;
+            }
+        }
+        self.start_menu(player, "Add items for drops".into(), MenuSession { npc, kind: MenuKind::Drops, rows: 5, window: None, slots, chances });
+    }
+
+    fn start_menu(&mut self, player: u128, title: String, session: MenuSession) {
+        let items = session.shown();
+        let rows = session.rows;
+        self.menus.insert(player, session);
+        self.ops.push(Op::OpenMenu { player, title, rows, items });
+    }
+
+    /// The glue opened the menu: its window id.
+    pub fn menu_opened(&mut self, player: u128, window: Option<i32>) {
+        match window {
+            Some(w) => {
+                if let Some(m) = self.menus.get_mut(&player) {
+                    m.window = Some(w);
+                }
+            }
+            None => {
+                self.menus.remove(&player);
+            }
+        }
+    }
+
+    fn refresh_menu(&mut self, player: u128) {
+        if let Some(m) = self.menus.get(&player)
+            && let Some(window) = m.window
+        {
+            let items = m.shown();
+            self.ops.push(Op::SetMenuItems { player, window, items });
+        }
+    }
+
+    /// A click in the menu `window` of `player`. The menu's own slots: a stack is taken out; a drops
+    /// barrier changes its chance (left click up 10 %, right click down 10 %: the step of Citizens'
+    /// percentage handler is not in the source this port has). A slot of the player's own inventory
+    /// (the chest menu's bottom 36 slots) is offered for deposit.
+    pub fn menu_click(&mut self, player: u128, window: i32, slot: i32, button: i32) -> MenuAction {
+        let Some(m) = self.menus.get_mut(&player).filter(|m| m.window == Some(window)) else {
+            return MenuAction::Nothing;
+        };
+        let size = usize::from(m.rows) * 9;
+        let Ok(slot) = usize::try_from(slot) else { return MenuAction::Nothing };
+        if slot >= size + 36 {
+            return MenuAction::Nothing;
+        }
+        if slot >= size {
+            let p = slot - size;
+            let inv_slot = if p < 27 { 9 + p } else { p - 27 };
+            return MenuAction::Deposit { inv_slot: inv_slot as u32 };
+        }
+        if !m.is_item_slot(slot) {
+            if slot >= 9 && m.slots[slot - 9].is_some() {
+                let c = &mut m.chances[slot - 9];
+                let step = if button == 1 { -0.1 } else { 0.1 };
+                *c = (((*c + step) * 100.0).round() / 100.0).clamp(0.0, 1.0);
+                self.refresh_menu(player);
+            }
+            return MenuAction::Nothing;
+        }
+        let Some(taken) = m.slots[slot].take() else { return MenuAction::Nothing };
+        m.chances[slot] = 1.0;
+        self.refresh_menu(player);
+        MenuAction::Take(taken)
+    }
+
+    /// Puts `stack` into the first free item slot of the player's open menu; whether there was room.
+    pub fn menu_deposit(&mut self, player: u128, stack: StackData) -> bool {
+        let Some(m) = self.menus.get_mut(&player) else { return false };
+        let free = (0..m.slots.len()).find(|i| m.is_item_slot(*i) && m.slots[*i].is_none());
+        let Some(i) = free else { return false };
+        m.slots[i] = Some(stack);
+        m.chances[i] = 1.0;
+        self.refresh_menu(player);
+        true
+    }
+
+    /// The menu was closed: the NPC keeps what it shows (`DropsGUI.onClose`, the inventory's close).
+    pub fn menu_closed(&mut self, player: u128, window: i32) {
+        if self.menus.get(&player).is_none_or(|m| m.window != Some(window)) {
+            return;
+        }
+        let Some(m) = self.menus.remove(&player) else { return };
+        let Some(npc) = self.saves.get_mut(m.npc) else { return };
+        match m.kind {
+            MenuKind::Inventory => npc.set_inventory(
+                m.slots.into_iter().enumerate().filter_map(|(i, s)| Some((i as i64, s?))).collect(),
+            ),
+            MenuKind::Drops => npc.set_drops(
+                m.slots
+                    .into_iter()
+                    .zip(m.chances)
+                    .enumerate()
+                    .filter_map(|(i, (s, c))| if (i / 9) % 2 == 0 { Some((s?, c)) } else { None })
+                    .collect(),
+            ),
+        }
+        self.mark_dirty();
+    }
+
     /// `MountTrait.checkMounted`: seats the NPC on the NPC its `mountedon` names, once both are spawned
     /// (again after either respawned, its entity being new).
     pub fn check_mounted(&mut self, id: i32) {
@@ -1732,6 +1924,64 @@ mod tests {
         assert!(w.on_click(10, &player(1.0, 1.0), Hand::Right, None));
         let cmds = consoles(&mut w);
         assert_eq!(cmds, vec![format!("execute as {uuid} at {uuid} run spawn")]);
+    }
+
+    fn menu_ops(w: &mut World) -> Vec<Op> {
+        w.take_ops().into_iter().filter(|o| matches!(o, Op::OpenMenu { .. } | Op::SetMenuItems { .. })).collect()
+    }
+
+    #[test]
+    fn inventory_menu_takes_deposits_and_saves_on_close() {
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        w.saves.get_mut(id).unwrap().set_inventory(vec![(2, StackData::new("minecraft:apple", 5))]);
+        w.take_ops();
+        w.open_inventory(0xA1, id);
+        let ops = menu_ops(&mut w);
+        let Some(Op::OpenMenu { rows, items, .. }) = ops.first() else { panic!("{ops:?}") };
+        assert_eq!(*rows, 4);
+        assert_eq!(items[2].as_ref().map(|s| s.count), Some(5));
+        w.menu_opened(0xA1, Some(7));
+        // A click in another window is not ours.
+        assert_eq!(w.menu_click(0xA1, 8, 2, 0), MenuAction::Nothing);
+        // The first slot of the player's own part (36) is main-inventory slot 9; the last is hotbar 8.
+        assert_eq!(w.menu_click(0xA1, 7, 36, 0), MenuAction::Deposit { inv_slot: 9 });
+        assert_eq!(w.menu_click(0xA1, 7, 71, 0), MenuAction::Deposit { inv_slot: 8 });
+        assert!(w.menu_deposit(0xA1, StackData::new("minecraft:stone", 64)));
+        assert!(matches!(menu_ops(&mut w).last(), Some(Op::SetMenuItems { window: 7, .. })));
+        let MenuAction::Take(apples) = w.menu_click(0xA1, 7, 2, 0) else { panic!("take") };
+        assert_eq!((apples.id.as_str(), apples.count), ("minecraft:apple", 5));
+        w.menu_closed(0xA1, 7);
+        let saved = w.saves.get(id).unwrap().inventory();
+        assert_eq!(saved.len(), 1, "the apples left, the stone came in");
+        assert_eq!((saved[0].0, saved[0].1.id.as_str()), (0, "minecraft:stone"));
+    }
+
+    #[test]
+    fn drops_menu_shows_chances_and_saves_them() {
+        let mut w = world();
+        let id = spawned(&mut w, "Guide", 10);
+        w.saves.get_mut(id).unwrap().set_drops(vec![(StackData::new("minecraft:bone", 2), 0.5)]);
+        w.take_ops();
+        w.open_drops(0xA1, id);
+        let ops = menu_ops(&mut w);
+        let Some(Op::OpenMenu { rows, title, items, .. }) = ops.first() else { panic!("{ops:?}") };
+        assert_eq!((*rows, title.as_str()), (5, "Add items for drops"));
+        assert_eq!(items[0].as_ref().map(|s| s.id.as_str()), Some("minecraft:bone"));
+        let barrier = |i: usize| items[i].as_ref().and_then(|s| s.meta.display_name.clone());
+        assert_eq!(barrier(9).as_deref(), Some("Drop chance 50%"));
+        assert_eq!(barrier(10).as_deref(), Some("Drop chance 100%"));
+        w.menu_opened(0xA1, Some(3));
+        // Left click on the barrier: 60 %. Row 4 takes a new drop at 100 %.
+        assert_eq!(w.menu_click(0xA1, 3, 9, 0), MenuAction::Nothing);
+        let Some(Op::SetMenuItems { items, .. }) = menu_ops(&mut w).pop() else { panic!("refresh") };
+        assert_eq!(items[9].as_ref().and_then(|s| s.meta.display_name.clone()).as_deref(), Some("Drop chance 60%"));
+        assert!(w.menu_deposit(0xA1, StackData::new("minecraft:apple", 1)));
+        w.menu_closed(0xA1, 3);
+        let d = w.saves.get(id).unwrap().drops();
+        assert_eq!(d.len(), 2);
+        assert_eq!((d[0].0.id.as_str(), d[0].1), ("minecraft:bone", 0.6));
+        assert_eq!((d[1].0.id.as_str(), d[1].1), ("minecraft:apple", 1.0));
     }
 
     #[test]

@@ -281,6 +281,64 @@ fn cost_item(m: &Node) -> Option<CostItem> {
     Some(CostItem { id, amount, name })
 }
 
+/// An item stack as the NPC's `inventory` and `dropstrait` keep it (`type`, `amount`, `meta`): the
+/// namespaced id, the count, the meta Citizens would read, and the original base64 meta blob when this
+/// stack was read from a save and its meta is unchanged (kept so a save does not rewrite it).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StackData {
+    pub id: String,
+    pub count: i64,
+    pub meta: crate::horizon_citizens_core::items::ItemMeta,
+    pub raw_meta: Option<String>,
+}
+
+impl StackData {
+    pub fn new(id: &str, count: i64) -> StackData {
+        StackData { id: id.to_owned(), count, meta: Default::default(), raw_meta: None }
+    }
+
+    /// The meta without the keys this port does not map (what a rewrite would keep).
+    fn mapped_meta(&self) -> crate::horizon_citizens_core::items::ItemMeta {
+        crate::horizon_citizens_core::items::ItemMeta { unmapped: Vec::new(), ..self.meta.clone() }
+    }
+
+    /// The saved form: `type` in upper case, `amount`, and `meta` (the original blob when unchanged).
+    pub fn to_node(&self) -> Node {
+        use crate::horizon_citizens_core::items;
+        let mut n = Node::map();
+        n.set("type", Node::str(&self.id.trim_start_matches("minecraft:").to_ascii_uppercase()));
+        n.set("amount", Node::int(self.count));
+        let empty = self.mapped_meta() == items::ItemMeta::default();
+        if let Some(raw) = &self.raw_meta {
+            n.set("meta", Node::str(raw));
+        } else if !empty {
+            n.set("meta", Node::str(&items::encode_meta(&self.meta)));
+        }
+        n
+    }
+
+    pub fn from_node(m: &Node) -> Option<StackData> {
+        let (item, count, _) = stack_of(m)?;
+        let raw = m.get("meta").and_then(Node::text);
+        let meta = raw
+            .as_deref()
+            .and_then(|r| crate::horizon_citizens_core::items::decode_meta(r).ok())
+            .unwrap_or_default();
+        let id = if item.contains(':') { item } else { format!("minecraft:{item}") };
+        Some(StackData { id, count, meta, raw_meta: raw })
+    }
+}
+
+/// Keeps the saved meta blob of an old stack the new one equals (same item, count and mapped meta).
+fn reuse_raw(old: &[&StackData], new: &mut StackData) {
+    if new.raw_meta.is_some() {
+        return;
+    }
+    if let Some(o) = old.iter().find(|o| o.id == new.id && o.count == new.count && o.mapped_meta() == new.mapped_meta()) {
+        new.raw_meta = o.raw_meta.clone();
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct NpcData {
     pub id: i32,
@@ -897,6 +955,76 @@ impl NpcData {
         out
     }
 
+    /// The `inventory` trait's stacks by slot (saved as a map of slot to stack, or a list).
+    pub fn inventory(&self) -> Vec<(i64, StackData)> {
+        let Some(n) = self.map.at(&["traits", "inventory", "contents"]) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(i64, StackData)> = if n.is_map() {
+            n.entries().iter().filter_map(|e| Some((e.key.parse().ok()?, StackData::from_node(&e.value)?))).collect()
+        } else {
+            n.items().iter().enumerate().filter_map(|(i, v)| Some((i as i64, StackData::from_node(v)?))).collect()
+        };
+        out.sort_by_key(|(slot, _)| *slot);
+        out
+    }
+
+    /// Replaces the `inventory` trait's stacks (an empty list removes the key).
+    pub fn set_inventory(&mut self, mut slots: Vec<(i64, StackData)>) {
+        let old = self.inventory();
+        let olds: Vec<&StackData> = old.iter().map(|(_, s)| s).collect();
+        for (_, s) in &mut slots {
+            reuse_raw(&olds, s);
+        }
+        if slots.is_empty() {
+            self.map.drop_path(&["traits", "inventory", "contents"]);
+        } else {
+            let mut m = Node::map();
+            for (slot, s) in &slots {
+                m.set(&slot.to_string(), s.to_node());
+            }
+            self.map.put(&["traits", "inventory", "contents"], m);
+            self.add_trait_name("inventory");
+        }
+    }
+
+    /// The `dropstrait`'s drops: a stack and its chance (0 to 1).
+    pub fn drops(&self) -> Vec<(StackData, f64)> {
+        let Some(n) = self.map.at(&["traits", "dropstrait", "drops"]) else {
+            return Vec::new();
+        };
+        n.items()
+            .iter()
+            .filter_map(|d| {
+                let stack = StackData::from_node(d.get("drop")?)?;
+                Some((stack, d.get("chance").and_then(Node::as_f64).unwrap_or(1.0)))
+            })
+            .collect()
+    }
+
+    pub fn set_drops(&mut self, mut drops: Vec<(StackData, f64)>) {
+        let old = self.drops();
+        let olds: Vec<&StackData> = old.iter().map(|(s, _)| s).collect();
+        for (s, _) in &mut drops {
+            reuse_raw(&olds, s);
+        }
+        if drops.is_empty() {
+            self.map.drop_path(&["traits", "dropstrait", "drops"]);
+            return;
+        }
+        let items = drops
+            .iter()
+            .map(|(s, chance)| {
+                let mut m = Node::map();
+                m.set("chance", Node::float(*chance));
+                m.set("drop", s.to_node());
+                m
+            })
+            .collect();
+        self.map.put(&["traits", "dropstrait", "drops"], Node::seq(items));
+        self.add_trait_name("dropstrait");
+    }
+
     /// `executionmode` of the `commandtrait` (LINEAR when unset or unknown).
     pub fn execution_mode(&self) -> ExecutionMode {
         let mode = self
@@ -1364,6 +1492,39 @@ uuid: 00000000-0000-4000-8000-0000000000aa
         assert_eq!(n.nameplate(), Nameplate::Hidden);
         n.set_nameplate(Nameplate::Shown);
         assert_eq!(n.nameplate(), Nameplate::Shown);
+    }
+
+    #[test]
+    fn inventory_and_drops_round_trip_and_keep_an_unchanged_meta_blob() {
+        use crate::horizon_citizens_core::items::{ItemMeta, decode_meta, fixtures::BLADE};
+        let mut n = NpcData::new(1, 7, "A", "PLAYER");
+        let mut blade = StackData::new("minecraft:diamond_sword", 1);
+        blade.raw_meta = Some(BLADE.to_owned());
+        blade.meta = decode_meta(BLADE).unwrap();
+        n.set_inventory(vec![(3, blade.clone()), (10, StackData::new("minecraft:stone", 64))]);
+        let back = n.inventory();
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].0, 3);
+        assert_eq!(back[0].1.id, "minecraft:diamond_sword");
+        assert_eq!(back[0].1.raw_meta.as_deref(), Some(BLADE));
+        assert_eq!(back[1].1.count, 64);
+        // A stack rebuilt from the game (no blob, same mapped meta) keeps the saved blob.
+        let mut live = StackData::new("minecraft:diamond_sword", 1);
+        live.meta = ItemMeta { unmapped: Vec::new(), ..blade.meta.clone() };
+        n.set_inventory(vec![(5, live)]);
+        assert_eq!(n.inventory()[0].1.raw_meta.as_deref(), Some(BLADE));
+        // A changed one is written fresh and reads back.
+        let mut named = StackData::new("minecraft:stick", 2);
+        named.meta.display_name = Some("Wand".into());
+        n.set_drops(vec![(named, 0.25), (StackData::new("minecraft:apple", 3), 1.0)]);
+        let d = n.drops();
+        assert_eq!(d[0].0.meta.display_name.as_deref(), Some("Wand"));
+        assert_eq!((d[0].1, d[1].1), (0.25, 1.0));
+        assert_eq!(d[1].0.id, "minecraft:apple");
+        n.set_drops(Vec::new());
+        assert!(n.drops().is_empty());
+        n.set_inventory(Vec::new());
+        assert!(n.inventory().is_empty());
     }
 
     #[test]
