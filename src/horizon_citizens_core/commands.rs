@@ -409,30 +409,17 @@ fn find_cmd(sub: &str) -> Option<&'static Cmd> {
         .find(|c| c.name == sub || c.aliases.contains(&sub.as_str()))
 }
 
-const COLOURS: [&str; 16] = [
-    "black",
-    "dark_blue",
-    "dark_green",
-    "dark_aqua",
-    "dark_red",
-    "dark_purple",
-    "gold",
-    "gray",
-    "dark_gray",
-    "blue",
-    "green",
-    "aqua",
-    "red",
-    "light_purple",
-    "yellow",
-    "white",
+/// Bukkit's `ChatColor.values()` (glowing completes every one, formats too), upper case.
+const COLOURS: [&str; 22] = [
+    "BLACK", "DARK_BLUE", "DARK_GREEN", "DARK_AQUA", "DARK_RED", "DARK_PURPLE", "GOLD", "GRAY", "DARK_GRAY", "BLUE",
+    "GREEN", "AQUA", "RED", "LIGHT_PURPLE", "YELLOW", "WHITE", "MAGIC", "BOLD", "STRIKETHROUGH", "UNDERLINE",
+    "ITALIC", "RESET",
 ];
 
 /// Usage tails per sub-command for the game's tab completion (`<name:kind>` as Horizon's
 /// `NativeCommand` takes them). Aliases get the same tails. Free text is always last.
 const TAILS: &[(&str, &[&str])] = &[
     ("help", &[""]),
-    ("info", &[""]),
     ("debug", &["", "-p", "-n", "-i"]),
     ("gamemode", &["", "survival", "creative", "adventure", "spectator"]),
     ("flyable", &["", "true", "false"]),
@@ -487,6 +474,12 @@ const TAILS: &[(&str, &[&str])] = &[
     ),
     ("sound", &["", "--ambient <sound:word>", "--hurt <sound:word>", "--death <sound:word>", "-n", "-s", "-d"]),
     ("hurt", &["<damage:integer>"]),
+    ("behavior", &["<file:word>"]),
+    ("eval", &["<expression:text>"]),
+    ("fish", &["cast_out", "reel_in", "cast_out <location:word>", "reel_in <location:word>"]),
+    ("nophysics", &["", "--explicit true", "--explicit false"]),
+    ("target", &["", "<target:word>", "<target:word> -a", "<target:word> -c", "<target:word> -a -c"]),
+    ("velocity", &["<x:number> <y:number> <z:number>"]),
     ("playsound", &["<sound:word>", "<sound:word> <category:word> <volume:number> <pitch:number>", "<sound:word> --to <player:word>"]),
     ("wander", &["", "xyrange <xrange:integer> <yrange:integer>", "delay <ticks:integer>", "pathfind true", "pathfind false"]),
     ("deselect", &[""]),
@@ -670,11 +663,6 @@ pub fn usages() -> Vec<String> {
         let Some(c) = find_cmd(name) else { continue };
         for n in std::iter::once(c.name).chain(c.aliases.iter().copied()) {
             for tail in tails.iter() {
-                if *name == "glowing" && tail.starts_with("--color") {
-                    for colour in COLOURS {
-                        out.push(format!("npc {n} --color {colour}"));
-                    }
-                }
                 out.push(format!("npc {n} {tail}").trim().to_owned());
             }
         }
@@ -708,6 +696,10 @@ pub const NODES: &[&str] = &[
     "citizens.npc.debug",
     "citizens.npc.behavior",
     "citizens.npc.eval",
+    "citizens.npc.fish",
+    "citizens.npc.nophysics",
+    "citizens.npc.target",
+    "citizens.npc.velocity",
     "citizens.npc.gamemode",
     "citizens.npc.flyable",
     "citizens.npc.trait",
@@ -1745,14 +1737,13 @@ fn max_name_length(kind: &str) -> usize {
 }
 
 /// The entity types Citizens accepts for `--type` and `npc type`, in lower case: the names its
-/// `citizens.npc.create.<type>` nodes list in plugin.yml (Citizens 2.0.44), plus the older Bukkit names
-/// that `spawn::entity_kind` maps. Any other word is refused with the invalid-type line.
+/// `citizens.npc.create.<type>` nodes list in plugin.yml (Citizens 2.0.44), (26.3 names only; saved NPCs of older names are still read by `spawn::entity_kind`). Any other word is refused with the invalid-type line.
 const ENTITY_TYPES: &[&str] = &[
     "acacia_boat", "acacia_chest_boat", "allay", "area_effect_cloud", "armadillo", "armor_stand", "arrow",
     "axolotl", "bamboo_chest_raft", "bamboo_raft", "bat", "bee", "birch_boat", "birch_chest_boat", "blaze",
     "block_display", "bogged", "breeze", "breeze_wind_charge", "camel", "camel_husk", "cat", "cave_spider",
     "cherry_boat", "cherry_chest_boat", "chest_minecart", "chicken", "cod", "command_block_minecart",
-    "copper_golem", "cow", "creaking", "creeper", "dark_oak_boat", "dark_oak_chest_boat", "dolphin", "donkey",
+    "copper_golem", "cow", "creaking", "creeper", "cushion", "dark_oak_boat", "dark_oak_chest_boat", "dolphin", "donkey",
     "dragon_fireball", "drowned", "egg", "elder_guardian", "end_crystal", "ender_dragon", "ender_pearl",
     "enderman", "endermite", "evoker", "evoker_fangs", "experience_bottle", "experience_orb", "eye_of_ender",
     "falling_block", "fireball", "firework_rocket", "fishing_bobber", "fox", "frog", "furnace_minecart",
@@ -1762,7 +1753,7 @@ const ENTITY_TYPES: &[&str] = &[
     "llama", "llama_spit", "magma_cube", "mangrove_boat", "mangrove_chest_boat", "mannequin", "marker",
     "minecart", "mooshroom", "mule", "nautilus", "oak_boat", "oak_chest_boat", "ocelot",
     "ominous_item_spawner", "painting", "pale_oak_boat", "pale_oak_chest_boat", "panda", "parched", "parrot",
-    "phantom", "pig", "piglin", "piglin_brute", "pillager", "player", "polar_bear", "pufferfish", "rabbit",
+    "phantom", "pig", "piglin", "piglin_brute", "pillager", "player", "polar_bear", "poplar_boat", "poplar_chest_boat", "pufferfish", "rabbit",
     "ravager", "salmon", "sheep", "shulker", "shulker_bullet", "silverfish", "skeleton", "skeleton_horse",
     "slime", "small_fireball", "sniffer", "snow_golem", "snowball", "spawner_minecart", "spectral_arrow",
     "spider", "splash_potion", "spruce_boat", "spruce_chest_boat", "squid", "stray", "strider", "sulfur_cube", "tadpole",
@@ -1770,8 +1761,6 @@ const ENTITY_TYPES: &[&str] = &[
     "villager", "vindicator", "wandering_trader", "warden", "wind_charge", "witch", "wither",
     "wither_skeleton", "wither_skull", "wolf", "zoglin", "zombie", "zombie_horse", "zombie_nautilus",
     "zombie_villager", "zombified_piglin",
-    // Older Bukkit names (`spawn::entity_kind` maps them).
-    "snowman", "mushroom_cow", "pig_zombie", "villager_golem",
 ];
 
 /// The entity types `--type` completes (the original's `EntityType` suggestions), lower case.
@@ -1790,11 +1779,10 @@ pub fn colour_names() -> &'static [&'static str] {
 }
 
 /// The per-type create nodes (`citizens.npc.create.zombie`, ...), one per entity type of plugin.yml
-/// (the older Bukkit names left out), as `create` asks them.
+/// as `create` asks them.
 pub fn create_type_nodes() -> Vec<String> {
     ENTITY_TYPES
         .iter()
-        .take_while(|t| **t != "snowman")
         .map(|t| format!("citizens.npc.create.{t}"))
         .collect()
 }
@@ -5512,6 +5500,42 @@ mod tests {
     fn every_usage_has_a_listed_node() {
         for u in usages() {
             assert!(all_nodes().contains(&node_of_usage(&u)), "{u}");
+        }
+    }
+
+    #[test]
+    fn the_entity_types_are_the_ones_of_the_game() {
+        let names = entity_type_names();
+        for old in ["pig_zombie", "snowman", "mushroom_cow", "villager_golem"] {
+            assert!(!names.contains(&old), "{old} is not an entity type of 26.3");
+        }
+        for new in ["cushion", "poplar_boat", "poplar_chest_boat", "zombified_piglin", "snow_golem", "mooshroom", "iron_golem"] {
+            assert!(names.contains(&new), "{new}");
+        }
+        assert!(create_type_nodes().iter().any(|n| n == "citizens.npc.create.poplar_boat"));
+        assert!(!valid_type("pig_zombie"));
+    }
+
+    #[test]
+    fn glowing_completes_the_chat_colours_in_upper_case_like_the_original() {
+        let names = colour_names();
+        assert_eq!(names.len(), 22);
+        for want in ["AQUA", "BLACK", "BLUE", "BOLD", "DARK_AQUA", "DARK_GREEN", "RESET", "MAGIC"] {
+            assert!(names.contains(&want), "{want}");
+        }
+        assert!(names.iter().all(|n| n.chars().all(|c| c.is_ascii_uppercase() || c == '_')));
+        // No literal lower-case colour words next to the argument.
+        assert!(!usages().iter().any(|u| u == "npc glowing --color red"));
+    }
+
+    #[test]
+    fn the_sub_commands_of_the_original_complete_and_the_extras_do_not() {
+        let all = usages();
+        for want in ["npc behavior ", "npc eval ", "npc fish ", "npc nophysics", "npc target ", "npc vel ", "npc velocity "] {
+            assert!(all.iter().any(|u| u.starts_with(want) || u == want.trim_end()), "{want}");
+        }
+        for extra in ["npc info", "npc model", "npc modelanimate", "npc sniffer"] {
+            assert!(!all.iter().any(|u| u == extra || u.starts_with(&format!("{extra} "))), "{extra}");
         }
     }
 

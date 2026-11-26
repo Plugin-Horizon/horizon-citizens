@@ -502,6 +502,10 @@ fn tails(m: &Mob) -> Vec<String> {
 pub fn usages() -> Vec<String> {
     let mut out = Vec::new();
     for m in MOBS {
+        // Not in the original's command list (`sniffer` is declared there but never registered), so Paper does not complete them.
+        if matches!(m.cmd.name, "model" | "modelanimate" | "sniffer") {
+            continue;
+        }
         for n in std::iter::once(m.cmd.name).chain(m.cmd.aliases.iter().copied()) {
             for tail in tails(m) {
                 out.push(format!("npc {n} {tail}").trim().to_owned());

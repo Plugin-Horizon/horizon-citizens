@@ -634,7 +634,7 @@ impl mod_api::CommandArgumentType for Words {
 
     fn suggest(&self, _: Option<&mod_api::CommandSender>, prefix: &str) -> Vec<mod_api::CommandSuggestion> {
         let prefix = prefix.to_ascii_lowercase();
-        (self.0)().iter().filter(|w| w.starts_with(&prefix)).map(|w| mod_api::CommandSuggestion::new(*w)).collect()
+        (self.0)().iter().filter(|w| w.to_ascii_lowercase().starts_with(&prefix)).map(|w| mod_api::CommandSuggestion::new(*w)).collect()
     }
 }
 
@@ -1669,7 +1669,7 @@ mod tree_tests {
         assert_eq!(completing("npc sheep --color <color:word>"), "npc sheep --color <color:word>");
         assert_eq!(completing("npc glowing --color <color:word>"), "npc glowing --color <color:citizens:colour>");
         assert!(core::commands::entity_type_names().contains(&"zombie"));
-        assert!(core::commands::colour_names().contains(&"dark_red"));
+        assert!(core::commands::colour_names().contains(&"DARK_RED"));
     }
 
     #[test]
