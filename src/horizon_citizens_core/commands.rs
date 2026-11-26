@@ -1774,6 +1774,21 @@ const ENTITY_TYPES: &[&str] = &[
     "snowman", "mushroom_cow", "pig_zombie", "villager_golem",
 ];
 
+/// The entity types `--type` completes (the original's `EntityType` suggestions), lower case.
+pub fn entity_type_names() -> &'static [&'static str] {
+    ENTITY_TYPES
+}
+
+/// Whether `word` is an alias of `npc type` (the usage of an alias reads like its command's).
+pub fn is_type_alias(word: &str) -> bool {
+    find_cmd("type").is_some_and(|c| c.aliases.iter().any(|a| *a == word))
+}
+
+/// The chat colours `--color` completes.
+pub fn colour_names() -> &'static [&'static str] {
+    &COLOURS
+}
+
 /// The per-type create nodes (`citizens.npc.create.zombie`, ...), one per entity type of plugin.yml
 /// (the older Bukkit names left out), as `create` asks them.
 pub fn create_type_nodes() -> Vec<String> {

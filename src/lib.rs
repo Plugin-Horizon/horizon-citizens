@@ -6,6 +6,7 @@
 //! `mod_citizens::{api, npc, yaml, DespawnReason, NpcEvent}`.
 
 pub mod horizon_citizens_core;
+mod cmdkit;
 use horizon_citizens_core as core;
 use mod_api::{
     AttackEntityEvent, Command, CommandArgumentValue, CommandInvocation, CommandSource, Config,
@@ -599,10 +600,11 @@ fn bodiless_sender(name: &str, level: PermissionLevel) -> core::world::Sender {
 /// The typed line, rebuilt from the parsed command: the literal path, then the present arguments
 /// in order. Citizens' usages take words, `text` (the rest of the line) and numbers only.
 fn command_line(host: &dyn ServerHost, cmd: &CommandInvocation) -> String {
-    let mut words = cmd.literals.clone();
-    words.extend(cmd.arguments.iter().map(|a| arg_text(host, &a.value)));
-    words.retain(|w| !w.is_empty());
-    words.join(" ")
+    // The words and the arguments in the usage's order (`pathto <x> <y> <z> --margin <margin>` has a word after its arguments).
+    let values: Vec<(String, String)> =
+        cmd.arguments.iter().map(|a| (a.name.clone(), arg_text(host, &a.value))).filter(|(_, v)| !v.is_empty()).collect();
+    let usages = core::commands::usages();
+    cmdkit::rebuild_words(&usages, &cmd.literals, &values)
 }
 
 fn arg_text(host: &dyn ServerHost, value: &CommandArgumentValue) -> String {
@@ -610,11 +612,45 @@ fn arg_text(host: &dyn ServerHost, value: &CommandArgumentValue) -> String {
         // An `item` argument (`setequipment hand stick`): the core wants the item id word.
         CommandArgumentValue::Item(stack) => stack.item().id(host),
         CommandArgumentValue::String(s) => s.clone(),
+        CommandArgumentValue::Custom { value, .. } => value.clone(),
         CommandArgumentValue::Integer(i) => i.to_string(),
         CommandArgumentValue::Number(n) => n.to_string(),
         CommandArgumentValue::Boolean(b) => b.to_string(),
         _ => String::new(),
     }
+}
+
+/// A word that completes from a fixed list and accepts anything else (Citizens answers a wrong type or colour itself).
+struct Words(fn() -> &'static [&'static str]);
+
+impl mod_api::CommandArgumentType for Words {
+    fn kind(&self) -> mod_api::CommandArgumentKind {
+        mod_api::CommandArgumentKind::Word
+    }
+
+    fn parse(&self, input: &str) -> Result<String, mod_api::CommandArgumentError> {
+        Ok(input.to_owned())
+    }
+
+    fn suggest(&self, _: Option<&mod_api::CommandSender>, prefix: &str) -> Vec<mod_api::CommandSuggestion> {
+        let prefix = prefix.to_ascii_lowercase();
+        (self.0)().iter().filter(|w| w.starts_with(&prefix)).map(|w| mod_api::CommandSuggestion::new(*w)).collect()
+    }
+}
+
+/// The usage with its `--type` and `--color` words naming the completing types.
+fn completing(usage: &str) -> String {
+    // `--type` of a potion effect is an effect, `--color` of a sheep a dye: only the entity types of `create`, `type` and
+    // `list` and the chat colours of `glowing` complete from the lists here.
+    let sub = usage.split_whitespace().nth(1).unwrap_or_default();
+    let mut out = usage.to_owned();
+    if matches!(sub, "create" | "type" | "list" | "ls") || core::commands::is_type_alias(sub) {
+        out = out.replace("<type:word>", "<type:citizens:entity_type>");
+    }
+    if sub.starts_with("glow") {
+        out = out.replace("<color:word>", "<color:citizens:colour>");
+    }
+    out
 }
 
 /// The kinds an NPC entity can have: mannequins and the types of non-player NPCs. Other kinds
@@ -1013,6 +1049,11 @@ impl Hooks for Citizens {
         }
     }
 
+    fn register(&self, registrar: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+        registrar.register_command_argument("entity_type", Words(core::commands::entity_type_names));
+        registrar.register_command_argument("colour", Words(core::commands::colour_names));
+    }
+
     fn register_commands(&self, _host: &mut dyn ServerHost, event: &mut RegisterCommandsEvent<'_>) {
         // The bare roots (`/npc`, `/citizens`, `/trait`) have no node: a node there would gate every
         // sub-command under it. They stay open and are registered here; the sub-commands go to
@@ -1035,7 +1076,7 @@ impl Hooks for Citizens {
             // permissions mod can hand one to a non-operator; `level` decides when none answers.
             // The help nodes are `default: op` in plugin.yml, like every other node: no usage is level 0.
             let node = core::commands::node_of_usage(&usage);
-            event.commands.push(Command::op(&usage, level).with_node(&perm_node(node)));
+            event.commands.push(Command::op(&completing(&usage), level).with_node(&perm_node(node)));
         }
     }
 
@@ -1598,5 +1639,44 @@ impl Hooks for Citizens {
             eprintln!("[citizens] could not save NPCs: {e}");
         }
         lock(&self.state).installed = false;
+    }
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+
+    #[test]
+    fn the_npc_commands_of_the_original_are_in_the_tree() {
+        let usages = core::commands::usages();
+        let paths = cmdkit::literal_paths(&usages);
+        for want in [
+            "npc create", "npc remove", "npc select", "npc list", "npc tp", "npc tphere", "npc rename", "npc skin", "npc look",
+            "npc gamemode", "npc speed", "npc follow", "npc pathto", "npc type", "npc glowing", "npc sheep", "npc owner", "npc command",
+            "npc hologram", "npc metadata", "trait add", "trait remove", "trait list", "citizens help", "citizens reload", "citizens save",
+        ] {
+            assert!(
+                paths.iter().any(|p| p == want || p.starts_with(&format!("{want} "))),
+                "{want}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_type_and_colour_words_complete() {
+        assert_eq!(completing("npc create --type <type:word> <name:text>"), "npc create --type <type:citizens:entity_type> <name:text>");
+        assert_eq!(completing("npc potioneffect add --type <type:word>"), "npc potioneffect add --type <type:word>");
+        assert_eq!(completing("npc sheep --color <color:word>"), "npc sheep --color <color:word>");
+        assert_eq!(completing("npc glowing --color <color:word>"), "npc glowing --color <color:citizens:colour>");
+        assert!(core::commands::entity_type_names().contains(&"zombie"));
+        assert!(core::commands::colour_names().contains(&"dark_red"));
+    }
+
+    #[test]
+    fn a_pathto_line_keeps_the_option_after_the_coordinates() {
+        let usages = core::commands::usages();
+        let words = ["npc".to_owned(), "pathto".to_owned(), "--margin".to_owned()];
+        let values = [("x".into(), "1".into()), ("y".into(), "2".into()), ("z".into(), "3".into()), ("margin".into(), "4".into())];
+        assert_eq!(cmdkit::rebuild_words(&usages, &words, &values), "npc pathto 1 2 3 --margin 4");
     }
 }
