@@ -13,7 +13,7 @@ use mod_api::{
     ConfigKind, ConfigLoadingEvent, ConfigReloadingEvent, EntityInteractEvent,
     EntityJoinLevelEvent, EntityLeaveLevelEvent, Flow, Hand, Hooks, HostSide, LevelRandomHost,
     LivingIncomingDamageEvent, NodeDefault, PermissionGatherNodesEvent, PermissionLevel, PermissionNode,
-    PermissionValueType, PlayerCommandEvent, PlayerCommandsSentEvent, PlayerRef, RegisterCommandsEvent, RegisterNodeCommandsEvent,
+    PermissionValueType, PlayerCommandsSentEvent, PlayerRef, RegisterNodeCommandsEvent,
     RegisterConfigsEvent, RemovalReason, RunModCommandEvent, ServerHost, ServerStoppingEvent,
     ServerTickEvent, ServerTickPhase, Text, ItemStack, MenuClickedEvent, MenuClosedEvent, MenuReplace, ServerChatEvent,
     MerchantTradeSelectedEvent, MerchantOffer, ItemCost, ClipBlock, ClipFluid, Pose as GamePose, SnifferState as GameSniffer, SpellcasterSpell as GameSpell, SynchedState, SynchedValue,
@@ -1054,25 +1054,10 @@ impl Hooks for Citizens {
         registrar.register_command_argument("colour", Words(core::commands::colour_names));
     }
 
-    fn register_commands(&self, _host: &mut dyn ServerHost, event: &mut RegisterCommandsEvent<'_>) {
-        // The bare roots (`/npc`, `/citizens`, `/trait`) have no node: a node there would gate every
-        // sub-command under it. They stay open and are registered here; the sub-commands go to
-        // `register_node_commands`.
-        let level = lock(&self.state).cfg.command_level;
-        for usage in core::commands::usages() {
-            if !usage.contains(' ') {
-                event.commands.push(Command::op(&usage, level));
-            }
-        }
-    }
-
     fn register_node_commands(&self, _host: &mut dyn ServerHost, event: &mut RegisterNodeCommandsEvent<'_>) {
         let level = lock(&self.state).cfg.command_level;
         for usage in core::commands::usages() {
-            if !usage.contains(' ') {
-                continue;
-            }
-            // Each sub-command path carries Citizens' node (`citizens.npc.create`, `node_of_usage`), so a
+            // Each usage path, the bare roots included, carries Citizens' node (`citizens.npc.create`, `node_of_usage`), so a
             // permissions mod can hand one to a non-operator; `level` decides when none answers.
             // The help nodes are `default: op` in plugin.yml, like every other node: no usage is level 0.
             let node = core::commands::node_of_usage(&usage);
@@ -1093,41 +1078,6 @@ impl Hooks for Citizens {
         for node in all {
             let _ = event.nodes.add(perm_node(&node), NodeDefault::Level(PermissionLevel::from_level(level)));
         }
-    }
-
-    /// A player without a sub-command's node is refused with Citizens' own line, not "unknown command": the
-    /// usage is hidden from them (`register_commands`). Help needs its node too (plugin.yml default: op).
-    fn player_command(&self, host: &mut dyn ServerHost, event: &mut PlayerCommandEvent<'_>) -> Flow {
-        let words: Vec<String> = event
-            .command
-            .trim_start_matches('/')
-            .split_whitespace()
-            .map(str::to_ascii_lowercase)
-            .collect();
-        let root = words.first().map(String::as_str).unwrap_or("");
-        if !core::commands::is_root(root) {
-            return Flow::Continue;
-        }
-        let sub = if root == "trait" { "" } else { words.get(1).map(String::as_str).unwrap_or("") };
-        // A word that is no sub-command of ours is left to the engine ("unknown argument", as before).
-        if !sub.is_empty()
-            && root != "trait"
-            && !core::commands::usages()
-                .iter()
-                .any(|u| u.split_whitespace().nth(1) == Some(sub))
-        {
-            return Flow::Continue;
-        }
-        let node = core::commands::node_for(root, sub);
-        let allowed = host.player(event.player).is_some_and(|p| holds(host, p, node));
-        if allowed {
-            return Flow::Continue;
-        }
-        event.cancelled = true;
-        event.replies.push(Text::literal(
-            "\u{a7}cYou don't have permission to execute that command.",
-        ));
-        Flow::Cancel
     }
 
     /// Tab list: the `npc`, `citizens` and `trait` roots leave the tree of a player who may run none of their
@@ -1670,6 +1620,21 @@ mod tree_tests {
         assert_eq!(completing("npc glowing --color <color:word>"), "npc glowing --color <color:citizens:colour>");
         assert!(core::commands::entity_type_names().contains(&"zombie"));
         assert!(core::commands::colour_names().contains(&"DARK_RED"));
+    }
+
+    /// Paper answers a player without the node of a command "unknown command" (its plugin.yml gives each root a node);
+    /// the engine does so for a usage registered `with_node`, so the mod has no hook of its own for the refusal and no
+    /// usage is open at level 0.
+    #[test]
+    fn a_player_without_the_node_gets_the_engines_unknown_command() {
+        let source = include_str!("lib.rs");
+        let hook = ["fn player", "_command("].concat();
+        assert!(!source.contains(&hook), "the mod must not answer a missing permission itself");
+        let plain = ["event.commands.push(Command::op(&", "usage, level));"].concat();
+        assert!(!source.contains(&plain), "every usage, the bare roots too, carries its node");
+        for usage in core::commands::usages() {
+            assert!(!core::commands::node_of_usage(&usage).is_empty(), "{usage}");
+        }
     }
 
     #[test]
