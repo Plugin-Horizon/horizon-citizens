@@ -138,7 +138,7 @@ const MOBS: &[Mob] = &[
         kinds: &["AXOLOTL"],
         flags: &[f('d', "d", true)],
         opts: &[o("variant", V::Words(&["lucy", "wild", "gold", "cyan", "blue"]))],
-        live: true, noeffect: &["d"], ..m!("axolotl", [], "axolotl (-d) (--variant variant)")
+        live: true, ..m!("axolotl", [], "axolotl (-d) (--variant variant)")
     },
     Mob { kinds: &["BAT"], opts: &[o("awake", V::Bool)], live: true, ..m!("bat", [], "bat --awake [awake]") },
     Mob {
@@ -167,7 +167,7 @@ const MOBS: &[Mob] = &[
         kinds: &["CAT"],
         flags: &[f('s', "sitting", true), f('n', "sitting", false), f('l', "lying", true)],
         opts: &[o("type", V::Any), o("ccolor", V::Any)],
-        live: true, noeffect: &["lying"], ..m!("cat", [], "cat (-s/-n/-l) --type type --ccolor collar color")
+        live: true, ..m!("cat", [], "cat (-s/-n/-l) --type type --ccolor collar color")
     },
     Mob { kinds: &["CHICKEN"], opts: &[o("variant", V::Any)], live: true, ..m!("chicken", [], "chicken (--variant variant)") },
     Mob {
@@ -205,7 +205,7 @@ const MOBS: &[Mob] = &[
         opts: &[o("phase", V::Any), o("destroywalls", V::Bool)],
         live: true, ..m!("enderdragon", [], "enderdragon --phase [phase] --destroywalls [true|false]")
     },
-    Mob { kinds: &["ENDERMAN"], flags: &[f('a', "angry", true)], noeffect: &["angry"], ..m!("enderman", [], "enderman -a(ngry)") },
+    Mob { kinds: &["ENDERMAN"], flags: &[f('a', "angry", true)], ..m!("enderman", [], "enderman -a(ngry)") },
     Mob {
         opts: &[o("width", V::Num(NUM0.0, NUM0.1)), o("height", V::Num(NUM0.0, NUM0.1)), o("strength", V::Num(NUM.0, NUM.1)), o("vertical-strength", V::Num(NUM.0, NUM.1))],
         ..m!("forcefield", [], "forcefield --width [width] --height [height] --strength [strength] --vertical-strength [vertical strength]")
@@ -301,7 +301,7 @@ const MOBS: &[Mob] = &[
         kinds: &["PANDA"],
         flags: &[f('e', "eating", true), f('s', "sitting", true), f('n', "sneezing", true), f('r', "rolling", true)],
         opts: &[o("gene", V::Any), o("hiddengene", V::Any)],
-        live: true, noeffect: &["eating"], ..m!("panda", [], "panda --gene (main gene) --hiddengene (hidden gene) -e(ating) -s(itting) -n (sneezing) -r(olling)")
+        live: true, ..m!("panda", [], "panda --gene (main gene) --hiddengene (hidden gene) -e(ating) -s(itting) -n (sneezing) -r(olling)")
     },
     Mob { kinds: &["PARROT"], opts: &[o("variant", V::Any)], live: true, ..m!("parrot", [], "parrot (--variant variant)") },
     Mob {
@@ -327,7 +327,7 @@ const MOBS: &[Mob] = &[
     },
     Mob { kinds: &["PHANTOM"], opts: &[o("size", V::Int(0, 64))], live: true, ..m!("phantom", [], "phantom (--size size)") },
     Mob { kinds: &["PIG"], opts: &[o("variant", V::Any)], live: true, ..m!("pig", [], "pig (--variant variant)") },
-    Mob { kinds: &["PIGLIN"], opts: &[o("dancing", V::Bool)], noeffect: &["dancing"], ..m!("piglin", [], "piglin (--dancing [true|false])") },
+    Mob { kinds: &["PIGLIN"], opts: &[o("dancing", V::Bool)], ..m!("piglin", [], "piglin (--dancing [true|false])") },
     Mob {
         flags: &[f('a', "allowlist", true), f('e', "empty", true), f('d', "denylist", true), f('c', "clear", true)],
         opts: &[
@@ -374,13 +374,13 @@ const MOBS: &[Mob] = &[
         opts: &[o("peek", V::Int(0, 100)), o("color", V::Any)],
         live: true, ..m!("shulker", [], "shulker (--peek [peek] --color [color])")
     },
-    Mob { kinds: &["SNIFFER"], opts: &[o("state", V::Any)], noeffect: &["state"], ..m!("sniffer", [], "sniffer (--state [state])") },
+    Mob { kinds: &["SNIFFER"], opts: &[o("state", V::Words(&["idling", "feeling_happy", "scenting", "sniffing", "searching", "digging", "rising"]))], ..m!("sniffer", [], "sniffer (--state [state])") },
     Mob {
         kinds: &["SNOWMAN", "SNOW_GOLEM"],
         flags: &[f('d', "derp", true), f('f', "form_snow", true)],
         live: true, noeffect: &["form_snow"], ..m!("snowman", ["snowgolem"], "snowman (-d[erp]) (-f[orm snow])")
     },
-    Mob { kinds: &["EVOKER", "ILLUSIONER"], opts: &[o("spell", V::Any)], noeffect: &["spell"], ..m!("spellcaster", [], "spellcaster (--spell spell)") },
+    Mob { kinds: &["EVOKER", "ILLUSIONER"], opts: &[o("spell", V::Words(&["none", "summon_vex", "fangs", "wololo", "disappear", "blindness"]))], ..m!("spellcaster", [], "spellcaster (--spell spell)") },
     Mob {
         kinds: &["TEXT_DISPLAY"],
         opts: &[o("shadowed", V::Bool), o("seethrough", V::Bool), o("line_width", V::Int(0, IMAX)), o("text", V::Text)],
@@ -399,7 +399,7 @@ const MOBS: &[Mob] = &[
         flags: &[f('s', "shake_head", true)],
         opts: &[o("level", V::Int(1, 5)), o("type", V::Any), o("profession", V::Any)],
         live: true,
-        noeffect: &["shake_head"], ..m!("villager", [], "villager (--level level) (--type type) (--profession profession) -s(hake head)")
+        ..m!("villager", [], "villager (--level level) (--type type) (--profession profession) -s(hake head)")
     },
     Mob {
         kinds: &["WITHER"],
@@ -410,7 +410,7 @@ const MOBS: &[Mob] = &[
         kinds: &["WOLF"],
         flags: &[f('s', "sitting", true), f('a', "angry", true), f('t', "tamed", true), f('i', "interested", true)],
         opts: &[o("collar", V::Any), o("variant", V::Any)],
-        live: true, noeffect: &["interested"], ..m!("wolf", [], "wolf (-s(itting) a(ngry) t(amed) i(nterested)) --collar [hex rgb color|name] --variant [variant]")
+        live: true, ..m!("wolf", [], "wolf (-s(itting) a(ngry) t(amed) i(nterested)) --collar [hex rgb color|name] --variant [variant]")
     },
     // The ones with their own handler: they read the line themselves.
     Mob { pos: &[o("attribute", V::Any), o("value", V::Num(NUM.0, NUM.1))], live: true, ..m!("attribute", [], "attribute [attribute] [value]") },
@@ -808,6 +808,15 @@ fn hosted(name: &str, key: &str) -> bool {
             | ("panda", "sneezing" | "rolling" | "sitting")
             | ("polarbear", "rearing")
             | ("vex", "charging")
+            | ("axolotl", "d")
+            | ("cat", "lying")
+            | ("panda", "eating")
+            | ("piglin", "dancing")
+            | ("enderman", "angry")
+            | ("wolf", "interested")
+            | ("sniffer", "state")
+            | ("spellcaster", "spell")
+            | ("villager", "shake_head")
             | ("enderdragon", "destroywalls")
     )
 }
@@ -1636,7 +1645,7 @@ fn mob_nbt(npc: &NpcData, kind: &str, out: &mut Vec<String>) {
 mod tests {
     use super::*;
     use crate::horizon_citizens_core::config::Config;
-    use crate::horizon_citizens_core::entity_set::{EntitySet, Synched};
+    use crate::horizon_citizens_core::entity_set::{EntitySet, Sniffer, Spell, Synched, Value};
 
     fn setup(kind: &str) -> (World, Sender) {
         let mut cfg = Config::default();
@@ -1947,14 +1956,27 @@ mod tests {
     }
 
     #[test]
-    fn synched_only_states_say_so() {
-        // The wolf's interested state has no host call.
-        let (mut w, s) = setup("wolf");
-        let r = cmd(&mut w, &s, "npc wolf -i");
-        assert!(r.last().unwrap().contains("does not act on it"), "{r:?}");
-        let (mut w, s) = setup("panda");
-        let r = cmd(&mut w, &s, "npc panda -e");
-        assert!(r.last().unwrap().contains("does not act on it"), "{r:?}");
+    fn the_synched_only_modifiers_no_longer_say_they_do_not_act() {
+        for (kind, line) in [
+            ("wolf", "npc wolf -i"),
+            ("panda", "npc panda -e"),
+            ("axolotl", "npc axolotl -d"),
+            ("cat", "npc cat -l"),
+            ("piglin", "npc piglin --dancing true"),
+            ("enderman", "npc enderman -a"),
+            ("sniffer", "npc sniffer --state rising"),
+            ("evoker", "npc spellcaster --spell fangs"),
+            ("villager", "npc villager -s"),
+        ] {
+            let (mut w, s) = setup(kind);
+            let r = cmd(&mut w, &s, line);
+            assert!(!r.iter().any(|l| l.contains("does not act")), "{line}: {r:?}");
+        }
+        // A word the game has no such state for is refused.
+        let (mut w, s) = setup("sniffer");
+        let r = cmd(&mut w, &s, "npc sniffer --state napping");
+        assert!(!r.is_empty());
+        assert!(w.saves.get(0).unwrap().map.at(&["traits", "sniffer", "state"]).is_none(), "{r:?}");
     }
 
     fn entity_sets(w: &mut World, entity: u32) -> Vec<EntitySet> {
@@ -1969,7 +1991,7 @@ mod tests {
 
     #[test]
     fn synched_states_are_set_on_the_entity() {
-        let cases: [(&str, &str, EntitySet); 8] = [
+        let cases: [(&str, &str, EntitySet); 19] = [
             ("allay", "npc allay -d", EntitySet::Synched(Synched::AllayDancing, true)),
             ("fox", "npc fox --interested true", EntitySet::Synched(Synched::FoxInterested, true)),
             ("fox", "npc fox --pouncing true", EntitySet::Synched(Synched::FoxPouncing, true)),
@@ -1978,6 +2000,17 @@ mod tests {
             ("panda", "npc panda -r", EntitySet::Synched(Synched::PandaRolling, true)),
             ("polar_bear", "npc polarbear -r", EntitySet::Synched(Synched::PolarBearStanding, true)),
             ("vex", "npc vex --charging true", EntitySet::Synched(Synched::VexCharging, true)),
+            ("axolotl", "npc axolotl -d", EntitySet::Synched(Synched::AxolotlPlayingDead, true)),
+            ("cat", "npc cat -l", EntitySet::Synched(Synched::CatLying, true)),
+            ("panda", "npc panda -e", EntitySet::Synched(Synched::PandaEating, true)),
+            ("piglin", "npc piglin --dancing true", EntitySet::Synched(Synched::PiglinDancing, true)),
+            ("enderman", "npc enderman -a", EntitySet::Synched(Synched::EndermanCreepy, true)),
+            ("wolf", "npc wolf -i", EntitySet::Synched(Synched::WolfInterested, true)),
+            ("sniffer", "npc sniffer --state digging", EntitySet::Value(Value::Sniffer(Sniffer::Digging))),
+            ("sniffer", "npc sniffer --state FEELING_HAPPY", EntitySet::Value(Value::Sniffer(Sniffer::FeelingHappy))),
+            ("evoker", "npc spellcaster --spell summon_vex", EntitySet::Value(Value::Spell(Spell::SummonVex))),
+            ("illusioner", "npc spellcaster --spell blindness", EntitySet::Value(Value::Spell(Spell::Blindness))),
+            ("villager", "npc villager -s", EntitySet::Value(Value::VillagerUnhappy(40))),
         ];
         for (kind, line, want) in cases {
             let (mut w, s) = setup(kind);

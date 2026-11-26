@@ -2250,8 +2250,14 @@ fn tphere(w: &mut World, sender: &Sender, args: &Args) -> Res {
     let mut to = here(w, sender)?;
     let sender_loc = to.clone();
     if args.words.first().is_some_and(|a| a.eq_ignore_ascii_case("cursor")) {
-        // The block the sender looks at needs a ray cast Horizon's hooks do not give.
-        return Err(err(w, M_MISSING_CURSOR_BLOCK, &[]));
+        // `getTargetBlock(null, 64).getRelative(UP).getLocation()`: the space above the block, facing nowhere.
+        let b = w.cursor_block.ok_or_else(|| err(w, M_MISSING_CURSOR_BLOCK, &[]))?;
+        to.x = f64::from(b[0]);
+        to.y = f64::from(b[1] + 1);
+        to.z = f64::from(b[2]);
+        to.yaw = 0.0;
+        to.pitch = 0.0;
+        to.body_yaw = 0.0;
     }
     if !exact(sender, w.cfg.command_level, "citizens.npc.tphere.multiworld")
         && w.saves.get(id).and_then(NpcData::location).is_some_and(|l| l.world != to.world)
@@ -3054,7 +3060,12 @@ fn pathto(w: &mut World, sender: &Sender, args: &Args) -> Res {
     if args.words.len() == 1 {
         match args.words[0].to_ascii_lowercase().as_str() {
             "me" | "here" => to = here(w, sender)?,
-            "cursor" => return Err(err(w, M_UNSUPPORTED, &["pathto cursor"])),
+            "cursor" => {
+                // `getTargetBlockExact(32).getLocation()`: the block's corner.
+                let b = w.cursor_block.ok_or_else(|| err(w, M_MISSING_CURSOR_BLOCK, &[]))?;
+                let here = here(w, sender)?;
+                to = Location { world: here.world, x: f64::from(b[0]), y: f64::from(b[1]), z: f64::from(b[2]), yaw: 0.0, pitch: 0.0, body_yaw: 0.0 };
+            }
             _ => return Err(usage_of(w, "pathto")),
         }
     } else {
@@ -3204,9 +3215,13 @@ fn anchor(w: &mut World, sender: &Sender, args: &Args) -> Res {
         if name.is_empty() {
             return Err(err(w, M_ANCHOR_INVALID, &[]));
         }
-        let loc = here(w, sender)?;
+        let mut loc = here(w, sender)?;
         if args.has('c') {
-            return Err(err(w, M_UNSUPPORTED, &["anchor -c"]));
+            // `getTargetBlock(null, 64).getLocation()`: the block's corner.
+            let b = w.cursor_block.ok_or_else(|| err(w, M_MISSING_CURSOR_BLOCK, &[]))?;
+            loc.x = f64::from(b[0]);
+            loc.y = f64::from(b[1]);
+            loc.z = f64::from(b[2]);
         }
         if find_anchor(&list, name).is_some() {
             return Err(err(w, M_ANCHOR_EXISTS, &[name]));
@@ -5416,6 +5431,32 @@ mod tests {
         assert!(r[0].contains("Format is x:y:z(:world) or x y z( world)."), "{r:?}");
         let r = run_ok(&mut w, &s, "npc moveto 1 2 3 nowhere");
         assert!(r[0].contains("World not found."), "{r:?}");
+    }
+
+    #[test]
+    fn the_cursor_block_serves_tphere_pathto_and_anchor() {
+        let mut w = world();
+        let s = sender(2);
+        run_ok(&mut w, &s, "npc create A --at 0:64:0");
+        // No block in the crosshair: the original's message.
+        let r = run_ok(&mut w, &s, "npc tphere cursor");
+        assert!(r[0].contains("Please look at a block to teleport to."), "{r:?}");
+        let r = run_ok(&mut w, &s, "npc pathto cursor");
+        assert!(r[0].contains("Please look at a block to teleport to."), "{r:?}");
+        w.cursor_block = Some([20, 70, -5]);
+        // tphere: the space above the block, yaw and pitch 0.
+        let r = run_ok(&mut w, &s, "npc tphere cursor");
+        let l = w.saves.get(0).unwrap().location().unwrap();
+        assert_eq!((l.x, l.y, l.z, l.yaw, l.pitch), (20.0, 71.0, -5.0, 0.0, 0.0));
+        assert!(r[0].contains("was teleported to"), "{r:?}");
+        // anchor -c: the block's own corner.
+        let r = run_ok(&mut w, &s, "npc anchor --save spot -c");
+        assert!(!r.is_empty(), "{r:?}");
+        let list = w.saves.get(0).unwrap().string_list(&["traits", "anchors", "list"]);
+        assert_eq!(list, vec!["spot;world;20.0;70.0;-5.0".to_string()]);
+        // pathto cursor walks there.
+        run_ok(&mut w, &s, "npc pathto cursor");
+        assert!(w.is_navigating(0) || !w.is_out(0));
     }
 
     #[test]

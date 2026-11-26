@@ -18,6 +18,8 @@ pub enum EntitySet {
     Pose(Pose),
     /// `entity_set_synched_state`.
     Synched(Synched, bool),
+    /// `entity_set_synched_value`.
+    Value(Value),
     /// `entity_set_targetable`.
     Targetable(bool),
     /// `entity_set_leashable`.
@@ -61,7 +63,78 @@ pub enum Synched {
     AllayDancing,
     VexCharging,
     PolarBearStanding,
+    AxolotlPlayingDead,
+    CatLying,
+    PandaEating,
+    PiglinDancing,
+    EndermanCreepy,
+    WolfInterested,
 }
+
+/// What a sniffer is doing (`Sniffer.State`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sniffer {
+    Idling,
+    FeelingHappy,
+    Scenting,
+    Sniffing,
+    Searching,
+    Digging,
+    Rising,
+}
+
+impl Sniffer {
+    /// The saved word (upper case with `_`, as the `--state` option saves it).
+    pub fn parse(word: &str) -> Option<Sniffer> {
+        Some(match word.trim().to_ascii_uppercase().as_str() {
+            "IDLING" => Sniffer::Idling,
+            "FEELING_HAPPY" => Sniffer::FeelingHappy,
+            "SCENTING" => Sniffer::Scenting,
+            "SNIFFING" => Sniffer::Sniffing,
+            "SEARCHING" => Sniffer::Searching,
+            "DIGGING" => Sniffer::Digging,
+            "RISING" => Sniffer::Rising,
+            _ => return None,
+        })
+    }
+}
+
+/// The spell an evoker or illusioner casts (`SpellcasterIllager.IllagerSpell`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Spell {
+    None,
+    SummonVex,
+    Fangs,
+    Wololo,
+    Disappear,
+    Blindness,
+}
+
+impl Spell {
+    pub fn parse(word: &str) -> Option<Spell> {
+        Some(match word.trim().to_ascii_uppercase().as_str() {
+            "NONE" => Spell::None,
+            "SUMMON_VEX" => Spell::SummonVex,
+            "FANGS" => Spell::Fangs,
+            "WOLOLO" => Spell::Wololo,
+            "DISAPPEAR" => Spell::Disappear,
+            "BLINDNESS" => Spell::Blindness,
+            _ => return None,
+        })
+    }
+}
+
+/// The values `entity_set_synched_value` takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Value {
+    Sniffer(Sniffer),
+    Spell(Spell),
+    /// A villager's unhappy counter in ticks (`-s` is vanilla's `setUnhappy`: 40).
+    VillagerUnhappy(i32),
+}
+
+/// Ticks of a villager's head shake that `AbstractVillager.setUnhappy` sets.
+pub const VILLAGER_SHAKE_TICKS: i32 = 40;
 
 /// (entity kind, trait name, saved key, state): the modifiers whose value only lives in synched data.
 const SYNCHED: &[(&str, &str, &str, Synched)] = &[
@@ -74,6 +147,12 @@ const SYNCHED: &[(&str, &str, &str, Synched)] = &[
     ("minecraft:panda", "panda", "sitting", Synched::PandaSitting),
     ("minecraft:polar_bear", "polarbear", "rearing", Synched::PolarBearStanding),
     ("minecraft:vex", "vex", "charging", Synched::VexCharging),
+    ("minecraft:axolotl", "axolotl", "d", Synched::AxolotlPlayingDead),
+    ("minecraft:cat", "cat", "lying", Synched::CatLying),
+    ("minecraft:panda", "panda", "eating", Synched::PandaEating),
+    ("minecraft:piglin", "piglin", "dancing", Synched::PiglinDancing),
+    ("minecraft:enderman", "enderman", "angry", Synched::EndermanCreepy),
+    ("minecraft:wolf", "wolf", "interested", Synched::WolfInterested),
 ];
 
 /// The entity id Bukkit's `EntityType` name stands for (`ZOMBIE` -> `minecraft:zombie`).
@@ -126,6 +205,23 @@ pub fn settings(npc: &NpcData, kind: &str) -> Vec<EntitySet> {
             out.push(EntitySet::Synched(*state, b));
         }
     }
+    // The values with a word or a counter: a sniffer's state, a spellcaster's spell, a villager's head shake (a zombie villager is not an `AbstractVillager`: its `-s` stays saved only).
+    let word = |name: &str, key: &str| npc.map.at(&["traits", name, key]).and_then(Node::text);
+    if kind == "minecraft:sniffer"
+        && let Some(state) = word("sniffer", "state").and_then(|w| Sniffer::parse(&w))
+    {
+        out.push(EntitySet::Value(Value::Sniffer(state)));
+    }
+    if matches!(kind, "minecraft:evoker" | "minecraft:illusioner")
+        && let Some(spell) = word("spellcaster", "spell").and_then(|w| Spell::parse(&w))
+    {
+        out.push(EntitySet::Value(Value::Spell(spell)));
+    }
+    if kind == "minecraft:villager"
+        && let Some(b) = flag(npc, "villager", "shake_head")
+    {
+        out.push(EntitySet::Value(Value::VillagerUnhappy(if b { VILLAGER_SHAKE_TICKS } else { 0 })));
+    }
     out
 }
 
@@ -140,6 +236,33 @@ mod tests {
     #[test]
     fn nothing_saved_nothing_set() {
         assert!(settings(&npc("FOX"), "minecraft:fox").is_empty());
+    }
+
+    #[test]
+    fn the_saved_synched_only_states_and_values_become_host_calls() {
+        let mut n = npc("minecraft:cat");
+        n.map.put(&["traits", "cat", "lying"], Node::bool(true));
+        assert_eq!(settings(&n, "minecraft:cat"), vec![EntitySet::Synched(Synched::CatLying, true)]);
+        // A state of another kind is not sent to this one.
+        assert!(settings(&n, "minecraft:wolf").is_empty());
+
+        let mut n = npc("minecraft:sniffer");
+        n.map.put(&["traits", "sniffer", "state"], Node::str("FEELING_HAPPY"));
+        assert_eq!(settings(&n, "minecraft:sniffer"), vec![EntitySet::Value(Value::Sniffer(Sniffer::FeelingHappy))]);
+        n.map.put(&["traits", "sniffer", "state"], Node::str("NAPPING"));
+        assert!(settings(&n, "minecraft:sniffer").is_empty());
+
+        let mut n = npc("minecraft:evoker");
+        n.map.put(&["traits", "spellcaster", "spell"], Node::str("WOLOLO"));
+        assert_eq!(settings(&n, "minecraft:evoker"), vec![EntitySet::Value(Value::Spell(Spell::Wololo))]);
+
+        let mut n = npc("minecraft:villager");
+        n.map.put(&["traits", "villager", "shake_head"], Node::bool(true));
+        assert_eq!(settings(&n, "minecraft:villager"), vec![EntitySet::Value(Value::VillagerUnhappy(40))]);
+        n.map.put(&["traits", "villager", "shake_head"], Node::bool(false));
+        assert_eq!(settings(&n, "minecraft:villager"), vec![EntitySet::Value(Value::VillagerUnhappy(0))]);
+        // A zombie villager is no `AbstractVillager`.
+        assert!(settings(&n, "minecraft:zombie_villager").is_empty());
     }
 
     #[test]

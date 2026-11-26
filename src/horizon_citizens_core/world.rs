@@ -545,6 +545,9 @@ pub struct World {
     pub hand_item: Option<crate::horizon_citizens_core::npc::StackData>,
     /// The same stack as SNBT (`debug -i`).
     pub hand_snbt: Option<String>,
+    /// The block the sender's crosshair rests on (`getTargetBlockExact`), read by the host before `pathto`, `tphere`
+    /// and `anchor`: its position in the sender's world.
+    pub cursor_block: Option<[i32; 3]>,
     /// The clicking player's level and inventory (the host reads them before the click).
     pub player_cost: Option<PlayerCost>,
     /// `MountTrait.currentMount`: NPC id -> (its entity, the entity it sits on).
@@ -665,6 +668,7 @@ impl World {
             held_perms: BTreeSet::new(),
             hand_item: None,
             hand_snbt: None,
+            cursor_block: None,
             player_cost: None,
             mounted: HashMap::new(),
             menus: HashMap::new(),

@@ -15,7 +15,7 @@ use mod_api::{
     PermissionValueType, PlayerCommandEvent, PlayerCommandsSentEvent, PlayerRef, RegisterCommandsEvent, RegisterNodeCommandsEvent,
     RegisterConfigsEvent, RemovalReason, RunModCommandEvent, ServerHost, ServerStoppingEvent,
     ServerTickEvent, ServerTickPhase, Text, ItemStack, MenuClickedEvent, MenuClosedEvent, MenuReplace, ServerChatEvent,
-    MerchantTradeSelectedEvent, MerchantOffer, ItemCost, Pose as GamePose, SynchedState,
+    MerchantTradeSelectedEvent, MerchantOffer, ItemCost, ClipBlock, ClipFluid, Pose as GamePose, SnifferState as GameSniffer, SpellcasterSpell as GameSpell, SynchedState, SynchedValue,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -149,6 +149,17 @@ fn player_info(host: &dyn ServerHost, p: PlayerRef) -> Option<PlayerInfo> {
         },
         rot,
     })
+}
+
+/// The block the player's crosshair rests on within `distance` blocks (`Player.getTargetBlockExact`): the first block
+/// of the eye ray, fluids ignored.
+fn cursor_block(host: &dyn ServerHost, player: PlayerRef, distance: f64) -> Option<[i32; 3]> {
+    let entity = player.entity();
+    let eye = entity.eye_position(host)?;
+    let view = entity.view_vector(host)?;
+    let to = [eye[0] + view[0] * distance, eye[1] + view[1] * distance, eye[2] + view[2] * distance];
+    let hit = player.level(host)?.clip(host, eye, to, ClipBlock::Outline, ClipFluid::None)?;
+    (!hit.miss).then_some(hit.block)
 }
 
 /// Operator level as the number Citizens compares (`PermissionLevel` has no numeric value).
@@ -426,7 +437,7 @@ fn shop_apply(host: &mut dyn ServerHost, uuid: u128, levels: Option<i32>, slots:
 /// One host call of `entity_set` for an NPC's entity. A call the game refuses (a setting the kind has no
 /// use for) is dropped: a fox's state on a panda, a disguise as a type the clients do not have.
 fn apply_entity_set(host: &mut dyn ServerHost, entity: u32, set: core::entity_set::EntitySet) {
-    use horizon_citizens_core::entity_set::{EntitySet, Pose, Synched};
+    use horizon_citizens_core::entity_set::{EntitySet, Pose, Sniffer, Spell, Synched, Value};
     let Some(e) = host.entity(entity) else { return };
     match set {
         EntitySet::Disguise(kind) => {
@@ -462,8 +473,37 @@ fn apply_entity_set(host: &mut dyn ServerHost, entity: u32, set: core::entity_se
                 Synched::AllayDancing => SynchedState::AllayDancing,
                 Synched::VexCharging => SynchedState::VexCharging,
                 Synched::PolarBearStanding => SynchedState::PolarBearStanding,
+                Synched::AxolotlPlayingDead => SynchedState::AxolotlPlayingDead,
+                Synched::CatLying => SynchedState::CatLying,
+                Synched::PandaEating => SynchedState::PandaEating,
+                Synched::PiglinDancing => SynchedState::PiglinDancing,
+                Synched::EndermanCreepy => SynchedState::EndermanCreepy,
+                Synched::WolfInterested => SynchedState::WolfInterested,
             };
             let _ = e.set_synched_state(host, state, on);
+        }
+        EntitySet::Value(value) => {
+            let value = match value {
+                Value::Sniffer(s) => SynchedValue::SnifferState(match s {
+                    Sniffer::Idling => GameSniffer::Idling,
+                    Sniffer::FeelingHappy => GameSniffer::FeelingHappy,
+                    Sniffer::Scenting => GameSniffer::Scenting,
+                    Sniffer::Sniffing => GameSniffer::Sniffing,
+                    Sniffer::Searching => GameSniffer::Searching,
+                    Sniffer::Digging => GameSniffer::Digging,
+                    Sniffer::Rising => GameSniffer::Rising,
+                }),
+                Value::Spell(s) => SynchedValue::SpellcasterSpell(match s {
+                    Spell::None => GameSpell::None,
+                    Spell::SummonVex => GameSpell::SummonVex,
+                    Spell::Fangs => GameSpell::Fangs,
+                    Spell::Wololo => GameSpell::Wololo,
+                    Spell::Disappear => GameSpell::Disappear,
+                    Spell::Blindness => GameSpell::Blindness,
+                }),
+                Value::VillagerUnhappy(ticks) => SynchedValue::VillagerUnhappyTicks(ticks),
+            };
+            let _ = e.set_synched_value(host, value);
         }
         EntitySet::Targetable(b) => {
             let _ = e.set_targetable(host, b);
@@ -1123,6 +1163,13 @@ impl Hooks for Citizens {
                 w.hand_snbt = snbt;
             });
         }
+        // `pathto cursor`, `tphere cursor` and `anchor -c`: the block the sender's crosshair rests on.
+        let cursor = match (event.source, line.split_whitespace().nth(1).map(str::to_ascii_lowercase).as_deref()) {
+            (CommandSource::Player { player, .. }, Some("pathto")) => cursor_block(&*host, *player, 32.0),
+            (CommandSource::Player { player, .. }, Some("tphere" | "move" | "tph" | "anchor")) => cursor_block(&*host, *player, 64.0),
+            _ => None,
+        };
+        api::with_world(|w| w.cursor_block = cursor);
         let profiles = owner_profiles(&*host, &line);
         let path = saves_path(&*host, &cfg);
         // The shop commands read the sender (and a named player) before they open a menu.
