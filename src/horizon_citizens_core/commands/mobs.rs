@@ -1688,7 +1688,7 @@ mod tests {
         let r = cmd(&mut w, &s, "npc wolf -s -a -i --collar red --variant ashen");
         assert!(r.iter().any(|l| l == "&a&eBob&a's wolf sitting set to &etrue&a."), "{r:?}");
         assert!(r.iter().any(|l| l == "&a&eBob&a's wolf collar set to &ered&a."), "{r:?}");
-        assert!(r.last().unwrap().contains("does not act on it"), "{r:?}");
+        assert!(!r.iter().any(|l| l.contains("does not act")), "{r:?}");
         assert_eq!(saved_of(&w, "wolf", "angry").and_then(|n| n.as_bool()), Some(true));
         assert_eq!(saved_of(&w, "wolf", "variant").and_then(|n| n.text()).as_deref(), Some("ashen"));
         let r = cmd(&mut w, &s, "npc wolf");
@@ -1850,7 +1850,7 @@ mod tests {
         assert!(!r.iter().any(|l| l.contains("does not act")), "{r:?}");
         assert_eq!(nbt(&w, "minecraft:wolf"), ["Sitting:1b", "AngerTime:2147483647", "CollarColor:14b", "variant:\"minecraft:ashen\""]);
         let r = cmd(&mut w, &s, "npc wolf -i");
-        assert!(r.iter().any(|l| l.contains("does not act")), "interested is synched only: {r:?}");
+        assert!(!r.iter().any(|l| l.contains("does not act")), "interested is set on the entity now: {r:?}");
         let (mut w, s) = setup("cat");
         cmd(&mut w, &s, "npc cat -s --type siamese --ccolor blue");
         assert_eq!(nbt(&w, "minecraft:cat"), ["variant:\"minecraft:siamese\"", "CollarColor:11b", "Sitting:1b"]);
