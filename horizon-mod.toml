@@ -1,6 +1,6 @@
 id = "citizens"
 name = "Citizens"
-version = "1.001.0"
+version = "1.1.0"
 description = "Citizens-compatible NPCs: saves.yml, look-close, clicks, /npc (clean-room port). Sentinel's NPC library."
 authors = ["LionSpacer"]
 api = "0.2"
