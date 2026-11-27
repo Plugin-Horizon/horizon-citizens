@@ -97,6 +97,8 @@ pub struct NpcCommand {
     pub player: bool,
     /// Run as the player with operator rights.
     pub op: bool,
+    /// `npc`: with `player`, run as the NPC itself (a PLAYER-type NPC), not as the clicker.
+    pub npc: bool,
     /// Why the port does not run it (review C4): a limit it cannot enforce yet (`perms`, `n`,
     /// `cost`, per-command `cooldown`/`globalcooldown`/`delay`, or an `executionmode` other than
     /// `LINEAR`). Such a command is skipped rather than run for everyone, every time.
@@ -110,6 +112,32 @@ pub struct NpcCommand {
     /// `cost` and `experienceCost`: -1 when unset (Citizens' default).
     pub cost: f64,
     pub experience_cost: i64,
+    /// `itemCost`: the stacks the click takes from the player's inventory.
+    pub item_cost: Vec<CostItem>,
+    /// `permissions` (Citizens' `perms`): the clicking player must hold every one.
+    pub perms: Vec<String>,
+    /// Position among the NPC's commands by id (the numeric key; the list form's index).
+    pub id: i64,
+}
+
+/// One stack of a command's `itemCost` (a Bukkit-serialised `ItemStack`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CostItem {
+    /// Namespaced item id (`minecraft:diamond`).
+    pub id: String,
+    pub amount: i64,
+    /// What the missing-item message calls it: the meta's display name, else the type in lower case
+    /// with spaces (`Util.prettyEnum`).
+    pub name: String,
+}
+
+/// `executionmode` of the `commandtrait`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutionMode {
+    Linear,
+    Random,
+    Sequential,
+    Cycle,
 }
 
 /// What `/npc command add` writes for a new `commandtrait` entry (Citizens' `NPCCommandBuilder`).
@@ -162,6 +190,8 @@ pub struct HologramLine {
     pub billboard: String,
     pub see_through: bool,
     pub shadowed: bool,
+    /// `renderer.bgcolor`: signed ARGB, when set.
+    pub bgcolor: Option<i32>,
 }
 
 impl HologramLine {
@@ -173,19 +203,31 @@ impl HologramLine {
             billboard: "CENTER".into(),
             see_through: false,
             shadowed: true,
+            bgcolor: None,
         }
     }
 }
 
 /// The equipment slots of Citizens' `equipment` trait, with the slot names the game uses.
-pub const EQUIPMENT_SLOTS: [(&str, &str); 6] = [
+pub const EQUIPMENT_SLOTS: [(&str, &str); 8] = [
     ("hand", "mainhand"),
     ("off_hand", "offhand"),
     ("helmet", "head"),
     ("chestplate", "chest"),
     ("leggings", "legs"),
     ("boots", "feet"),
+    ("body", "body"),
+    ("saddle", "saddle"),
 ];
+
+/// An NPC's cosmetic item of one equipment slot (`Equipment.getCosmetic`): the slot has none (the real item
+/// shows), is enabled with nothing in it (the slot shows empty), or shows this item.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Cosmetic {
+    Off,
+    Empty,
+    Item(StackData),
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Equipped {
@@ -240,6 +282,89 @@ fn stack_of(m: &Node) -> Option<(String, i64, Vec<String>)> {
     Some((item, count, components))
 }
 
+/// One `itemCost` entry (`type`, `amount`, optional `meta`); air and unreadable entries are dropped.
+fn cost_item(m: &Node) -> Option<CostItem> {
+    let (item, amount, _) = stack_of(m)?;
+    let name = m
+        .get("meta")
+        .and_then(Node::text)
+        .and_then(|meta| crate::horizon_citizens_core::items::decode_meta(&meta).ok())
+        .and_then(|meta| meta.display_name)
+        .unwrap_or_else(|| item.replace('_', " "));
+    let id = if item.contains(':') { item } else { format!("minecraft:{item}") };
+    Some(CostItem { id, amount, name })
+}
+
+/// An item stack as the NPC's `inventory` and `dropstrait` keep it (`type`, `amount`, `meta`): the
+/// namespaced id, the count, the meta Citizens would read, and the original base64 meta blob when this
+/// stack was read from a save and its meta is unchanged (kept so a save does not rewrite it).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StackData {
+    pub id: String,
+    pub count: i64,
+    pub meta: crate::horizon_citizens_core::items::ItemMeta,
+    pub raw_meta: Option<String>,
+}
+
+impl StackData {
+    pub fn new(id: &str, count: i64) -> StackData {
+        StackData { id: id.to_owned(), count, meta: Default::default(), raw_meta: None }
+    }
+
+    /// The meta without the keys this port does not map (what a rewrite would keep).
+    fn mapped_meta(&self) -> crate::horizon_citizens_core::items::ItemMeta {
+        crate::horizon_citizens_core::items::ItemMeta { unmapped: Vec::new(), ..self.meta.clone() }
+    }
+
+    /// The saved form (`ItemStorage.saveItem`): `type` as the lower-case key, `amount`, `meta` (the original
+    /// blob when unchanged) and the `editable_components` copy of the name and lore.
+    pub fn to_node(&self) -> Node {
+        use crate::horizon_citizens_core::items;
+        let mut n = Node::map();
+        n.set("type", Node::str(&self.id.trim_start_matches("minecraft:").to_ascii_lowercase()));
+        n.set("amount", Node::int(self.count));
+        let empty = self.mapped_meta() == items::ItemMeta::default();
+        if let Some(raw) = &self.raw_meta {
+            n.set("meta", Node::str(raw));
+        } else if !empty {
+            n.set("meta", Node::str(&items::encode_meta(&self.meta)));
+        }
+        if self.meta.display_name.is_some() || !self.meta.lore.is_empty() {
+            let mut c = Node::map();
+            if let Some(name) = &self.meta.display_name {
+                c.set("display_name", Node::str(name));
+            }
+            if !self.meta.lore.is_empty() {
+                c.set("lore", Node::str(&self.meta.lore.join("<br>")));
+            }
+            c.set("edited", Node::bool(false));
+            n.set("editable_components", c);
+        }
+        n
+    }
+
+    pub fn from_node(m: &Node) -> Option<StackData> {
+        let (item, count, _) = stack_of(m)?;
+        let raw = m.get("meta").and_then(Node::text);
+        let meta = raw
+            .as_deref()
+            .and_then(|r| crate::horizon_citizens_core::items::decode_meta(r).ok())
+            .unwrap_or_default();
+        let id = if item.contains(':') { item } else { format!("minecraft:{item}") };
+        Some(StackData { id, count, meta, raw_meta: raw })
+    }
+}
+
+/// Keeps the saved meta blob of an old stack the new one equals (same item, count and mapped meta).
+fn reuse_raw(old: &[&StackData], new: &mut StackData) {
+    if new.raw_meta.is_some() {
+        return;
+    }
+    if let Some(o) = old.iter().find(|o| o.id == new.id && o.count == new.count && o.mapped_meta() == new.mapped_meta()) {
+        new.raw_meta = o.raw_meta.clone();
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct NpcData {
     pub id: i32,
@@ -272,11 +397,21 @@ pub const NPC_READ_PATHS: &[&str] = &[
     "traits.skintrait.textureRaw",
     "traits.skintrait.signature",
     "traits.skintrait.skinName",
+    "traits.skintrait.body",
+    "traits.skintrait.cape",
+    "traits.skintrait.elytra",
+    "traits.skintrait.modelType",
+    "traits.saddle",
+    "traits.behavior.tree.**",
+    "traits.behavior.memory.**",
     "traits.lookclose.enabled",
     "traits.lookclose.range",
     "traits.lookclose.enableRandomLook",
     "traits.lookclose.randomYawRange.**",
     "traits.lookclose.randomPitchRange.**",
+    "traits.lookclose.randomLookDelay",
+    "traits.lookclose.targetnpcs",
+    "traits.lookclose.disablewhilenavigating",
     "traits.hologramtrait.lines.**",
     "traits.hologramtrait.lineHeight",
     "traits.commandtrait.**",
@@ -427,6 +562,14 @@ impl NpcData {
             signature: s("signature"),
         }
     }
+    /// `skin -l` (`skintrait.updateSkins`): fetch the latest texture of the skin name on every spawn.
+    pub fn update_skins(&self) -> bool {
+        self.map.at(&["traits", "skintrait", "updateSkins"]).and_then(bool_of).unwrap_or(false)
+    }
+    pub fn set_update_skins(&mut self, on: bool) {
+        self.map.put(&["traits", "skintrait", "updateSkins"], Node::bool(on));
+        self.add_trait_name("skintrait");
+    }
     /// Sets the skin. A name alone clears the cached texture, which the mod then fetches.
     pub fn set_skin(&mut self, skin: &Skin) {
         let t = self.map.map_at(&["traits", "skintrait"]);
@@ -475,6 +618,14 @@ impl NpcData {
     }
 
     /// The scoreboard team colour (`traits.scoreboardtrait.color`, a `ChatColor` name).
+    /// The scoreboard team key the entity joins: its glow colour, else `nocollide` for a
+    /// `/npc collidable false` NPC (the team's collision rule is `never`).
+    pub fn team_key(&self) -> Option<String> {
+        self.team_color().or_else(|| {
+            (self.map.at(&["traits", "collidable", "enabled"]).and_then(Node::as_bool) == Some(false)).then(|| "nocollide".to_owned())
+        })
+    }
+
     pub fn team_color(&self) -> Option<String> {
         text_at(&self.map, &["traits", "scoreboardtrait", "color"])
     }
@@ -526,6 +677,18 @@ impl NpcData {
             .at(&["traits", "lookclose", "enableRandomLook"])
             .and_then(bool_of)
             .unwrap_or(false)
+    }
+    /// A boolean of `traits.lookclose` (`targetnpcs`, `disablewhilenavigating`, ...); `default` when unset.
+    pub fn lookclose_flag(&self, key: &str, default: bool) -> bool {
+        self.map.at(&["traits", "lookclose", key]).and_then(bool_of).unwrap_or(default)
+    }
+    /// A text option of `/npc lookclose` (`filter`).
+    pub fn lookclose_text(&self, key: &str) -> Option<String> {
+        self.map.at(&["traits", "lookclose", key]).and_then(Node::as_str).map(str::to_owned).filter(|s| !s.is_empty())
+    }
+    /// `randomLookDelay` in ticks (`/npc lookclose --randomlookdelay`).
+    pub fn random_look_delay(&self) -> Option<u32> {
+        self.map.at(&["traits", "lookclose", "randomLookDelay"]).and_then(Node::as_i64).filter(|d| *d > 0).map(|d| d as u32)
     }
     pub fn set_random_look(&mut self, on: bool) {
         self.map
@@ -608,6 +771,14 @@ impl NpcData {
     pub fn follow_margin(&self) -> f64 {
         f64_at(&self.map, &["traits", "followtrait", "margin"]).unwrap_or(-1.0)
     }
+    /// `followtrait.protect`: attack whoever hurts the followed entity (`follow -p`).
+    pub fn follow_protect(&self) -> bool {
+        self.map.at(&["traits", "followtrait", "protect"]).and_then(bool_of).unwrap_or(false)
+    }
+    pub fn set_follow_protect(&mut self, on: bool) {
+        self.map.put(&["traits", "followtrait", "protect"], Node::bool(on));
+        self.add_trait_name("followtrait");
+    }
     pub fn set_follow(&mut self, target: Option<u128>) {
         match target {
             Some(u) => self
@@ -635,6 +806,53 @@ impl NpcData {
                 .unwrap_or(d)
         };
         Some((i("xrange", 25), i("yrange", 3), i("delay", -1)))
+    }
+    /// The wander provider's region centres (`regionCentres`), each a saved location.
+    pub fn wander_centres(&self) -> Vec<Location> {
+        let Some(list) = self.map.at(&["traits", "waypoints", "wander", "regionCentres"]).and_then(Node::as_seq) else {
+            return Vec::new();
+        };
+        list.iter()
+            .filter_map(|n| {
+                let l = n.as_map()?;
+                Some(Location {
+                    world: l.get("world").and_then(Node::text)?,
+                    x: l.get("x").and_then(Node::as_f64)?,
+                    y: l.get("y").and_then(Node::as_f64)?,
+                    z: l.get("z").and_then(Node::as_f64)?,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    body_yaw: 0.0,
+                })
+            })
+            .collect()
+    }
+    /// `wander add x y z [world]`: one more region centre.
+    pub fn add_wander_centre(&mut self, loc: &Location) {
+        let mut centres: Vec<Node> = self
+            .map
+            .at(&["traits", "waypoints", "wander", "regionCentres"])
+            .and_then(Node::as_seq)
+            .map(<[Node]>::to_vec)
+            .unwrap_or_default();
+        let mut n = Node::map();
+        if let Some(m) = n.as_map_mut() {
+            m.set("world", Node::str(&loc.world));
+            m.set("x", Node::float(loc.x));
+            m.set("y", Node::float(loc.y));
+            m.set("z", Node::float(loc.z));
+        }
+        centres.push(n);
+        self.map.put(&["traits", "waypoints", "wander", "regionCentres"], Node::seq(centres));
+        self.add_trait_name("waypoints");
+    }
+    /// `wander worldguardregion <name>` (`worldguardRegion`): the region the NPC stays inside.
+    pub fn wander_region(&self) -> Option<String> {
+        text_at(&self.map, &["traits", "waypoints", "wander", "worldguardRegion"])
+    }
+    pub fn set_wander_region(&mut self, name: &str) {
+        self.map.put(&["traits", "waypoints", "wander", "worldguardRegion"], Node::str(name));
+        self.add_trait_name("waypoints");
     }
     /// The pose to hold (`traits.poses.defaultPose`) as (yaw, pitch).
     pub fn default_pose(&self) -> Option<(f32, f32)> {
@@ -674,6 +892,7 @@ impl NpcData {
                             .unwrap_or_else(|| "CENTER".into()),
                         see_through: flag("seeThrough", false),
                         shadowed: flag("shadowed", true),
+                        bgcolor: m.at(&["renderer", "bgcolor"]).and_then(Node::as_i64).map(|v| v as i32),
                     })
                 }
                 // Older saves keep plain strings.
@@ -760,6 +979,48 @@ impl NpcData {
             None => false,
         }
     }
+    /// `hologram bgcolor <line> <color>`: the line's background (signed ARGB), under `renderer.bgcolor`.
+    pub fn set_hologram_bgcolor(&mut self, i: usize, argb: i32) -> bool {
+        let seq = self.hologram_seq();
+        match seq.get_mut(i) {
+            Some(node) => {
+                if !node.is_map() {
+                    let text = node.text().unwrap_or_default();
+                    *node = Self::line_node(&text);
+                }
+                node.map_at(&["renderer"]).set("bgcolor", Node::int(i64::from(argb)));
+                true
+            }
+            None => false,
+        }
+    }
+    /// The renderer NPC tag (`<owner id>:<line|name|template>`) of a `hologram edit_npc` NPC.
+    pub fn hologram_template_tag(&self) -> Option<String> {
+        text_at(&self.map, &["metadata", "hologram-template"])
+    }
+    pub fn set_hologram_template_tag(&mut self, tag: &str) {
+        self.map.put(&["metadata", "hologram-template"], Node::str(tag));
+    }
+    /// Sets the `shadowed` / `seeThrough` flags of line `i`'s renderer.
+    pub fn set_hologram_renderer_flags(&mut self, i: usize, shadowed: Option<bool>, see_through: Option<bool>) {
+        let seq = self.hologram_seq();
+        if let Some(node) = seq.get_mut(i) {
+            if !node.is_map() {
+                let text = node.text().unwrap_or_default();
+                *node = Self::line_node(&text);
+            }
+            if let Some(s) = shadowed {
+                node.map_at(&["renderer"]).set("shadowed", Node::bool(s));
+            }
+            if let Some(s) = see_through {
+                node.map_at(&["renderer"]).set("seeThrough", Node::bool(s));
+            }
+        }
+    }
+    /// A hologram setting that is an integer (`viewRange`, `nameBgcolor`, ...).
+    pub fn hologram_int(&self, key: &str) -> Option<i64> {
+        self.map.at(&["traits", "hologramtrait", key]).and_then(Node::as_i64)
+    }
     pub fn remove_hologram_line(&mut self, i: usize) -> bool {
         let seq = self.hologram_seq();
         if i < seq.len() {
@@ -777,11 +1038,6 @@ impl NpcData {
         let Some(node) = self.map.at(&["traits", "commandtrait", "commands"]) else {
             return Vec::new();
         };
-        let mode = self
-            .map
-            .at(&["traits", "commandtrait", "executionmode"])
-            .and_then(Node::text)
-            .unwrap_or_default();
         let entry = |key: String, n: &Node| -> Option<NpcCommand> {
             let m = n.as_map()?;
             let set = |k: &str| match m.get(k) {
@@ -794,15 +1050,14 @@ impl NpcData {
                     !(t.is_empty() || t == "null" || t.parse::<f64>().is_ok_and(|x| x <= 0.0))
                 }
             };
-            let unenforced = if !mode.is_empty() && !mode.eq_ignore_ascii_case("LINEAR") {
-                Some(format!("executionmode {mode}"))
-            } else {
-                // Citizens saves the permission list as `permissions`, the run-as-NPC flag as `npc`.
-                ["permissions", "perms", "n", "gn", "npc", "cost", "cooldown", "globalcooldown", "delay", "experienceCost"]
-                    .into_iter()
-                    .find(|k| set(k))
-                    .map(str::to_owned)
-            };
+            // Every limit and price is enforced now (the money price through the economy provider).
+            let _ = &set;
+            let unenforced: Option<String> = None;
+            let perms: Vec<String> = ["permissions", "perms"]
+                .into_iter()
+                .filter_map(|k| m.get(k))
+                .flat_map(|v| v.items().iter().filter_map(Node::text).collect::<Vec<_>>())
+                .collect();
             Some(NpcCommand {
                 key,
                 command: m.get("command").and_then(Node::text)?,
@@ -815,6 +1070,7 @@ impl NpcData {
                 },
                 player: m.get("player").and_then(bool_of).unwrap_or(false),
                 op: m.get("op").and_then(bool_of).unwrap_or(false),
+                npc: m.get("npc").and_then(bool_of).unwrap_or(false),
                 unenforced,
                 cooldown: m.get("cooldown").and_then(Node::as_i64).unwrap_or(0),
                 global_cooldown: m.get("globalcooldown").and_then(Node::as_i64).unwrap_or(0),
@@ -823,9 +1079,15 @@ impl NpcData {
                 gn: m.get("gn").and_then(Node::as_i64).unwrap_or(-1),
                 cost: m.get("cost").and_then(Node::as_f64).unwrap_or(-1.0),
                 experience_cost: m.get("experienceCost").and_then(Node::as_i64).unwrap_or(-1),
+                item_cost: m
+                    .get("itemCost")
+                    .map(|v| v.items().iter().filter_map(cost_item).collect())
+                    .unwrap_or_default(),
+                perms,
+                id: 0,
             })
         };
-        match node {
+        let mut out: Vec<NpcCommand> = match node {
             m if m.is_map() => m
                 .entries()
                 .iter()
@@ -838,8 +1100,260 @@ impl NpcData {
                 .filter_map(|(i, v)| entry(i.to_string(), v))
                 .collect(),
             _ => Vec::new(),
+        };
+        for (i, c) in out.iter_mut().enumerate() {
+            c.id = c.key.parse().unwrap_or(i as i64);
+        }
+        out
+    }
+
+    /// The `inventory` trait's stacks by slot (`Inventory.save`: the slot numbers are the keys under the trait).
+    pub fn inventory_stacks(&self) -> Vec<(i64, StackData)> {
+        let Some(n) = self.map.at(&["traits", "inventory"]).filter(|n| n.is_map()) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(i64, StackData)> =
+            n.entries().iter().filter_map(|e| Some((e.key.parse().ok()?, StackData::from_node(&e.value)?))).collect();
+        out.sort_by_key(|(slot, _)| *slot);
+        out
+    }
+
+    /// Replaces the `inventory` trait's stacks (the slot keys; other keys stay).
+    pub fn set_inventory(&mut self, mut slots: Vec<(i64, StackData)>) {
+        let old = self.inventory_stacks();
+        let olds: Vec<&StackData> = old.iter().map(|(_, s)| s).collect();
+        for (_, s) in &mut slots {
+            reuse_raw(&olds, s);
+        }
+        for (slot, _) in &old {
+            self.map.drop_path(&["traits", "inventory", &slot.to_string()]);
+        }
+        if slots.is_empty() {
+            return;
+        }
+        for (slot, s) in &slots {
+            self.map.put(&["traits", "inventory", &slot.to_string()], s.to_node());
+        }
+        self.add_trait_name("inventory");
+    }
+
+    /// The `dropstrait`'s drops: a stack and its chance (0 to 1).
+    pub fn drops(&self) -> Vec<(StackData, f64)> {
+        let Some(n) = self.map.at(&["traits", "dropstrait", "drops"]) else {
+            return Vec::new();
+        };
+        let list: Vec<&Node> = if n.is_map() { n.entries().iter().map(|e| &e.value).collect() } else { n.items().iter().collect() };
+        list.into_iter()
+            .filter_map(|d| {
+                let stack = StackData::from_node(d.get("drop")?)?;
+                Some((stack, d.get("chance").and_then(Node::as_f64).unwrap_or(1.0)))
+            })
+            .collect()
+    }
+
+    pub fn set_drops(&mut self, mut drops: Vec<(StackData, f64)>) {
+        let old = self.drops();
+        let olds: Vec<&StackData> = old.iter().map(|(s, _)| s).collect();
+        for (s, _) in &mut drops {
+            reuse_raw(&olds, s);
+        }
+        if drops.is_empty() {
+            self.map.drop_path(&["traits", "dropstrait", "drops"]);
+            return;
+        }
+        // `PersistenceLoader`: a collection is a map of 0, 1, 2 ... to the items, each with its fields.
+        let mut list = Node::map();
+        for (i, (s, chance)) in drops.iter().enumerate() {
+            let mut m = Node::map();
+            m.set("chance", Node::float(*chance));
+            m.set("drop", s.to_node());
+            list.set(&i.to_string(), m);
+        }
+        self.map.put(&["traits", "dropstrait", "drops"], list);
+        self.add_trait_name("dropstrait");
+    }
+
+    /// `executionmode` of the `commandtrait` (LINEAR when unset or unknown).
+    pub fn execution_mode(&self) -> ExecutionMode {
+        let mode = self
+            .map
+            .at(&["traits", "commandtrait", "executionmode"])
+            .and_then(Node::text)
+            .unwrap_or_default();
+        match mode.to_ascii_uppercase().as_str() {
+            "RANDOM" => ExecutionMode::Random,
+            "SEQUENTIAL" => ExecutionMode::Sequential,
+            "CYCLE" => ExecutionMode::Cycle,
+            _ => ExecutionMode::Linear,
         }
     }
+
+    /// The commandtrait's own `cost`, `experienceCost` and `itemRequirements` (charged once per click, before
+    /// the commands): -1 when unset.
+    pub fn trait_cost(&self) -> f64 {
+        f64_at(&self.map, &["traits", "commandtrait", "cost"]).unwrap_or(-1.0)
+    }
+
+    pub fn trait_experience_cost(&self) -> i64 {
+        self.map.at(&["traits", "commandtrait", "experienceCost"]).and_then(Node::as_i64).unwrap_or(-1)
+    }
+
+    pub fn trait_item_cost(&self) -> Vec<CostItem> {
+        match self.map.at(&["traits", "commandtrait", "itemRequirements"]) {
+            Some(n) if n.is_seq() => n.items().iter().filter_map(cost_item).collect(),
+            // The map form `PersistenceLoader` writes a collection in.
+            Some(n) if n.is_map() => n.entries().iter().filter_map(|e| cost_item(&e.value)).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn set_trait_cost(&mut self, cost: f64) {
+        self.map.map_at(&["traits", "commandtrait"]).set("cost", Node::float(cost));
+        self.add_trait_name("commandtrait");
+    }
+
+    pub fn set_trait_experience_cost(&mut self, cost: i64) {
+        self.map.map_at(&["traits", "commandtrait"]).set("experienceCost", Node::int(cost));
+        self.add_trait_name("commandtrait");
+    }
+
+    /// Sets the `executionmode` (LINEAR is the default and is saved by its name as Citizens does).
+    pub fn set_execution_mode(&mut self, mode: ExecutionMode) {
+        let name = match mode {
+            ExecutionMode::Linear => "LINEAR",
+            ExecutionMode::Random => "RANDOM",
+            ExecutionMode::Sequential => "SEQUENTIAL",
+            ExecutionMode::Cycle => "CYCLE",
+        };
+        self.map.map_at(&["traits", "commandtrait"]).set("executionmode", Node::str(name));
+        self.add_trait_name("commandtrait");
+    }
+
+    pub fn set_hide_command_errors(&mut self, on: bool) {
+        self.map.map_at(&["traits", "commandtrait"]).set("hideErrorMessages", Node::bool(on));
+        self.add_trait_name("commandtrait");
+    }
+
+    /// `hideErrorMessages` of the `commandtrait`.
+    pub fn hide_command_errors(&self) -> bool {
+        self.map
+            .at(&["traits", "commandtrait", "hideErrorMessages"])
+            .and_then(bool_of)
+            .unwrap_or(false)
+    }
+    /// `customErrorMessages` of the `commandtrait`: the text `/npc command errormessage` set for one error
+    /// (`kind` is the lower-case name of `CommandTraitError`).
+    pub fn custom_error_message(&self, kind: &str) -> Option<String> {
+        self.map
+            .at(&["traits", "commandtrait", "customErrorMessages", &kind.to_ascii_uppercase()])
+            .and_then(Node::text)
+    }
+
+    pub fn set_custom_error_message(&mut self, kind: &str, msg: &str) {
+        self.map
+            .map_at(&["traits", "commandtrait", "customErrorMessages"])
+            .set(&kind.to_ascii_uppercase(), Node::str(msg));
+        self.add_trait_name("commandtrait");
+    }
+
+    /// `persistSequence` of the `commandtrait` (`/npc command rememberlastused`).
+    pub fn remember_last_used(&self) -> bool {
+        self.map.at(&["traits", "commandtrait", "persistSequence"]).and_then(bool_of).unwrap_or(false)
+    }
+
+    pub fn set_remember_last_used(&mut self, on: bool) {
+        self.map.map_at(&["traits", "commandtrait"]).set("persistSequence", Node::bool(on));
+        if !on {
+            self.forget_remembered(None);
+        }
+        self.add_trait_name("commandtrait");
+    }
+
+    /// The place in a sequence `rememberlastused` kept for one player (`cooldowns.<uuid>.lastUsedId`).
+    pub fn remembered_last_id(&self, uuid: &str) -> Option<i64> {
+        self.map.at(&["traits", "commandtrait", "cooldowns", uuid, "lastUsedId"]).and_then(Node::as_i64).filter(|i| *i >= 0)
+    }
+
+    pub fn set_remembered_last_id(&mut self, uuid: &str, id: i64) {
+        self.map.put(&["traits", "commandtrait", "cooldowns", uuid, "lastUsedId"], Node::int(id));
+    }
+
+    /// Drops the remembered places of one player (`Some(uuid)`) or of everyone.
+    pub fn forget_remembered(&mut self, uuid: Option<&str>) {
+        match uuid {
+            Some(u) => {
+                self.map.drop_path(&["traits", "commandtrait", "cooldowns", u]);
+            }
+            None => {
+                self.map.drop_path(&["traits", "commandtrait", "cooldowns"]);
+            }
+        }
+    }
+
+    /// `temporaryPermissions` and `temporaryPermissionsDuration` (ticks, 0 or below: for the one command only).
+    pub fn temporary_permissions(&self) -> (Vec<String>, i64) {
+        let list = self
+            .map
+            .at(&["traits", "commandtrait", "temporaryPermissions"])
+            .map(|n| n.items().iter().filter_map(Node::text).collect())
+            .unwrap_or_default();
+        let duration = self.map.at(&["traits", "commandtrait", "temporaryPermissionsDuration"]).and_then(Node::as_i64).unwrap_or(0);
+        (list, duration)
+    }
+
+    pub fn set_temporary_permissions(&mut self, perms: &[String], duration: i64) {
+        let t = self.map.map_at(&["traits", "commandtrait"]);
+        t.set("temporaryPermissions", Node::seq(perms.iter().map(|p| Node::str(p)).collect()));
+        t.set("temporaryPermissionsDuration", Node::int(duration));
+        self.add_trait_name("commandtrait");
+    }
+
+    /// The trait's own `itemRequirements` as stacks (`/npc command itemcost`).
+    pub fn trait_item_stacks(&self) -> Vec<StackData> {
+        match self.map.at(&["traits", "commandtrait", "itemRequirements"]) {
+            Some(n) if n.is_seq() => n.items().iter().filter_map(StackData::from_node).collect(),
+            Some(n) if n.is_map() => n.entries().iter().filter_map(|e| StackData::from_node(&e.value)).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn set_trait_item_stacks(&mut self, stacks: &[StackData]) {
+        let t = self.map.map_at(&["traits", "commandtrait"]);
+        if stacks.is_empty() {
+            t.remove("itemRequirements");
+        } else {
+            t.set("itemRequirements", Node::seq(stacks.iter().map(StackData::to_node).collect()));
+        }
+        self.add_trait_name("commandtrait");
+    }
+
+    /// One command's `itemCost` as stacks, by the command's key.
+    pub fn command_item_stacks(&self, key: &str) -> Vec<StackData> {
+        let Some(node) = self.map.at(&["traits", "commandtrait", "commands"]) else { return Vec::new() };
+        let entry = if node.is_map() { node.get(key) } else { key.parse::<usize>().ok().and_then(|i| node.items().get(i)) };
+        entry
+            .and_then(|e| e.get("itemCost"))
+            .map(|c| c.items().iter().filter_map(StackData::from_node).collect())
+            .unwrap_or_default()
+    }
+
+    /// Replaces one command's `itemCost`; whether the command exists.
+    pub fn set_command_item_stacks(&mut self, key: &str, stacks: &[StackData]) -> bool {
+        let t = self.map.map_at(&["traits", "commandtrait"]);
+        let Some(node) = t.get_mut("commands") else { return false };
+        let entry = match node {
+            Node::Seq { items, .. } => key.parse::<usize>().ok().and_then(|i| items.get_mut(i)),
+            m => m.get_mut(key),
+        };
+        let Some(e) = entry.filter(|e| e.is_map()) else { return false };
+        if stacks.is_empty() {
+            e.remove("itemCost");
+        } else {
+            e.set("itemCost", Node::seq(stacks.iter().map(StackData::to_node).collect()));
+        }
+        true
+    }
+
     /// Adds a command and returns its key. Kept in the map form when the NPC has it (or nothing),
     /// in the list form when that is what the file has.
     pub fn add_command(&mut self, command: &str, hand: Hand, player: bool, op: bool) -> String {
@@ -938,8 +1452,24 @@ impl NpcData {
 
     pub fn equipment(&self) -> Vec<Equipped> {
         let mut out = Vec::new();
+        // An enderman holds a block, not equipment (`carried_block`).
+        if self.kind().eq_ignore_ascii_case("ENDERMAN") {
+            return out;
+        }
         for (citizens, slot) in EQUIPMENT_SLOTS {
-            let Some(m) = self.map.at(&["traits", "equipment", citizens]) else {
+            let real = self.map.at(&["traits", "equipment", citizens]);
+            let key = format!("cosmetic_{citizens}");
+            // A cosmetic item shows in place of the real one; an enabled empty one hides it.
+            let shown = match self.map.at(&["traits", "equipment", key.as_str()]) {
+                Some(c) => {
+                    if stack_of(c).is_none() {
+                        continue;
+                    }
+                    Some(c)
+                }
+                None => real,
+            };
+            let Some(m) = shown else {
                 continue;
             };
             if let Some((item, count, components)) = stack_of(m) {
@@ -951,10 +1481,61 @@ impl NpcData {
                 });
             }
         }
+        // The `saddle` trait of a pig or strider: the saddle slot.
+        if self.saddle() && !out.iter().any(|e| e.slot == "saddle") {
+            out.push(Equipped { slot: "saddle", item: "saddle".to_owned(), count: 1, components: Vec::new() });
+        }
         out
     }
-    /// The Citizens inventory (`traits.inventory`, the items an NPC carries, not shown): what
-    /// Sentinel's autoswitch reads. Empty stacks are skipped; `index` is the place in the list.
+
+    /// The `saddle` trait (`traits.saddle`).
+    pub fn saddle(&self) -> bool {
+        self.map.at(&["traits", "saddle"]).and_then(bool_of).unwrap_or(false)
+    }
+
+    pub fn set_saddle(&mut self, on: bool) {
+        self.map.put(&["traits", "saddle"], Node::bool(on));
+        self.add_trait_name("saddle");
+    }
+
+    /// The block an enderman carries (`traits.equipment.hand`, `Equipment` slot 0), as an item id.
+    pub fn carried_block(&self) -> Option<String> {
+        let m = self.map.at(&["traits", "equipment", "hand"])?;
+        let (item, _, _) = stack_of(m)?;
+        Some(if item.contains(':') { item } else { format!("minecraft:{item}") })
+    }
+
+    /// The cosmetic item of an equipment slot (`cosmetic_<slot>`).
+    pub fn cosmetic(&self, citizens_slot: &str) -> Cosmetic {
+        let key = format!("cosmetic_{citizens_slot}");
+        match self.map.at(&["traits", "equipment", key.as_str()]) {
+            None => Cosmetic::Off,
+            Some(m) => match StackData::from_node(m) {
+                Some(s) => Cosmetic::Item(s),
+                None => Cosmetic::Empty,
+            },
+        }
+    }
+
+    pub fn set_cosmetic(&mut self, citizens_slot: &str, c: &Cosmetic) {
+        let key = format!("cosmetic_{citizens_slot}");
+        match c {
+            Cosmetic::Off => {
+                self.map.drop_path(&["traits", "equipment", key.as_str()]);
+            }
+            Cosmetic::Empty => {
+                let mut m = Node::map();
+                m.set("type", Node::str("air"));
+                m.set("amount", Node::int(1));
+                self.map.put(&["traits", "equipment", key.as_str()], m);
+                self.add_trait_name("equipment");
+            }
+            Cosmetic::Item(s) => {
+                self.map.put(&["traits", "equipment", key.as_str()], s.to_node());
+                self.add_trait_name("equipment");
+            }
+        }
+    }
     pub fn inventory(&self) -> Vec<InventoryItem> {
         let Some(items) = self.map.at(&["traits", "inventory"]).and_then(Node::as_seq) else {
             return Vec::new();
@@ -1001,6 +1582,12 @@ impl NpcData {
         }
     }
 
+    /// A whole stack (with its meta) into an equipment slot (`/npc setequipment <slot> hand`).
+    pub fn set_equipment_stack(&mut self, citizens_slot: &str, stack: &StackData) {
+        self.map.put(&["traits", "equipment", citizens_slot], stack.to_node());
+        self.add_trait_name("equipment");
+    }
+
     /// The linear waypoints (`traits.waypoints.linear.points[].location`).
     pub fn waypoints(&self) -> Vec<Location> {
         let Some(points) = self
@@ -1039,6 +1626,22 @@ impl NpcData {
             .and_then(Node::as_seq)
             .map(|s| s.iter().filter_map(Node::text).collect())
             .unwrap_or_default()
+    }
+    /// `talk-close` of the text trait: say the lines to players who come near (off unless saved true).
+    pub fn talk_close(&self) -> bool {
+        self.map.at(&["traits", "text", "talk-close"]).and_then(Node::as_bool).unwrap_or(false)
+    }
+    pub fn set_talk_close(&mut self, on: bool) {
+        self.map.put(&["traits", "text", "talk-close"], Node::bool(on));
+        self.add_trait_name("text");
+    }
+    /// The text trait's `range` (blocks), 5 by default.
+    pub fn talk_range(&self) -> f64 {
+        self.map.at(&["traits", "text", "range"]).and_then(Node::as_f64).unwrap_or(5.0)
+    }
+    pub fn set_talk_range(&mut self, r: f64) {
+        self.map.put(&["traits", "text", "range"], Node::float(r));
+        self.add_trait_name("text");
     }
     /// Replaces the talk lines; none removes the trait.
     pub fn set_talk_lines(&mut self, lines: &[String]) {
@@ -1288,26 +1891,68 @@ uuid: 00000000-0000-4000-8000-0000000000aa
     }
 
     #[test]
-    fn limits_the_port_cannot_enforce_are_flagged() {
-        // Review C4: a command limited by permission or uses must not run for everyone.
+    fn inventory_and_drops_round_trip_and_keep_an_unchanged_meta_blob() {
+        use crate::horizon_citizens_core::items::{ItemMeta, decode_meta, fixtures::BLADE};
+        let mut n = NpcData::new(1, 7, "A", "PLAYER");
+        let mut blade = StackData::new("minecraft:diamond_sword", 1);
+        blade.raw_meta = Some(BLADE.to_owned());
+        blade.meta = decode_meta(BLADE).unwrap();
+        n.set_inventory(vec![(3, blade.clone()), (10, StackData::new("minecraft:stone", 64))]);
+        let back = n.inventory_stacks();
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].0, 3);
+        assert_eq!(back[0].1.id, "minecraft:diamond_sword");
+        assert_eq!(back[0].1.raw_meta.as_deref(), Some(BLADE));
+        assert_eq!(back[1].1.count, 64);
+        // A stack rebuilt from the game (no blob, same mapped meta) keeps the saved blob.
+        let mut live = StackData::new("minecraft:diamond_sword", 1);
+        live.meta = ItemMeta { unmapped: Vec::new(), ..blade.meta.clone() };
+        n.set_inventory(vec![(5, live)]);
+        assert_eq!(n.inventory_stacks()[0].1.raw_meta.as_deref(), Some(BLADE));
+        // A changed one is written fresh and reads back.
+        let mut named = StackData::new("minecraft:stick", 2);
+        named.meta.display_name = Some("Wand".into());
+        n.set_drops(vec![(named, 0.25), (StackData::new("minecraft:apple", 3), 1.0)]);
+        let d = n.drops();
+        assert_eq!(d[0].0.meta.display_name.as_deref(), Some("Wand"));
+        assert_eq!((d[0].1, d[1].1), (0.25, 1.0));
+        assert_eq!(d[1].0.id, "minecraft:apple");
+        // CitizensAPI layout: slot numbers under the trait, a collection as a map 0, 1 ..., lower-case type.
+        n.set_inventory(vec![(3, StackData::new("minecraft:diamond_sword", 1))]);
+        assert_eq!(n.map.at(&["traits", "inventory", "3", "type"]).and_then(Node::text).as_deref(), Some("diamond_sword"));
+        assert_eq!(n.map.at(&["traits", "dropstrait", "drops", "0", "chance"]).and_then(Node::as_f64), Some(0.25));
+        assert_eq!(n.map.at(&["traits", "dropstrait", "drops", "1", "drop", "type"]).and_then(Node::text).as_deref(), Some("apple"));
+        assert_eq!(n.map.at(&["traits", "dropstrait", "drops", "0", "drop", "editable_components", "display_name"]).and_then(Node::text).as_deref(), Some("Wand"));
+        n.set_drops(Vec::new());
+        assert!(n.drops().is_empty());
+        n.set_inventory(Vec::new());
+        assert!(n.inventory_stacks().is_empty());
+    }
+
+    #[test]
+    fn limits_and_modes_are_read() {
         let mut n = NpcData::new(1, 7, "A", "PLAYER");
         n.add_command("say a", Hand::Right, false, false);
         n.add_command("say b", Hand::Right, false, false);
         let mut cmds = n.map.map_at(&["traits", "commandtrait", "commands"]).clone();
         if let Some(e) = cmds.get_mut("1").filter(|e| e.is_map()) {
-            e.set("perms", Node::seq(vec![Node::str("some.node")]));
-            e.set("n", Node::int(-1));
+            e.set("permissions", Node::seq(vec![Node::str("some.node")]));
+            e.set("n", Node::int(2));
+            e.set("cost", Node::int(5));
         }
         n.map.map_at(&["traits", "commandtrait"]).set("commands", cmds);
         let c = n.commands();
         assert_eq!(c[0].unenforced, None);
-        assert_eq!(c[1].unenforced.as_deref(), Some("perms"));
+        assert_eq!(c[1].perms, vec!["some.node".to_owned()]);
+        assert_eq!(c[1].n, 2);
+        assert_eq!(c[1].id, 1);
+        assert_eq!(c[1].unenforced, None);
+        assert_eq!(c[1].cost, 5.0);
+        assert_eq!(n.execution_mode(), ExecutionMode::Linear);
         n.map
             .map_at(&["traits", "commandtrait"])
             .set("executionmode", Node::str("SEQUENTIAL"));
-        assert!(n.commands().iter().all(|c| c.unenforced.is_some()));
-        n.map.map_at(&["traits", "commandtrait"]).set("executionmode", Node::str("LINEAR"));
-        assert_eq!(n.commands()[0].unenforced, None);
+        assert_eq!(n.execution_mode(), ExecutionMode::Sequential);
     }
 }
 

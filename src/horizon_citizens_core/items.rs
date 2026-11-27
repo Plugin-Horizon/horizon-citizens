@@ -156,6 +156,60 @@ pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Standard base64 with padding.
+pub fn base64_encode(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16) | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8) | u32::from(*chunk.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(T[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// A name or lore line as Bukkit keeps it: a JSON string literal.
+fn json_quote(s: &str) -> String {
+    serde_json::Value::String(s.to_owned()).to_string()
+}
+
+/// The inverse of [`decode_meta`]: Bukkit's `ItemMeta` map as a base64 stream, for the keys this port
+/// maps (`unmapped` keys are not kept). `meta-type` is `POTION` with a potion and `ItemMeta` otherwise.
+pub fn encode_meta(meta: &ItemMeta) -> String {
+    use crate::horizon_citizens_core::javaser::{Out, write_bukkit_map};
+    let mut e: Vec<(String, Out)> = vec![
+        ("==".into(), Out::Str("ItemMeta".into())),
+        ("meta-type".into(), Out::Str(if meta.potion.is_some() { "POTION" } else { "ItemMeta" }.into())),
+    ];
+    if let Some(n) = &meta.display_name {
+        e.push(("display-name".into(), Out::Str(json_quote(n))));
+    }
+    if !meta.lore.is_empty() {
+        e.push(("lore".into(), Out::List(meta.lore.iter().map(|l| json_quote(l)).collect())));
+    }
+    if !meta.enchants.is_empty() {
+        e.push(("enchants".into(), Out::BiMap(meta.enchants.clone())));
+    }
+    if let Some(v) = meta.repair_cost {
+        e.push(("repair-cost".into(), Out::Int(v)));
+    }
+    if let Some(v) = meta.damage {
+        e.push(("Damage".into(), Out::Int(v)));
+    }
+    if let Some(v) = meta.max_stack_size {
+        e.push(("max-stack-size".into(), Out::Int(v)));
+    }
+    if let Some(p) = &meta.potion {
+        e.push(("potion-type".into(), Out::Str(p.clone())));
+    }
+    base64_encode(&write_bukkit_map(&e))
+}
+
 /// Synthetic meta blobs in Citizens' layout (invented values): a named, enchanted blade with a
 /// repair cost, a damage value and an unmapped banner colour; and a potion.
 #[cfg(test)]
@@ -213,5 +267,40 @@ mod tests {
         assert_eq!(base64_decode("aGk="), Some(b"hi".to_vec()));
         assert_eq!(base64_decode("aG\nk="), Some(b"hi".to_vec()));
         assert_eq!(base64_decode("a*"), None);
+    }
+
+    #[test]
+    fn base64_round_trips() {
+        assert_eq!(base64_encode(b"hi"), "aGk=");
+        assert_eq!(base64_encode(b"a"), "YQ==");
+        assert_eq!(base64_encode(b"abc"), "YWJj");
+        assert_eq!(base64_decode(&base64_encode(BLADE.as_bytes())).unwrap(), BLADE.as_bytes());
+    }
+
+    #[test]
+    fn encoded_meta_reads_back_the_blade() {
+        let m = decode_meta(BLADE).unwrap();
+        let again = decode_meta(&encode_meta(&ItemMeta { unmapped: Vec::new(), ..m.clone() })).unwrap();
+        assert_eq!(again.display_name.as_deref(), Some("Test Blade"));
+        assert_eq!(again.enchants, vec![("minecraft:sharpness".to_owned(), 5), ("minecraft:unbreaking".to_owned(), 3)]);
+        assert_eq!((again.repair_cost, again.damage), (Some(2), Some(4)));
+        assert!(again.unmapped.is_empty());
+    }
+
+    #[test]
+    fn encoded_potion_matches_the_fixture_bytes() {
+        let m = decode_meta(POTION).unwrap();
+        assert_eq!(encode_meta(&m), POTION);
+    }
+
+    #[test]
+    fn lore_max_stack_and_quotes_round_trip() {
+        let m = ItemMeta {
+            display_name: Some("Say \"hi\"".into()),
+            lore: vec!["first".into(), "second".into()],
+            max_stack_size: Some(16),
+            ..ItemMeta::default()
+        };
+        assert_eq!(decode_meta(&encode_meta(&m)).unwrap(), m);
     }
 }

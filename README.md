@@ -2,7 +2,7 @@
 
 ## Port status
 
-Compared with Citizens 2.0.x (estimate): **75 %** of the original's commands, permissions, config keys, messages and features work today; **78 %** once our open Horizon PRs are merged; **79 %** with the engine changes we are writing; **75 %** with the newest Horizon SDK. Estimated count: ~143/~190 items. Status: not yet compiled after the 2026-11-20 round.
+Compared with Citizens 2.0.x (estimate): **75 %** of the original's commands, permissions, config keys, messages and features work today; **78 %** once our open Horizon PRs are merged; **79 %** with the engine changes we are writing; **75 %** with the newest Horizon SDK. Estimated count: ~150/~190 items (round 2: commandtrait limits and modes, error-message config, wildcard nodes, offline profiles; counted from audit/rec100/citizens.md). Status: not yet compiled after the 2026-11-20 round.
 
 > **Unofficial Rust port of Citizens for the Horizon server (https://github.com/arismoko/horizon). Not affiliated with or endorsed by the Citizens authors.**
 
@@ -81,7 +81,7 @@ This is a native trait mod: `horizon-mod.toml`, a `Cargo.toml` that depends on `
   `command-level` pass without it). Right-clicking an NPC with a stick selects it. They also work
   on the server console.
 
-Not done: the equipment and NPC editors (GUIs), other traits (follow, poses, talk-close, shops,
+Not done: the NPC editors (GUIs), other traits (follow, poses, talk-close,
 ...), pathfinding, the mob-specific `/npc` modifiers (`/npc wolf`, `/npc horse`, ...) and
 the actions (`jump`, `mount`, `speak`, `undo`, ...), the chat-based text editor, path recording.
 
@@ -136,6 +136,16 @@ What does not work yet on arismoko/horizon (each is marked `TODO(arismoko-api: .
 
 - The server folder is taken from the working directory (dedicated servers only).
 - `/npc`, `/citizens` and `/trait` sub-commands carry their own `citizens.*` nodes; the bare root commands carry none.
+- Needs engine (see ENGINE_NEEDS): the native screen of a mount (`HorseEquipper`, `player_open_mount_inventory`): a horse-like NPC opens its `inventory` chest instead. Every synched-only state is set now (round 8): axolotl -d, cat -l, panda -e, piglin dancing, wolf -i and enderman -a with `entity_set_synched_state`, sniffer state, spellcaster spell and villager -s with `entity_set_synched_value`.
+- Set on the entity with host calls (round 3): `disguise` (`entity_set_disguise`), `spectate` (`player_set_camera_entity`), warden poses, `targetable`, `leashable`, `trackingrange`, `activationrange`, `enderdragon --destroywalls`, and the synched states of allay, fox, panda, polar bear and vex. NPC mobs follow the game's own pathfinding (`mob_set_navigation_ticks` + `mob_move_to`); a host that refuses the switch keeps the straight-line walk.
+- Shops (`/npc shop`, `/npc showshop`, `/npc shopitem`, the `shop` trait): stored in `shops.yml` beside `saves.yml` in Citizens' format; the viewer, the settings/contents/page/item/action editors and the storage viewer are chest menus. Where Citizens uses the cursor you click one of your own stacks (display item, item action stacks), and its anvil text input is the player's next chat line (`null` clears). The `money` action and the editor's money button work through the `vault` mod's economy (the button only shows while an economy answers; descriptions use its format). The trader type opens a merchant screen (`player_open_merchant`) whose trades are the item costs; the game's trade rules take the payments, so purchase limits, commands and non-item actions of a trader shop do not run. Expressions (`` `...` `` with any prefix) run as Molang, the one engine Citizens registers; `papi()` goes through the PlaceholderAPI mod when it is installed, after the player placeholders `<player>`, `<p>`, `%player%`, `<player_uuid>`, `<world>`. A purchase tells other mods through `NpcEvent::ShopPurchase` (`NPCShopPurchaseEvent`). The shop permission action reaches LuckPerms through `lp user <uuid> permission set|unset` on the console. Quirks of the original kept on purpose: `/npc shopitem <shop> reset_purchases <number>` always answers "page not found", two editor buttons are hidden by later ones in the same slot, `giveItems` can drop later repeats of a shift-click purchase.
+- Behavior trees and expressions (`/npc behavior <file>`, `/npc eval`, the `behavior` trait): `behaviors/<file>.yml` trees run every tick (sequence, random, parallel, timeout, invert, loop, eval, if/else, the leaf behaviors of the registry, `/command` and `` `expression` `` lines); Molang with `mem`, `list`, `inv`, `item`, `papi`, the `npc.*`/`target.*`/`nav.*`/`nearby.*` values (nearby counts players only; `target.*` has no navigator target). Where the original's code cannot do what its comments say the intended behaviour is built (`wait 40`, a `parallel` container that runs, `wander` that picks a destination, an `if` keeps a following sibling); `break_block` walks up and breaks after one second.
+- `/npc equip`: the three-row menu has the body and saddle slots and a cosmetic row (the cosmetic item shows in place of the real one); a pig or strider gets the saddle hopper, an enderman the carried-block hopper, a sheep or horse-like NPC the editor mode (`/npc equip`, then right-click: shears, dye, or the NPC's inventory chest).
+- `/npc command` has every action: `add`, `remove`, `execute`, `forgetplayer`, `clearerror`, `errormessage`, `rememberlastused`/`persistsequence`, `permissions` (the temporary nodes go through LuckPerms `settemp`), `itemcost` (a chest), `cost`, `expcost`, `sequential`, `cycle`, `random`, `hideerrors`. Where the original reads the wrong argument (`rememberlastused true`, `errormessage <type> <text>` read one word) the port reads the argument that was meant.
+- `pathto cursor`, `tphere cursor` and `anchor -c` use the block the sender looks at (`level_clip` along the eye ray, 32 blocks for pathto and 64 for the others, fluids ignored).
+- Still open: `lookclose --perplayer` (`player_entity_rotation_for_viewer`), `/npc create -p` (`entity_spawn_packet_only`), `/npc fish cast_out` (`entity_launch_fishing_hook`). `hologram edit_npc` changes only text, shadowed and seethrough of the line.
+- Prices: creating an NPC costs `npc.defaults.npc-cost` (`[economy] npc-cost`, default 100) through the vault mod unless the creator holds `citizens.npc.ignore-cost` (operators of command-level do); a command's and the trait's own `cost` (money), `experienceCost` and `itemCost` are charged before the commands (the `ignoreerrors.*` nodes skip them); money goes through the `vault` mod when it is installed.
+- `/npc inventory` and `/npc drops` edit by clicks (take, deposit, drops chance), not by dragging; both traits use the CitizensAPI save layout; the `npc` flag runs as the console's `execute as` (see ENGINE_NEEDS `npc_run_command_as_entity`).
 - The `team add citizens_<colour>` console commands used for glow colours fail on arismoko's console (logged, glow colour falls back).
 
 ## Docs gaps
@@ -160,9 +170,7 @@ the mob-specific ones (`allay`, `armorstand`, `wolf`, `villager`, `cat`, `fox`, 
 type and the values, save under `traits.<modifier>.<key>` and complete in chat. Live on the entity: `armorstand`,
 `phantom`, `pufferfish`, `textdisplay`, `villager`; `speak` reaches players in range (5 blocks without `--range`),
 `panimate` plays the arm swings, `undo` takes back the last create or remove. Every other setting is saved and the
-reply says Horizon does not act on it yet. Still answered "not supported": `behavior`, `configgui`, `copier`,
-`disguise`, `drops`, `eval`, `inventory`, `jump`, `mount`, `shop`, `showshop`, `spectate`, `target`, `warden`
-(GUIs, editors, other plugins, or no host API). Pathfinding stays a straight line: see HMOD_PORT.md.
+reply says Horizon does not act on it yet. Still answered "not supported": `create -p` (a packet-only NPC), `create --model` (another plugin's models), `fish cast_out` (ENGINE_NEEDS `entity_launch_fishing_hook`) and the options listed under Known gaps. `list --filter` and the `lookclose --filter` permission clause treat the clause the way it was meant (the original splits the whole filter text on commas). Pathfinding uses the game's navigation where the host allows it: see HMOD_PORT.md.
 
 ## Licence
 
@@ -175,3 +183,5 @@ The first version was written without opening Citizens' source. Since then the c
 the source files in question are marked as derived from Citizens. Parts of Citizens' API
 (command framework, `Paginator`, `SpigotUtil`) are not in that repository, so their behaviour
 here is a guess where the Known gaps section says so. The tests use made-up NPCs.
+
+Chat editors (round 3): bare `/npc text` and `/npc path` take your next chat lines (`list`, `remove`, `clear`, `exit`; any other line is added as text), `/npc configgui` renames through one chat line. The commandtrait `npc` flag runs the line as the NPC's own entity (`entity_run_command`).

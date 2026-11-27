@@ -10,9 +10,10 @@
 //! - the save keys (`traits.<modifier>.*`, `metadata.<key>`) are this port's choice;
 //! - a flag nobody set reads as off, except `collidable`, which reads as on (an entity collides
 //!   unless told otherwise);
-//! - only `ai` changes the spawned entity (a non-player mob with AI on is summoned without
-//!   `NoAI`). Every other setting is saved and described, and the reply says it has no effect on
-//!   Horizon yet.
+//! - `ai`, `collidable` (a team without collision), `knockback`, `pickupitems` and `sitting` change
+//!   the spawned entity through its summon data; `leashable`, `targetable`, `trackingrange` and
+//!   `activationrange` are set on the entity with host calls (`entity_set`); every other setting is
+//!   saved and described, and the reply says it has no effect on Horizon yet.
 
 use super::*;
 
@@ -48,24 +49,25 @@ const SIMPLE: &[Simple] = &[
     Simple {
         name: "collidable",
         kind: Kind::Flag { on: "is now collidable", off: "is no longer collidable", flag: None, temp: false, default: true },
-        live: false,
+        live: true,
     },
-    flag("knockback", "now takes knockback", "no longer takes knockback", Some("explicit"), false, false),
+    flag("knockback", "now takes knockback", "no longer takes knockback", Some("explicit"), false, true),
     flag("leashable", "can now be leashed", "can no longer be leashed", None, false, false),
+    flag("nophysics", "will now ignore physics", "will no longer ignore physics", Some("explicit"), false, false),
     flag("passive", "no longer damages other entities", "now damages other entities", Some("set"), false, false),
-    flag("pickupitems", "can now pick up items", "can no longer pick up items", Some("set"), false, false),
-    flag("sitting", "is now sitting", "is no longer sitting", Some("explicit"), false, false),
+    flag("pickupitems", "can now pick up items", "can no longer pick up items", Some("set"), false, true),
+    flag("sitting", "is now sitting", "is no longer sitting", Some("explicit"), false, true),
     flag("swim", "will now swim", "will no longer swim", Some("set"), false, false),
     flag("targetable", "can now be targeted", "can no longer be targeted", None, false, false),
     Simple { name: "activationrange", kind: Kind::Number { label: "activation range", min: 0.0, integer: false }, live: false },
     Simple { name: "respawn", kind: Kind::Number { label: "respawn delay", min: -1.0, integer: true }, live: false },
-    Simple { name: "scaledmaxhealth", kind: Kind::Number { label: "scaled max health", min: 0.0, integer: false }, live: false },
+    Simple { name: "scaledmaxhealth", kind: Kind::Number { label: "scaled max health", min: 0.0, integer: false }, live: true },
     Simple { name: "trackingrange", kind: Kind::Number { label: "tracking range", min: -1.0, integer: false }, live: false },
 ];
 
 /// The sub-commands of this file.
 pub const NAMES: &[&str] = &[
-    "aggressive", "ai", "chunkload", "collidable", "knockback", "leashable", "passive", "pickupitems", "sitting", "swim",
+    "aggressive", "ai", "chunkload", "collidable", "knockback", "leashable", "nophysics", "passive", "pickupitems", "sitting", "swim",
     "targetable", "activationrange", "respawn", "scaledmaxhealth", "trackingrange", "playerlist", "skinlayers",
     "entitypose", "metadata",
 ];
@@ -114,6 +116,17 @@ pub fn run(w: &mut World, sender: &Sender, name: &str, args: &Args) -> Res {
 
 fn saved_bool(w: &World, id: i32, path: &[&str]) -> Option<bool> {
     w.saves.get(id).and_then(|n| n.map.at(path)).and_then(Node::as_bool)
+}
+
+/// The settings that are set on the entity through host calls, right away.
+fn applied(name: &str) -> bool {
+    matches!(name, "leashable" | "targetable" | "trackingrange" | "activationrange" | "nophysics")
+}
+
+fn finish_applied(w: &mut World, id: i32, out: Reply) -> Reply {
+    w.mark_dirty();
+    w.apply_settings(id);
+    out
 }
 
 fn finish(w: &mut World, id: i32, live: bool, mut out: Reply) -> Reply {
@@ -175,6 +188,9 @@ fn flag_cmd(
         npc.add_trait_name(name);
     }
     let out = ok(w, M_FLAG, &[&npc_name, if value { on } else { off }]);
+    if applied(name) {
+        return Ok(finish_applied(w, id, out));
+    }
     Ok(finish(w, id, spec.live, out))
 }
 
@@ -206,6 +222,9 @@ fn number_cmd(w: &mut World, sender: &Sender, spec: &Simple, label: &str, min: f
     }
     let shown = if integer { format!("{}", value as i64) } else { dec2(value) };
     let out = ok(w, M_NUM_SET, &[&npc_name, label, &shown]);
+    if applied(name) {
+        return Ok(finish_applied(w, id, out));
+    }
     Ok(finish(w, id, spec.live, out))
 }
 
@@ -348,6 +367,8 @@ fn metadata(w: &mut World, sender: &Sender, args: &Args) -> Res {
 mod tests {
     use super::*;
     use crate::horizon_citizens_core::config::Config;
+    use crate::horizon_citizens_core::entity_set::EntitySet;
+    use crate::horizon_citizens_core::world::Op;
 
     fn setup() -> (World, Sender) {
         let mut cfg = Config::default();
@@ -380,7 +401,7 @@ mod tests {
         let (mut w, s) = setup();
         let r = cmd(&mut w, &s, "npc leashable");
         assert_eq!(r[0], "&a&eBob&a can now be leashed.", "{r:?}");
-        assert!(r[1].contains("does not act on it"), "{r:?}");
+        assert_eq!(r.len(), 1, "set on the entity, nothing left to say: {r:?}");
         assert_eq!(flag_of(&w, "leashable"), Some(true));
         cmd(&mut w, &s, "npc leashable");
         assert_eq!(flag_of(&w, "leashable"), Some(false));
@@ -388,6 +409,46 @@ mod tests {
         assert_eq!(flag_of(&w, "swim"), Some(true));
         cmd(&mut w, &s, "npc aggressive true");
         assert_eq!(flag_of(&w, "aggressive"), Some(true));
+    }
+
+    fn entity_ops(w: &mut World) -> Vec<EntitySet> {
+        w.take_ops().into_iter().filter_map(|o| if let Op::Entity { entity: 77, set } = o { Some(set) } else { None }).collect()
+    }
+
+    fn join(w: &mut World) {
+        let uuid = w.saves.get(0).unwrap().uuid();
+        assert!(!w.on_entity_join("minecraft:overworld", 77, uuid, true));
+        w.take_ops();
+    }
+
+    #[test]
+    fn targetable_leashable_and_the_ranges_reach_the_entity() {
+        let (mut w, s) = setup();
+        join(&mut w);
+        cmd(&mut w, &s, "npc targetable");
+        assert!(entity_ops(&mut w).contains(&EntitySet::Targetable(true)));
+        cmd(&mut w, &s, "npc targetable");
+        assert!(entity_ops(&mut w).contains(&EntitySet::Targetable(false)));
+        cmd(&mut w, &s, "npc leashable");
+        assert!(entity_ops(&mut w).contains(&EntitySet::Leashable(true)));
+        cmd(&mut w, &s, "npc trackingrange 48");
+        assert!(entity_ops(&mut w).contains(&EntitySet::TrackingRange(Some(48.0))));
+        cmd(&mut w, &s, "npc trackingrange -1");
+        assert!(entity_ops(&mut w).contains(&EntitySet::TrackingRange(None)));
+        cmd(&mut w, &s, "npc activationrange 16");
+        assert!(entity_ops(&mut w).contains(&EntitySet::ActivationRange(Some(16.0))));
+    }
+
+    #[test]
+    fn saved_settings_are_set_again_when_the_entity_joins() {
+        let (mut w, s) = setup();
+        cmd(&mut w, &s, "npc leashable true");
+        cmd(&mut w, &s, "npc targetable false");
+        w.take_ops();
+        let uuid = w.saves.get(0).unwrap().uuid();
+        assert!(!w.on_entity_join("minecraft:overworld", 77, uuid, true));
+        let ops = entity_ops(&mut w);
+        assert!(ops.contains(&EntitySet::Leashable(true)) && ops.contains(&EntitySet::Targetable(false)), "{ops:?}");
     }
 
     #[test]

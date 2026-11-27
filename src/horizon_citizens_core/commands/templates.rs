@@ -61,7 +61,7 @@ pub const USAGES: &[&str] = &[
     "waypoints provider linear",
     "waypoints provider wander",
     "waypoints provider guided",
-    "waypoints disableteleport",
+    "waypoints hpa",
 ];
 
 const TEMPLATE_HELP: &[&str] = &[
@@ -71,7 +71,7 @@ const TEMPLATE_HELP: &[&str] = &[
 ];
 const WAYPOINT_HELP: &[&str] = &[
     "waypoints add [x] [y] [z] (world) (--index idx)",
-    "waypoints disableteleport",
+    "waypoints hpa",
     "waypoints provider [provider name]",
     "waypoints remove (x y z world) (--index idx)",
 ];
@@ -92,6 +92,7 @@ pub fn node(root: &str, sub: &str) -> &'static str {
         "remove" => "citizens.waypoints.remove",
         "provider" => "citizens.waypoints.provider",
         "disableteleport" => "citizens.waypoints.disableteleport",
+        "hpa" => "citizens.admin",
         _ => "citizens.waypoints.help",
     }
 }
@@ -395,7 +396,7 @@ pub fn waypoints(w: &mut World, sender: &Sender, rest: &str) -> Res {
     if sub.is_empty() || sub == "help" {
         return Ok(help(w, WAYPOINT_HELP));
     }
-    if !["add", "remove", "provider", "disableteleport"].contains(&sub.as_str()) {
+    if !["add", "remove", "provider", "disableteleport", "hpa"].contains(&sub.as_str()) {
         return Err(usage_text(w, WAYPOINT_HELP));
     }
     let id = target(w, sender)?;
@@ -440,6 +441,11 @@ pub fn waypoints(w: &mut World, sender: &Sender, rest: &str) -> Res {
             npc_mut(w, id)?.remove_waypoint(i);
             w.mark_dirty();
             Ok(ok(w, M_WP_REMOVED, &[&i.to_string()]))
+        }
+        "hpa" => {
+            // The original only prints a debug path of its hierarchical graph to the server's console.
+            eprintln!("[citizens] waypoints hpa: NPC {id} (the original prints a debug path here)");
+            Ok(Vec::new())
         }
         "provider" => {
             let Some(name) = words.first().map(|s| s.to_ascii_lowercase()) else {
