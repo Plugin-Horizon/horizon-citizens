@@ -49,9 +49,13 @@ static DAMAGE_FILTERS: RwLock<Vec<DamageFilter>> = RwLock::new(Vec::new());
 struct Snapshot {
     npcs: HashMap<u32, i32>,
     protected: HashSet<u32>,
+    /// Entities some NPC follows with `-p`.
+    protectees: HashSet<u32>,
 }
 static SNAPSHOT: RwLock<Option<Snapshot>> = RwLock::new(None);
 /// Damage seen by the hook, handed to the world at the next tick: (entity, amount, type, causing).
+/// Hits on followed entities (`follow -p`): (victim entity, causing entity).
+static PROTECT_SEEN: Mutex<Vec<(u32, i32)>> = Mutex::new(Vec::new());
 static DAMAGE_SEEN: Mutex<Vec<(u32, f32, String, i32)>> = Mutex::new(Vec::new());
 
 fn world_lock() -> MutexGuard<'static, Option<World>> {
@@ -86,6 +90,7 @@ pub fn refresh_snapshot() {
             .filter_map(|e| Some((e, w.npc_of_entity(e)?)))
             .collect(),
         protected: w.protected_entities().into_iter().collect(),
+        protectees: w.protectees().into_iter().map(|(e, _)| e).collect(),
     });
     *SNAPSHOT.write().unwrap_or_else(|e| e.into_inner()) = snap;
 }
@@ -101,6 +106,9 @@ pub fn on_damage(entity: i32, damage_type: &str, causing: i32, direct: i32, amou
         let Some(snap) = snap.as_ref() else {
             return DamageDecision::Pass;
         };
+        if causing > 0 && snap.protectees.contains(&entity) {
+            PROTECT_SEEN.lock().unwrap_or_else(|e| e.into_inner()).push((entity, causing));
+        }
         let Some(npc) = snap.npcs.get(&entity).copied() else {
             return DamageDecision::Pass;
         };
@@ -148,6 +156,11 @@ pub fn flush_damage(w: &mut World) {
     for (entity, amount, kind, causing) in seen {
         w.on_damaged(entity, amount, &kind, causing);
     }
+}
+
+/// The hits on followed entities since the last call: (victim entity, causing entity).
+pub fn take_protect_hits() -> Vec<(u32, i32)> {
+    std::mem::take(&mut *PROTECT_SEEN.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// Takes the queued game work and events (under the lock), for the glue to run outside it.
@@ -525,9 +538,54 @@ pub fn selected(player: u128) -> Option<i32> {
     with_world(|w| w.selected(player)).flatten()
 }
 
+/// `%citizens_*%` (`CitizensPlaceholders.onRequest`): the selected NPC's name, id and uuid, and the id of the
+/// NPC nearest to the player. `None` is the original's null (the placeholder stays as typed).
+pub fn placeholder_in(w: &World, player: Option<u128>, at: Option<&(String, Location)>, params: &str) -> Option<String> {
+    let selected = w.selected(player.unwrap_or(u128::MAX));
+    if selected.is_none() && params != "nearest_npc_id" {
+        return None;
+    }
+    let npc = selected.and_then(|id| w.saves.get(id));
+    match params {
+        "selected_npc_name" => Some(npc.map(|n| n.name()).unwrap_or_default()),
+        "selected_npc_id" => Some(npc.map(|n| n.id.to_string()).unwrap_or_default()),
+        "selected_npc_uuid" => Some(npc.and_then(|n| n.uuid()).map(crate::horizon_citizens_core::ids::format_uuid).unwrap_or_default()),
+        "nearest_npc_id" => {
+            player?;
+            let (dim, loc) = at?;
+            Some(crate::horizon_citizens_core::commands::nearest(w, dim, loc, 25.0).map(|id| id.to_string()).unwrap_or_default())
+        }
+        _ => None,
+    }
+}
+
+/// [`placeholder_in`] on the installed world.
+pub fn placeholder(player: Option<u128>, at: Option<&(String, Location)>, params: &str) -> Option<String> {
+    with_world(|w| placeholder_in(w, player, at, params)).flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_citizens_placeholders_answer_from_the_selected_npc() {
+        let mut cfg = Config::default();
+        cfg.skins.fetch = false;
+        let mut w = World::new(cfg, Saves::empty(), None);
+        let at = Location { world: "world".into(), x: 0.0, y: 64.0, z: 0.0, yaw: 0.0, pitch: 0.0, body_yaw: 0.0 };
+        let id = w.create("Guard", "PLAYER", at.clone(), None);
+        // Nothing selected: null, except the nearest id which is empty or an id.
+        assert_eq!(placeholder_in(&w, Some(1), None, "selected_npc_name"), None);
+        w.select(1, id);
+        assert_eq!(placeholder_in(&w, Some(1), None, "selected_npc_name").as_deref(), Some("Guard"));
+        assert_eq!(placeholder_in(&w, Some(1), None, "selected_npc_id"), Some(id.to_string()));
+        assert_eq!(placeholder_in(&w, Some(1), None, "selected_npc_uuid").map(|u| u.len()), Some(36));
+        assert_eq!(placeholder_in(&w, Some(1), None, "nope"), None);
+        // The console reads its own selection and has no nearest NPC.
+        assert_eq!(placeholder_in(&w, None, None, "nearest_npc_id"), None);
+    }
+
     use crate::horizon_citizens_core::config::Config;
     use crate::horizon_citizens_core::saves::Saves;
     use std::sync::atomic::{AtomicUsize, Ordering};

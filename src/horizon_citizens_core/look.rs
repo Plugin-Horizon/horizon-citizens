@@ -73,6 +73,43 @@ pub fn dist2(a: [f64; 3], b: [f64; 3]) -> f64 {
     (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)
 }
 
+/// The permission nodes a `lookclose --filter` needs (`permission=a,b` and `group=g` clauses; a group is the
+/// `group.<name>` node, as LuckPerms and Vault group checks give it).
+pub fn filter_nodes(filter: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for arg in filter.split(' ') {
+        let Some((kind, value)) = arg.split_once('=') else { continue };
+        match kind {
+            "permission" | "perm" => out.extend(value.split(',').filter(|v| !v.is_empty()).map(str::to_owned)),
+            "group" => out.extend(value.split(',').filter(|v| !v.is_empty()).map(|g| format!("group.{g}"))),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `SpigotUtil.parseEntityFilter`: every clause must hold. `type=` lists entity types (a player is `player`),
+/// `permission=`/`perm=` lists nodes it must have, `group=` lists groups. `held` holds the nodes each online player has.
+pub fn filter_passes(filter: &str, p: &PlayerView, held: &std::collections::HashMap<u128, std::collections::BTreeSet<String>>) -> bool {
+    let has = |node: &str| held.get(&p.uuid).is_some_and(|h| h.contains(node));
+    for arg in filter.split(' ') {
+        let Some((kind, value)) = arg.split_once('=') else { continue };
+        let ok = match kind {
+            "type" => value.split(',').any(|t| {
+                let t = t.trim().to_ascii_lowercase();
+                t.strip_prefix("minecraft:").unwrap_or(&t) == "player"
+            }),
+            "permission" | "perm" => value.split(',').all(has),
+            "group" => value.split(',').all(|g| has(&format!("group.{g}"))),
+            _ => true,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
 /// A small deterministic random source for random looks (xorshift).
 #[derive(Clone, Debug)]
 pub struct Rng(u64);
@@ -126,6 +163,20 @@ mod tests {
         assert_eq!(t.pos[0], 5.0, "the spectator is skipped");
         assert!(target(&players, "minecraft:the_end", eye([0.0, 64.0, 0.0]), 10.0).is_none());
         assert!(target(&players[3..], "minecraft:overworld", eye([0.0, 64.0, 0.0]), 10.0).is_none());
+    }
+
+    #[test]
+    fn filters() {
+        use std::collections::{BTreeSet, HashMap};
+        let a = p(1.0, 0.0, 0);
+        let mut held: HashMap<u128, BTreeSet<String>> = HashMap::new();
+        assert!(filter_passes("type=player", &a, &held));
+        assert!(!filter_passes("type=zombie,cow", &a, &held));
+        assert!(!filter_passes("type=player permission=vip.look", &a, &held));
+        held.insert(1, ["vip.look".to_owned(), "group.admin".to_owned()].into_iter().collect());
+        assert!(filter_passes("type=player permission=vip.look group=admin", &a, &held));
+        assert!(!filter_passes("group=mod", &a, &held));
+        assert_eq!(filter_nodes("perm=a,b group=g type=player"), vec!["a", "b", "group.g"]);
     }
 
     #[test]

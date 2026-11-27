@@ -210,9 +210,54 @@ pub fn fill_placeholders(s: &str, player: &str, npc_name: &str, npc_id: i32) -> 
         .replace("<id>", &npc_id.to_string())
 }
 
+/// Citizens' bystander line target list (`CitizensNPC.talk`): `format` is four parts split by `|`
+/// (first, further, last, "and others"), `max` is `chat.options.max-number-of-targets-to-show`.
+/// Returns None for a format without four parts or no names.
+pub fn format_targets(format: &str, names: &[String], max: usize) -> Option<String> {
+    let f: Vec<&str> = format.split('|').collect();
+    if f.len() != 4 || names.is_empty() {
+        return None;
+    }
+    let first = |n: &str| f[0].replace("<target>", n);
+    Some(if max == 1 {
+        first(&names[0]) + f[3]
+    } else if max == 2 || names.len() == 2 {
+        if names.len() == 2 {
+            first(&names[0]) + &f[2].replace("<target>", &names[1])
+        } else {
+            first(&names[0]) + &f[1].replace("<target>", &names[1]) + f[3]
+        }
+    } else if names.len() == 1 {
+        first(&names[0])
+    } else {
+        let mut t = first(&names[0]);
+        let mut x = 1;
+        while x < max.saturating_sub(1) && x < names.len() - 1 {
+            t += &f[1].replace("<target>", &names[x]);
+            x += 1;
+        }
+        if names.len() == max {
+            t += &f[2].replace("<target>", &names[x]);
+        } else {
+            t += f[3];
+        }
+        t
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bystander_targets_follow_the_default_format() {
+        let fmt = "<target>|, <target>| & <target>| & others";
+        let n = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(format_targets(fmt, &n(&["A", "B"]), 2).unwrap(), "A & B");
+        assert_eq!(format_targets(fmt, &n(&["A", "B", "C"]), 2).unwrap(), "A, B & others");
+        assert_eq!(format_targets(fmt, &n(&["A", "B", "C"]), 3).unwrap(), "A, B & C");
+        assert_eq!(format_targets(fmt, &n(&["A", "B"]), 1).unwrap(), "A & others");
+    }
 
     #[test]
     fn colours_become_components() {

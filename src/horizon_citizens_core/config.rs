@@ -25,9 +25,29 @@ pub struct Config {
     pub selection: Selection,
     pub talk: Talk,
     pub messages: Messages,
+    /// `general.reload-warning-enabled`: `/citizens reload` asks to be typed twice.
+    pub reload_warning_enabled: bool,
     /// Blocks around a player within which an NPC is (re)spawned when it is not out: its chunk is
     /// loaded there.
     pub spawn_radius: f64,
+    /// `npc.shops.*`: the shop settings.
+    pub shops: crate::horizon_citizens_core::shop::ShopsConfig,
+    pub economy: Economy,
+}
+
+/// What Citizens charges through the economy.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Economy {
+    /// `npc.defaults.npc-cost`: what creating an NPC costs a player without `citizens.npc.ignore-cost`
+    /// (only with an economy; operators of `command-level` pay nothing).
+    pub npc_cost: f64,
+}
+
+impl Default for Economy {
+    fn default() -> Self {
+        Economy { npc_cost: 100.0 }
+    }
 }
 
 impl Default for Config {
@@ -44,7 +64,10 @@ impl Default for Config {
             selection: Selection::default(),
             talk: Talk::default(),
             messages: Messages::default(),
+            reload_warning_enabled: true,
             spawn_radius: 96.0,
+            shops: Default::default(),
+            economy: Economy::default(),
         }
     }
 }
@@ -153,6 +176,9 @@ pub struct Skins {
     /// `general.authlib.profile-url`.
     pub profile_url: String,
     pub name_lookup_url: String,
+    /// `npc.skins.rotation-update-degrees`: the turn, in degrees, of a player towards an NPC that
+    /// makes the skin tracker send the NPC's look again.
+    pub rotation_update_degrees: f32,
 }
 
 impl Default for Skins {
@@ -162,6 +188,7 @@ impl Default for Skins {
             fetch: true,
             profile_url: "https://sessionserver.mojang.com/session/minecraft/profile/".into(),
             name_lookup_url: "https://api.mojang.com/users/profiles/minecraft/".into(),
+            rotation_update_degrees: 90.0,
         }
     }
 }
@@ -176,6 +203,38 @@ pub struct Commands {
     /// (with the console's rights: Horizon has no "run as this player" helper). Off: they are
     /// skipped with a log line.
     pub player_commands_via_execute: bool,
+    /// `npc.commands.error-messages.*`.
+    pub error_messages: ErrorMessages,
+}
+
+/// `npc.commands.error-messages.*` (Citizens' `Settings`): sent to a player whose click a command
+/// refuses. `{0}`, `{minutes}` and `{seconds_over}` are filled in; an empty text sends nothing.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ErrorMessages {
+    pub global_maximum_times_used: String,
+    pub maximum_times_used: String,
+    pub missing_item: String,
+    pub no_permission: String,
+    pub not_enough_experience: String,
+    pub not_enough_money: String,
+    pub on_cooldown: String,
+    pub on_global_cooldown: String,
+}
+
+impl Default for ErrorMessages {
+    fn default() -> Self {
+        ErrorMessages {
+            global_maximum_times_used: "You have reached the maximum number of uses ({0}).".into(),
+            maximum_times_used: "You have reached the maximum number of uses ({0}).".into(),
+            missing_item: "Missing {1} {0}".into(),
+            no_permission: "You don't have permission to do that.".into(),
+            not_enough_experience: "You need at least {0} experience.".into(),
+            not_enough_money: "You need at least ${0}.".into(),
+            on_cooldown: "Please wait for {minutes} minutes and {seconds_over} seconds.".into(),
+            on_global_cooldown: "Please wait for {minutes} minutes and {seconds_over} seconds.".into(),
+        }
+    }
 }
 
 impl Default for Commands {
@@ -183,6 +242,7 @@ impl Default for Commands {
         Commands {
             global_cooldown_ticks: 20,
             player_commands_via_execute: true,
+            error_messages: ErrorMessages::default(),
         }
     }
 }
@@ -212,12 +272,33 @@ impl Default for Selection {
 pub struct Talk {
     /// `<npc>` and `<text>` are filled in. Citizens' `npc.chat.format.no-targets`.
     pub format: String,
+    /// `npc.chat.options.multiple-targets-format`: four parts split by `|` (first, further, last,
+    /// "and others"), `<target>` filled in.
+    pub multiple_targets_format: String,
+    /// `npc.chat.format.to-target` (`with-target` in older configs): the line a targeted player gets.
+    pub to_target: String,
+    /// `npc.chat.format.with-target-to-bystanders` and `with-targets-to-bystanders`.
+    pub with_target_to_bystanders: String,
+    pub with_targets_to_bystanders: String,
+    /// `npc.chat.options.bystanders-hear-targeted-chat`.
+    pub bystanders_hear_targeted_chat: bool,
+    /// `npc.chat.options.max-number-of-targets-to-show`.
+    pub max_targets: usize,
+    /// `npc.chat.options.range`: how far bystanders are, in blocks.
+    pub range: f64,
 }
 
 impl Default for Talk {
     fn default() -> Self {
         Talk {
             format: "[<npc>]: <text>".into(),
+            multiple_targets_format: "<target>|, <target>| & <target>| & others".into(),
+            to_target: "<npc>: <text>".into(),
+            with_target_to_bystanders: "[<npc>] -> [<target>]: <text>".into(),
+            with_targets_to_bystanders: "[<npc>] -> [<targets>]: <text>".into(),
+            bystanders_hear_targeted_chat: false,
+            max_targets: 2,
+            range: 5.0,
         }
     }
 }
@@ -314,8 +395,62 @@ impl Config {
         if let Some(v) = text_of("npc.selection.message") {
             cfg.selection.message = v;
         }
+        if let Some(v) = float("npc.defaults.npc-cost").or_else(|| float("npc.default.npc-cost")) {
+            cfg.economy.npc_cost = v.max(0.0);
+        }
         if let Some(v) = text_of("npc.chat.format.no-targets") {
             cfg.talk.format = v;
+        }
+        if let Some(v) = text_of("npc.chat.format.to-target").or_else(|| text_of("npc.chat.format.with-target")) {
+            cfg.talk.to_target = v;
+        }
+        if let Some(v) = text_of("npc.chat.format.with-target-to-bystanders") {
+            cfg.talk.with_target_to_bystanders = v;
+        }
+        if let Some(v) = text_of("npc.chat.format.with-targets-to-bystanders") {
+            cfg.talk.with_targets_to_bystanders = v;
+        }
+        if let Some(v) = boolean("npc.chat.options.bystanders-hear-targeted-chat") {
+            cfg.talk.bystanders_hear_targeted_chat = v;
+        }
+        if let Some(v) = float("npc.chat.options.max-number-of-targets-to-show") {
+            cfg.talk.max_targets = v.max(0.0) as usize;
+        }
+        if let Some(v) = float("npc.chat.options.range") {
+            cfg.talk.range = v;
+        }
+        if let Some(v) = text_of("npc.chat.options.multiple-targets-format") {
+            cfg.talk.multiple_targets_format = v;
+        }
+        if let Some(v) = text_of("npc.defaults.shops.global-view-permission").or_else(|| text_of("npc.shops.global-view-permission")) {
+            cfg.shops.global_view_permission = v;
+        }
+        if let Some(v) = boolean("npc.shops.add-default-item-description") {
+            cfg.shops.add_default_item_description = v;
+        }
+        {
+            let d = &mut cfg.shops.default_item;
+            for (key, slot) in [
+                ("already-purchased-message", &mut d.already_purchased_message),
+                ("click-to-confirm-message", &mut d.click_to_confirm_message),
+                ("cost-message", &mut d.cost_message),
+                ("result-message", &mut d.result_message),
+                ("lore", &mut d.lore),
+                ("name", &mut d.name),
+            ] {
+                if let Some(v) = text_of(&format!("npc.shops.default-item.{key}")) {
+                    *slot = v;
+                }
+            }
+            if let Some(v) = boolean("npc.shops.default-item.max-repeats-on-shift-click") {
+                d.max_repeats_on_shift_click = v;
+            }
+            if let Some(v) = float("npc.shops.default-item.times-purchasable") {
+                d.times_purchasable = v as i32;
+            }
+            if let Some(v) = float("npc.shops.default-item.global-times-purchasable") {
+                d.global_times_purchasable = v as i32;
+            }
         }
         if let Some(file) = text_of("storage.file") {
             // Citizens keeps the file in its own folder.
@@ -413,8 +548,30 @@ pub const CITIZENS_CONFIG_KEYS: &[&str] = &[
     "general.authlib.profile-url",
     "npc.selection.item",
     "npc.selection.message",
+    "npc.defaults.npc-cost",
+    "npc.default.npc-cost",
     "npc.chat.format.no-targets",
+    "npc.chat.format.to-target",
+    "npc.chat.format.with-target",
+    "npc.chat.format.with-target-to-bystanders",
+    "npc.chat.format.with-targets-to-bystanders",
+    "npc.chat.options.bystanders-hear-targeted-chat",
+    "npc.chat.options.max-number-of-targets-to-show",
+    "npc.chat.options.range",
+    "npc.chat.options.multiple-targets-format",
     "storage.file",
+    "npc.defaults.shops.global-view-permission",
+    "npc.shops.global-view-permission",
+    "npc.shops.add-default-item-description",
+    "npc.shops.default-item.already-purchased-message",
+    "npc.shops.default-item.click-to-confirm-message",
+    "npc.shops.default-item.cost-message",
+    "npc.shops.default-item.result-message",
+    "npc.shops.default-item.lore",
+    "npc.shops.default-item.name",
+    "npc.shops.default-item.max-repeats-on-shift-click",
+    "npc.shops.default-item.times-purchasable",
+    "npc.shops.default-item.global-times-purchasable",
     "general.color-scheme.message",
     "general.color-scheme.message-highlight",
     "general.color-scheme.message-error",

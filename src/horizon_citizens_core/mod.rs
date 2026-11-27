@@ -3,14 +3,18 @@
 //! commands, waypoint walking, `/npc`, and the API other mods use. The game glue (`api/`) feeds
 //! it the hooks and runs what it asks for.
 pub mod api;
+pub mod behavior;
 pub mod commands;
 pub mod config;
+pub mod entity_set;
+pub mod expr;
 pub mod ids;
 pub mod items;
 pub mod javaser;
 pub mod look;
 pub mod npc;
 pub mod saves;
+pub mod shop;
 pub mod skin;
 pub mod spawn;
 pub mod text;
