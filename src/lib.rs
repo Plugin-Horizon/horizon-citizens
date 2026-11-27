@@ -9,7 +9,7 @@ pub mod horizon_citizens_core;
 mod cmdkit;
 use horizon_citizens_core as core;
 use mod_api::{
-    AttackEntityEvent, Command, CommandArgumentValue, CommandInvocation, CommandSource, Config,
+    AttackEntityEvent, ModServiceCallEvent, PayloadBytes, Command, CommandArgumentValue, CommandInvocation, CommandSource, Config,
     ConfigKind, ConfigLoadingEvent, ConfigReloadingEvent, EntityInteractEvent,
     EntityJoinLevelEvent, EntityLeaveLevelEvent, Flow, Hand, Hooks, HostSide, LevelRandomHost,
     LivingIncomingDamageEvent, NodeDefault, PermissionGatherNodesEvent, PermissionLevel, PermissionNode,
@@ -1024,6 +1024,22 @@ impl Citizens {
 
 #[mod_api::horizon_mod]
 impl Hooks for Citizens {
+    /// The placeholderapi mod's `%citizens_*%`: payload `<uuid as 32 hex digits, or -> <params>`.
+    fn mod_service_call(&self, host: &mut dyn ServerHost, event: &mut ModServiceCallEvent<'_>) -> Option<PayloadBytes> {
+        if event.service != "citizens:placeholder" {
+            return None;
+        }
+        let text = std::str::from_utf8(&event.payload.0).ok()?;
+        let (who, params) = text.split_once(' ')?;
+        let player = if who == "-" { None } else { Some(u128::from_str_radix(who, 16).ok()?) };
+        let at = player.and_then(|u| {
+            let info = player_info(&*host, host.player(u)?)?;
+            let cfg = api::with_world(|w| w.cfg.clone())?;
+            sender_of(&info, &cfg).at
+        });
+        api::placeholder(player, at.as_ref(), params.trim()).map(|v| PayloadBytes(v.into_bytes()))
+    }
+
     fn register_configs(&self, _host: HostSide, event: &mut RegisterConfigsEvent<'_>) {
         event.configs.push(Config::new(
             MOD_ID,

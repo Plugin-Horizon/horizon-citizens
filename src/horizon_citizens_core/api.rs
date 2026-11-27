@@ -538,9 +538,54 @@ pub fn selected(player: u128) -> Option<i32> {
     with_world(|w| w.selected(player)).flatten()
 }
 
+/// `%citizens_*%` (`CitizensPlaceholders.onRequest`): the selected NPC's name, id and uuid, and the id of the
+/// NPC nearest to the player. `None` is the original's null (the placeholder stays as typed).
+pub fn placeholder_in(w: &World, player: Option<u128>, at: Option<&(String, Location)>, params: &str) -> Option<String> {
+    let selected = w.selected(player.unwrap_or(u128::MAX));
+    if selected.is_none() && params != "nearest_npc_id" {
+        return None;
+    }
+    let npc = selected.and_then(|id| w.saves.get(id));
+    match params {
+        "selected_npc_name" => Some(npc.map(|n| n.name()).unwrap_or_default()),
+        "selected_npc_id" => Some(npc.map(|n| n.id.to_string()).unwrap_or_default()),
+        "selected_npc_uuid" => Some(npc.and_then(|n| n.uuid()).map(crate::horizon_citizens_core::ids::format_uuid).unwrap_or_default()),
+        "nearest_npc_id" => {
+            player?;
+            let (dim, loc) = at?;
+            Some(crate::horizon_citizens_core::commands::nearest(w, dim, loc, 25.0).map(|id| id.to_string()).unwrap_or_default())
+        }
+        _ => None,
+    }
+}
+
+/// [`placeholder_in`] on the installed world.
+pub fn placeholder(player: Option<u128>, at: Option<&(String, Location)>, params: &str) -> Option<String> {
+    with_world(|w| placeholder_in(w, player, at, params)).flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_citizens_placeholders_answer_from_the_selected_npc() {
+        let mut cfg = Config::default();
+        cfg.skins.fetch = false;
+        let mut w = World::new(cfg, Saves::empty(), None);
+        let at = Location { world: "world".into(), x: 0.0, y: 64.0, z: 0.0, yaw: 0.0, pitch: 0.0, body_yaw: 0.0 };
+        let id = w.create("Guard", "PLAYER", at.clone(), None);
+        // Nothing selected: null, except the nearest id which is empty or an id.
+        assert_eq!(placeholder_in(&w, Some(1), None, "selected_npc_name"), None);
+        w.select(1, id);
+        assert_eq!(placeholder_in(&w, Some(1), None, "selected_npc_name").as_deref(), Some("Guard"));
+        assert_eq!(placeholder_in(&w, Some(1), None, "selected_npc_id"), Some(id.to_string()));
+        assert_eq!(placeholder_in(&w, Some(1), None, "selected_npc_uuid").map(|u| u.len()), Some(36));
+        assert_eq!(placeholder_in(&w, Some(1), None, "nope"), None);
+        // The console reads its own selection and has no nearest NPC.
+        assert_eq!(placeholder_in(&w, None, None, "nearest_npc_id"), None);
+    }
+
     use crate::horizon_citizens_core::config::Config;
     use crate::horizon_citizens_core::saves::Saves;
     use std::sync::atomic::{AtomicUsize, Ordering};
