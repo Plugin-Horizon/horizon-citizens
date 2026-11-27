@@ -1657,7 +1657,8 @@ mod tree_tests {
     /// Paper's `/trait ` lists every modifier of the original, aliases and `help` included.
     #[test]
     fn trait_completes_the_modifiers_of_the_original() {
-        let want = ["*", "a", "add", "clearsaves", "help", "r", "rem", "remove"];
+        // Paper also lists `*`, the original's toggle modifier; a literal of the tree is lower case letters, digits, `_` and `-`.
+        let want = ["a", "add", "clearsaves", "help", "r", "rem", "remove"];
         assert_eq!(second_words("trait"), want);
     }
 

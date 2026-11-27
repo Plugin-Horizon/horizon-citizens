@@ -669,7 +669,8 @@ pub fn usages() -> Vec<String> {
     }
     out.extend(mobs::usages());
     out.push("npc".to_owned());
-    // Paper completes every modifier word of the original's `/trait` (aliases and `help` too); there is no `list`.
+    // Paper completes every modifier word of the original's `/trait` (aliases and `help` too; `*` cannot be a literal here, see
+    // ENGINE_NEEDS-round2); there is no `list`.
     for u in [
         "trait add <names:text>",
         "trait a <names:text>",
@@ -678,7 +679,6 @@ pub fn usages() -> Vec<String> {
         "trait r <names:text>",
         "trait clearsaves <names:text>",
         "trait help",
-        "trait * <names:text>",
         "trait <names:text>",
     ] {
         out.push(u.to_owned());
