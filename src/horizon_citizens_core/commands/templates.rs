@@ -61,7 +61,7 @@ pub const USAGES: &[&str] = &[
     "waypoints provider linear",
     "waypoints provider wander",
     "waypoints provider guided",
-    "waypoints disableteleport",
+    "waypoints hpa",
 ];
 
 const TEMPLATE_HELP: &[&str] = &[
@@ -71,7 +71,7 @@ const TEMPLATE_HELP: &[&str] = &[
 ];
 const WAYPOINT_HELP: &[&str] = &[
     "waypoints add [x] [y] [z] (world) (--index idx)",
-    "waypoints disableteleport",
+    "waypoints hpa",
     "waypoints provider [provider name]",
     "waypoints remove (x y z world) (--index idx)",
 ];

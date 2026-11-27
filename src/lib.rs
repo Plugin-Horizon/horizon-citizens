@@ -647,6 +647,9 @@ fn completing(usage: &str) -> String {
     if matches!(sub, "create" | "type" | "list" | "ls") || core::commands::is_type_alias(sub) {
         out = out.replace("<type:word>", "<type:citizens:entity_type>");
     }
+    if usage.starts_with("template ") || usage.starts_with("tpl ") {
+        out = out.replace("<args:text>", "<args:citizens:players>");
+    }
     if sub.starts_with("glow") {
         out = out.replace("<color:word>", "<color:citizens:colour>");
     }
@@ -1052,6 +1055,16 @@ impl Hooks for Citizens {
     fn register(&self, registrar: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
         registrar.register_command_argument("entity_type", Words(core::commands::entity_type_names));
         registrar.register_command_argument("colour", Words(core::commands::colour_names));
+        // `/template` and `/tpl` complete only the players' names (as Paper's default completion does).
+        cmdkit::register(registrar);
+    }
+
+    fn player_logged_in(&self, _: &mut dyn ServerHost, event: &mut mod_api::PlayerLoggedInEvent<'_>) {
+        cmdkit::joined(&event.name);
+    }
+
+    fn player_logged_out(&self, _: &mut dyn ServerHost, event: &mut mod_api::PlayerLoggedOutEvent<'_>) {
+        cmdkit::left(&event.name);
     }
 
     fn register_node_commands(&self, _host: &mut dyn ServerHost, event: &mut RegisterNodeCommandsEvent<'_>) {
@@ -1603,13 +1616,57 @@ mod tree_tests {
         for want in [
             "npc create", "npc remove", "npc select", "npc list", "npc tp", "npc tphere", "npc rename", "npc skin", "npc look",
             "npc gamemode", "npc speed", "npc follow", "npc pathto", "npc type", "npc glowing", "npc sheep", "npc owner", "npc command",
-            "npc hologram", "npc metadata", "trait add", "trait remove", "trait list", "citizens help", "citizens reload", "citizens save",
+            "npc hologram", "npc metadata", "trait add", "trait remove", "trait clearsaves", "citizens help", "citizens reload", "citizens save",
         ] {
             assert!(
                 paths.iter().any(|p| p == want || p.starts_with(&format!("{want} "))),
                 "{want}"
             );
         }
+    }
+
+    fn second_words(root: &str) -> Vec<String> {
+        let mut out: Vec<String> = core::commands::usages()
+            .iter()
+            .filter_map(|u| {
+                let mut words = u.split_whitespace();
+                (words.next() == Some(root)).then(|| words.next().unwrap_or("").to_owned())
+            })
+            .filter(|w| !w.is_empty() && !w.starts_with('<') && !w.starts_with('['))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Paper shows `/tpl ` and `/template ` only the online players' names (the original registers no sub-command words
+    /// for them): no literal word after the root, one argument that completes the names.
+    #[test]
+    fn template_and_tpl_complete_only_player_names() {
+        assert!(second_words("template").is_empty(), "{:?}", second_words("template"));
+        assert!(second_words("tpl").is_empty(), "{:?}", second_words("tpl"));
+        assert_eq!(completing("template <args:text>"), "template <args:citizens:players>");
+        assert_eq!(completing("tpl <args:text>"), "tpl <args:citizens:players>");
+        // The typed line still reaches the core whole.
+        let usages = core::commands::usages();
+        let words = ["tpl".to_owned()];
+        let values = [("args".to_owned(), "apply shop".to_owned())];
+        assert_eq!(cmdkit::rebuild_words(&usages, &words, &values), "tpl apply shop");
+    }
+
+    /// Paper's `/trait ` lists every modifier of the original, aliases and `help` included.
+    #[test]
+    fn trait_completes_the_modifiers_of_the_original() {
+        let want = ["*", "a", "add", "clearsaves", "help", "r", "rem", "remove"];
+        assert_eq!(second_words("trait"), want);
+    }
+
+    /// Paper's `/waypoints ` lists `hpa` (the wiki's `disableteleport` is not a modifier of the original).
+    #[test]
+    fn waypoints_completes_the_modifiers_of_the_original() {
+        let want = ["add", "help", "hpa", "provider", "remove"];
+        assert_eq!(second_words("waypoints"), want);
+        assert_eq!(second_words("wp"), want);
     }
 
     #[test]

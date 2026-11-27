@@ -58,6 +58,7 @@ pub fn register(registrar: &mut dyn Registrar) {
     registrar.register_command_argument("word", Ask { greedy: false, names: false });
     registrar.register_command_argument("text", Ask { greedy: true, names: false });
     registrar.register_command_argument("player", Ask { greedy: false, names: true });
+    registrar.register_command_argument("players", Ask { greedy: true, names: true });
 }
 
 /// The usage with its `word`, `text` and `player_name` arguments naming the mod's pass-through types (`player_name` as a

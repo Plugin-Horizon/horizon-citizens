@@ -669,17 +669,32 @@ pub fn usages() -> Vec<String> {
     }
     out.extend(mobs::usages());
     out.push("npc".to_owned());
-    for u in ["trait add <names:text>", "trait remove <names:text>", "trait list", "trait <names:text>"] {
+    // Paper completes every modifier word of the original's `/trait` (aliases and `help` too); there is no `list`.
+    for u in [
+        "trait add <names:text>",
+        "trait a <names:text>",
+        "trait remove <names:text>",
+        "trait rem <names:text>",
+        "trait r <names:text>",
+        "trait clearsaves <names:text>",
+        "trait help",
+        "trait * <names:text>",
+        "trait <names:text>",
+    ] {
         out.push(u.to_owned());
     }
     for u in ["citizens help", "citizens", "citizens save", "citizens reload", "citizens load"] {
         out.push(u.to_owned());
     }
-    // `/template` (`/tpl`) and `/waypoints` (`/wp`).
-    for u in templates::USAGES {
+    // `/template` (`/tpl`): Paper completes only the players' names, so the tree has one argument holding the whole line.
+    out.push("template".to_owned());
+    out.push("template <args:text>".to_owned());
+    out.push("tpl".to_owned());
+    out.push("tpl <args:text>".to_owned());
+    // `/waypoints` (`/wp`).
+    for u in templates::USAGES.iter().filter(|u| u.starts_with("waypoints")) {
         out.push((*u).to_owned());
-        let alias = if u.starts_with("template") { u.replacen("template", "tpl", 1) } else { u.replacen("waypoints", "wp", 1) };
-        out.push(alias);
+        out.push(u.replacen("waypoints", "wp", 1));
     }
     out
 }
@@ -5030,6 +5045,13 @@ pub const KNOWN_TRAITS: &[&str] = &[
     "woolcolor",
 ];
 
+const TRAIT_HELP: &[&str] = &[
+    "/trait add [trait name]...",
+    "/trait clearsaves [trait name]",
+    "/trait remove [trait names]...",
+    "/trait [trait name], [trait name]...",
+];
+
 fn trait_cmd(w: &mut World, sender: &Sender, rest: &str) -> Res {
     let id = target(w, sender)?;
     let rest = rest.trim();
@@ -5045,6 +5067,13 @@ fn trait_cmd(w: &mut World, sender: &Sender, rest: &str) -> Res {
             let mut out = say(w, &header(&format!("{} traits", name_at(w, id))));
             for t in names {
                 out.extend(say(w, &format!("     - [[{t}]]")));
+            }
+            return Ok(out);
+        }
+        "help" => {
+            let mut out = say(w, &header("Trait Help"));
+            for l in TRAIT_HELP {
+                out.extend(say(w, l));
             }
             return Ok(out);
         }
